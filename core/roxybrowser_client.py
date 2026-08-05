@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
 import time
 from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse
@@ -14,6 +15,11 @@ import requests
 from config import roxybrowser as _cfg
 
 logger = logging.getLogger(__name__)
+
+# Roxy /browser/create 不支持高并发：多任务同时 create 会返回
+# “正在创建中，请稍等！”。用进程内锁串行化创建，并在两次 create 之间留间隔。
+_CREATE_LOCK = threading.Lock()
+_LAST_CREATE_MONO = 0.0
 
 
 @dataclass
@@ -158,8 +164,26 @@ class RoxyBrowserClient:
             })
 
     @staticmethod
+    def _is_create_busy_error(exc: Exception) -> bool:
+        """Roxy 并发 create 时的忙等错误：可安全重试（尚未创建成功）。"""
+        text = str(exc or "")
+        lower = text.lower()
+        return (
+            "正在创建" in text
+            or "请稍等" in text
+            or "创建中" in text
+            or "稍后再试" in text
+            or "busy" in lower
+            or "too many" in lower
+            or "rate limit" in lower
+            or "try again" in lower
+        )
+
+    @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
         text = str(exc or "").lower()
+        if RoxyBrowserClient._is_create_busy_error(exc):
+            return True
         return (
             "timeout" in text
             or "timed out" in text
@@ -176,8 +200,11 @@ class RoxyBrowserClient:
         url = _join_url(self.api_base, path)
         method_u = method.upper()
         # create 超时后服务端可能已创建环境，直接重试可能产生孤儿环境；默认不重试 create。
+        # 但 “正在创建中，请稍等” 属于忙等、尚未创建成功，允许有限次重试。
         is_create = str(path or "").rstrip("/").endswith("/create") or "browser/create" in str(path or "")
-        max_attempts = 1 if is_create else max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
+        default_retries = max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
+        create_busy_retries = max(1, int(getattr(_cfg, "ROXY_CREATE_BUSY_RETRIES", 6) or 6))
+        max_attempts = create_busy_retries if is_create else default_retries
         base_delay = max(0.5, float(getattr(_cfg, "ROXY_API_RETRY_DELAY", 2) or 2))
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
@@ -212,10 +239,16 @@ class RoxyBrowserClient:
                 return payload if isinstance(payload, dict) else {"data": payload}
             except Exception as exc:
                 last_exc = exc
-                retryable = self._is_retryable_error(exc)
+                busy = self._is_create_busy_error(exc)
+                # create：只重试忙等；超时/其它错误不重试，避免重复创建孤儿环境。
+                if is_create:
+                    retryable = busy
+                    delay = max(1.0, float(getattr(_cfg, "ROXY_CREATE_BUSY_RETRY_DELAY", 1.5) or 1.5)) * attempt
+                else:
+                    retryable = self._is_retryable_error(exc)
+                    delay = base_delay * attempt
                 if attempt >= max_attempts or not retryable:
                     raise
-                delay = base_delay * attempt
                 logger.warning(
                     "[Roxy] API 请求失败，将在 %.1fs 后重试：%s %s attempt=%s/%s error=%s",
                     delay, method_u, path, attempt, max_attempts, exc,
@@ -434,7 +467,19 @@ class RoxyBrowserClient:
             body.get("osVersion") or "-",
             random_os_enabled,
         )
-        result = self.request(_cfg.ROXY_CREATE_METHOD, _cfg.ROXY_CREATE_PATH, json_body=body)
+
+        # 串行 create + 最小间隔：避免多 worker 同时 POST /browser/create 触发“正在创建中”。
+        min_interval = max(0.0, float(getattr(_cfg, "ROXY_CREATE_MIN_INTERVAL", 1.5) or 0.0))
+        global _LAST_CREATE_MONO
+        with _CREATE_LOCK:
+            now = time.monotonic()
+            wait = (_LAST_CREATE_MONO + min_interval) - now
+            if wait > 0:
+                logger.info("[Roxy] 创建环境排队等待 %.1fs（最小间隔 %.1fs）", wait, min_interval)
+                time.sleep(wait)
+            result = self.request(_cfg.ROXY_CREATE_METHOD, _cfg.ROXY_CREATE_PATH, json_body=body)
+            _LAST_CREATE_MONO = time.monotonic()
+
         profile_id = _first(result, [
             ("id",), ("dirId",), ("dir_id",), ("profile_id",), ("profileId",), ("browser_id",),
             ("data", "id"), ("data", "dirId"), ("data", "dir_id"),
