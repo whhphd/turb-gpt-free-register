@@ -289,13 +289,47 @@ def _human_click(driver, el, *, label: str = "") -> None:
 
 def _human_type_text(driver, el, value: str, *, clear: bool = True) -> None:
     """按字符/小段输入，触发真实 key events；失败时回退 JS setter。"""
+    text = str(value)
+
+    # Cloak/Playwright 适配层：逐字 + 反复 click 容易把光标点到中间导致乱码。
+    # 邮箱/密码等受控输入框用一次性 fill 更稳。
+    if driver.__class__.__name__ == "CloakSeleniumDriver":
+        try:
+            _human_scroll_to(driver, el)
+            try:
+                _human_click(driver, el, label="input_focus")
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].focus();", el)
+                except Exception:
+                    pass
+            if hasattr(el, "fill_text"):
+                el.fill_text(text)
+            else:
+                if clear:
+                    try:
+                        el.clear()
+                    except Exception:
+                        pass
+                el.send_keys(text)
+            driver.execute_script(
+                "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+                "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+                el,
+            )
+            return
+        except Exception as exc:
+            logger.debug("%s Cloak 一次性填入失败，回退 JS setter err=%s", _log_prefix(driver), exc)
+            _set_element_value(driver, el, text)
+            return
+
     if not _browser_actions_enabled():
         if clear:
             try:
                 el.clear()
             except Exception:
                 pass
-        el.send_keys(value)
+        el.send_keys(text)
         return
     try:
         _human_scroll_to(driver, el)
@@ -321,7 +355,6 @@ def _human_type_text(driver, el, value: str, *, clear: bool = True) -> None:
                     el.clear()
                 except Exception:
                     pass
-        text = str(value)
         i = 0
         while i < len(text):
             # 邮箱/密码整体仍逐字符，但偶尔 2 字符一组，节奏更自然。
@@ -338,7 +371,7 @@ def _human_type_text(driver, el, value: str, *, clear: bool = True) -> None:
         )
     except Exception as exc:
         logger.debug("%s 人工化输入失败，回退 JS setter err=%s", _log_prefix(driver), exc)
-        _set_element_value(driver, el, value)
+        _set_element_value(driver, el, text)
 
 
 def _page_warmup(driver, *, reason: str = "") -> None:
