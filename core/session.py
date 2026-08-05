@@ -18,12 +18,19 @@ from config import (
     ACCEPT_LANGUAGE, IMPERSONATE, OAI_CLIENT_BUILD_NUMBER, OAI_CLIENT_VERSION,
     REQUEST_TIMEOUT, pick_proxy, pick_browser_profile, validate_browser_profile,
 )
+from core.ca_bundle import ensure_ascii_ca_bundle, get_ca_bundle_path
 
 
 logger = logging.getLogger(__name__)
 _GEO_CACHE: dict[str, dict] = {}
 _GEO_CACHE_LOCK = threading.Lock()
 _CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
+
+# 项目路径含中文时，必须在创建 curl_cffi Session 前准备好 ASCII CA。
+try:
+    ensure_ascii_ca_bundle()
+except Exception as _ca_exc:
+    logger.warning("[CA] 初始化证书包失败，HTTPS 请求可能报 curl(77): %s", _ca_exc)
 
 
 class BrowserSession:
@@ -73,8 +80,18 @@ class BrowserSession:
         self.react_container_key = "__reactContainer$" + uuid.uuid4().hex[:11]
         self.react_resources_key = "__reactResources$" + self.react_container_key.split("$", 1)[1]
 
-        # 创建 curl_cffi 会话
-        self.session = Session(impersonate=IMPERSONATE)
+        # 创建 curl_cffi 会话。
+        # verify 显式指向纯 ASCII CA，避免 Windows 中文路径下 curl error 77。
+        ca_bundle = get_ca_bundle_path()
+        try:
+            self.session = Session(impersonate=IMPERSONATE, verify=ca_bundle)
+        except TypeError:
+            # 兼容旧版 curl_cffi 不接受 verify 构造参数的情况。
+            self.session = Session(impersonate=IMPERSONATE)
+            try:
+                self.session.verify = ca_bundle
+            except Exception:
+                pass
 
         # 设置代理
         if self.proxy:

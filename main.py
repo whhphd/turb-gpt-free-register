@@ -9,6 +9,12 @@ import logging
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
+try:
+    from core.ca_bundle import ensure_ascii_ca_bundle
+    ensure_ascii_ca_bundle()
+except Exception:
+    pass
+
 from config import REGISTER_EMAIL, REGISTER_NAME  # 这两个一般不在 WebUI 改
 # 可热改的，按模块属性方式读
 from config import twofa as _twofa_cfg

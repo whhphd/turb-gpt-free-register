@@ -18,6 +18,13 @@ import webbrowser
 from pathlib import Path
 from threading import Timer
 
+# 必须在导入会创建 curl_cffi Session 的模块前修复 CA 路径（中文目录兼容）。
+try:
+    from core.ca_bundle import ensure_ascii_ca_bundle
+    ensure_ascii_ca_bundle()
+except Exception as _ca_boot_exc:
+    logging.getLogger(__name__).warning("启动时 CA 证书初始化失败: %s", _ca_boot_exc)
+
 from webui.app import create_app
 from webui.auth import is_generated_code
 

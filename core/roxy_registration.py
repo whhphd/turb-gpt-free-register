@@ -938,6 +938,142 @@ def _is_email_login_page_still_present(driver) -> bool:
     return bool(state.get("inputs"))
 
 
+def _auth_error_page_state(driver) -> dict:
+    """识别 ChatGPT 登录/注册 Oops 错误页（/auth/error?error=undefined）。"""
+    try:
+        return driver.execute_script(r"""
+        const url = String(location.href || '');
+        const text = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+        const lower = text.toLowerCase();
+        const urlHit = /\/auth\/error/i.test(url) || /error=undefined/i.test(url);
+        const textHit = (
+          lower.includes('oops')
+          || lower.includes('ran into an issue')
+          || lower.includes('take a break')
+          || lower.includes('try again soon')
+          || text.includes('出了点问题')
+          || text.includes('请稍后再试')
+        );
+        const buttons = [...document.querySelectorAll('button,a,[role="button"]')]
+          .map(el => {
+            const t = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+            const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            return {text: t, lower: t.toLowerCase(), visible, disabled: !!el.disabled};
+          })
+          .filter(x => x.visible && x.text);
+        const goBack = buttons.find(x => (
+          x.lower === 'go back'
+          || x.lower === 'back'
+          || x.text === '返回'
+          || x.text === '后退'
+          || x.lower.includes('go back')
+        ));
+        return {
+          ok: true,
+          url,
+          urlHit,
+          textHit,
+          isError: Boolean(urlHit || (textHit && (urlHit || goBack))),
+          bodyPreview: text.slice(0, 180),
+          buttonTexts: buttons.map(x => x.text).slice(0, 10),
+          hasGoBack: Boolean(goBack),
+          goBackText: goBack ? goBack.text : '',
+        };
+        """) or {"ok": False, "isError": False}
+    except Exception as exc:
+        try:
+            url = str(getattr(driver, "current_url", "") or "")
+        except Exception:
+            url = ""
+        url_hit = "/auth/error" in url.lower() or "error=undefined" in url.lower()
+        return {
+            "ok": False,
+            "isError": url_hit,
+            "url": url,
+            "urlHit": url_hit,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _is_auth_error_page(driver) -> bool:
+    state = _auth_error_page_state(driver)
+    return bool(state.get("isError") or state.get("urlHit"))
+
+
+def _click_auth_error_go_back(driver) -> bool:
+    """点击 Oops 错误页上的 Go back / 返回。"""
+    try:
+        target = driver.execute_script(r"""
+        const buttons = [...document.querySelectorAll('button,a,[role="button"]')];
+        for (const el of buttons) {
+          const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+          const lower = text.toLowerCase();
+          const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+          if (!visible || el.disabled) continue;
+          if (lower === 'go back' || lower === 'back' || text === '返回' || text === '后退' || lower.includes('go back')) {
+            el.scrollIntoView({block:'center'});
+            return el;
+          }
+        }
+        return null;
+        """)
+        if not target:
+            return False
+        _human_click(driver, target, label="auth_error_go_back")
+        return True
+    except Exception as exc:
+        logger.warning("%s 点击 auth error Go back 失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:160])
+        return False
+
+
+def _recover_from_auth_error_page(driver, *, reason: str = "") -> bool:
+    """从 /auth/error Oops 页恢复：点 Go back，再重新打开登录页，便于重走邮箱步骤。
+
+    实测该页没有邮箱输入框；若只点返回不强制回 login，下一轮会报“找不到邮箱输入框”。
+    """
+    state = _auth_error_page_state(driver)
+    if not (state.get("isError") or state.get("urlHit")):
+        return False
+
+    logger.warning(
+        "%s 检测到 ChatGPT 登录错误页，按 Go back -> 重新打开登录页恢复：reason=%s url=%s body=%s buttons=%s",
+        _log_prefix(driver),
+        reason or "-",
+        str(state.get("url") or "")[:180],
+        str(state.get("bodyPreview") or "")[:120],
+        state.get("buttonTexts"),
+    )
+
+    clicked = _click_auth_error_go_back(driver)
+    if clicked:
+        logger.info("%s 已点击错误页 Go back（text=%s），等待页面回退", _log_prefix(driver), state.get("goBackText") or "Go back")
+        time.sleep(1.8)
+    else:
+        logger.info("%s 错误页未找到 Go back 按钮，将直接打开登录页", _log_prefix(driver))
+
+    # 无论 Go back 是否成功，都回到干净登录页，避免停在半残 SPA 状态。
+    try:
+        _safe_get(
+            driver,
+            "https://chatgpt.com/auth/login",
+            timeout=min(35, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)),
+            attempts=2,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
+        human_delay("navigate")
+        _page_warmup(driver, reason="auth_error_recover_login")
+        _maybe_accept(driver)
+    except Exception as exc:
+        logger.warning("%s 错误页恢复后打开登录页失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:160])
+        return clicked
+
+    if _is_auth_error_page(driver):
+        logger.warning("%s 恢复后仍停在错误页：%s", _log_prefix(driver), getattr(driver, "current_url", ""))
+        return False
+    logger.info("%s 错误页已恢复到登录流程，准备重新填写邮箱：url=%s", _log_prefix(driver), getattr(driver, "current_url", ""))
+    return True
+
+
 def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
     """邮箱提交后等待进入 password / otp / logged_in；仍停留邮箱页则返回 email_page。
 
@@ -947,6 +1083,9 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
     `auth.openai.com/...` 前过早重填，形成“提交 -> 清空 -> 重填”的循环。
     这里对 email_cleared 做去抖：只记录并继续观察几秒；若期间进入
     password/otp/login_password/logged_in 则按真实状态返回，持续清空才让上层重试。
+
+    另外：OpenAI 偶发跳到 `/auth/error?error=undefined`（Oops + Go back）。
+    该状态应尽快返回 `auth_error`，由上层点返回并重开登录页。
     """
     end = time.time() + timeout
     last = None
@@ -955,6 +1094,13 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
     cleared_recover_done = False
     expected_email = str(email or "").strip().lower()
     while time.time() < end:
+        if _is_auth_error_page(driver):
+            logger.warning(
+                "%s 邮箱提交后进入错误页：%s",
+                _log_prefix(driver),
+                _auth_error_page_state(driver),
+            )
+            return "auth_error"
         if _has_access_token(driver):
             return "logged_in"
         if _is_login_password_page(driver):
@@ -998,6 +1144,8 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
                 cleared_seen_at = None
             # 仍是当前邮箱页，继续短等。
         time.sleep(0.8)
+    if _is_auth_error_page(driver):
+        return "auth_error"
     logger.info("%s 邮箱提交后等待下一步超时，最后邮箱页状态=%s", _log_prefix(driver), last)
     return "email_page" if _is_email_login_page_still_present(driver) else "unknown"
 
@@ -1006,7 +1154,39 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
     """填写并提交邮箱，必须确认进入 password/otp/logged_in 才返回。"""
     last_state = None
     for attempt in range(1, attempts + 1):
-        _type_email_address(driver, email, timeout=20)
+        # 若上一轮掉进 Oops 错误页，先 Go back 并重开登录页，再填邮箱。
+        if _is_auth_error_page(driver):
+            _recover_from_auth_error_page(driver, reason=f"before_email_attempt_{attempt}")
+        try:
+            _type_email_address(driver, email, timeout=20)
+        except RuntimeError as exc:
+            # 典型：错误页上没有邮箱框。恢复后重试本轮。
+            if _is_auth_error_page(driver) or "找不到邮箱输入框" in str(exc):
+                logger.warning("%s 填写邮箱失败，尝试从错误页/异常页恢复后重试：%s", _log_prefix(driver), str(exc)[:180])
+                recovered = _recover_from_auth_error_page(driver, reason=f"type_email_failed_{attempt}")
+                # 即使不是标准 error 页，也强制回登录页再试一次本轮。
+                if not recovered and not _is_email_login_page_still_present(driver):
+                    try:
+                        _safe_get(
+                            driver,
+                            "https://chatgpt.com/auth/login",
+                            timeout=min(35, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)),
+                            attempts=2,
+                            accept_hosts=("chatgpt.com", "auth.openai.com"),
+                        )
+                        human_delay("navigate")
+                        _page_warmup(driver, reason="email_type_fail_relogin")
+                    except Exception:
+                        pass
+                try:
+                    _type_email_address(driver, email, timeout=20)
+                except Exception:
+                    last_state = _email_input_value_state(driver)
+                    logger.warning("%s 恢复后仍无法填写邮箱：attempt=%s/%s state=%s", _log_prefix(driver), attempt, attempts, last_state)
+                    time.sleep(1.0)
+                    continue
+            else:
+                raise
         state = _email_input_value_state(driver)
         last_state = state
         values = [str(i.get("value") or "") for i in (state.get("inputs") or [])]
@@ -1024,7 +1204,16 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
         if state_name in ("password", "otp", "logged_in"):
             logger.info("%s 邮箱提交后已进入下一步：%s", _log_prefix(driver), state_name)
             return state_name
+        if state_name == "auth_error" or _is_auth_error_page(driver):
+            _recover_from_auth_error_page(driver, reason=f"after_email_submit_{attempt}")
+            # 错误页恢复后多给一轮机会（不占用 attempt 上限的“空转”感，但仍计入循环）。
+            logger.warning("%s 邮箱提交撞到错误页，已 Go back 并重开登录页，准备第 %s/%s 轮重试", _log_prefix(driver), attempt, attempts)
+            time.sleep(1.2)
+            continue
         logger.warning("%s 邮箱提交后仍未进入下一步：%s，准备重填重试 state=%s", _log_prefix(driver), state_name, _email_input_value_state(driver))
+        # unknown 且 URL 像 error 时也走恢复。
+        if "auth/error" in str((_email_input_value_state(driver) or {}).get("url") or "").lower():
+            _recover_from_auth_error_page(driver, reason=f"unknown_error_url_{attempt}")
         time.sleep(1.0)
     raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
 
@@ -1862,23 +2051,308 @@ def _click_if_enabled_submit(driver) -> bool:
         return False
 
 
-def _read_chatgpt_session_once(driver) -> dict | None:
-    """当前页面必须在 chatgpt.com；读取 /api/auth/session，拿不到 token 返回 None。"""
+def _collect_chatgpt_cookies(driver) -> dict[str, str]:
+    """收集当前浏览器里 chatgpt.com 相关 cookie（含 HttpOnly session-token）。"""
+    cookies: dict[str, str] = {}
+    try:
+        for item in driver.get_cookies() or []:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            cookies[name] = str(item.get("value") or "")
+    except Exception:
+        pass
+    # CDP 可拿到更多分区/HttpOnly cookie，作为 get_cookies 的补充。
+    try:
+        if hasattr(driver, "execute_cdp_cmd"):
+            for source in (
+                {"urls": ["https://chatgpt.com", "https://auth.openai.com"]},
+                {},
+            ):
+                try:
+                    raw = driver.execute_cdp_cmd("Network.getCookies", source) or {}
+                except Exception:
+                    continue
+                for item in raw.get("cookies") or []:
+                    domain = str(item.get("domain") or "").lower()
+                    if "chatgpt.com" not in domain and "openai.com" not in domain:
+                        continue
+                    name = str(item.get("name") or "").strip()
+                    if name and name not in cookies:
+                        cookies[name] = str(item.get("value") or "")
+    except Exception:
+        pass
+    return cookies
+
+
+def _cookie_auth_hint(cookies: dict[str, str]) -> dict:
+    names = list(cookies.keys())
+    lower_names = [n.lower() for n in names]
+    return {
+        "count": len(names),
+        "has_session_token": any("session-token" in n for n in lower_names),
+        "has_next_auth": any("next-auth" in n for n in lower_names),
+        "names": names[:30],
+    }
+
+
+def _read_chatgpt_session_via_page(driver) -> dict | None:
+    """页面内 fetch 读取 session；用绝对 URL + 超时，避免 SPA 过渡期挂死。"""
     script = r"""
     const done = arguments[0];
-    fetch('/api/auth/session', {credentials: 'include'})
-      .then(r => r.json())
-      .then(j => done({ok: true, data: j}))
-      .catch(e => done({ok: false, error: String(e)}));
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort('session-timeout'), 8000);
+    fetch('https://chatgpt.com/api/auth/session', {
+      credentials: 'include',
+      cache: 'no-store',
+      headers: {'accept': 'application/json'},
+      signal: ctrl.signal,
+    })
+      .then(async r => {
+        let data = null;
+        try { data = await r.json(); } catch (e) { data = {text: await r.text()}; }
+        if (data && typeof data === 'object') data._http_status = r.status;
+        done({ok: true, data});
+      })
+      .catch(e => done({ok: false, error: String(e)}))
+      .finally(() => clearTimeout(timer));
     """
-    result = driver.execute_async_script(script)
+    try:
+        try:
+            driver.set_script_timeout(12)
+        except Exception:
+            pass
+        result = driver.execute_async_script(script)
+    except Exception as exc:
+        logger.info("%s 页面内读取 session 异常：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:160])
+        return None
     if result and result.get("ok"):
         data = result.get("data") or {}
-        if data.get("accessToken"):
-            logger.info("%s /api/auth/session 已返回 accessToken", _log_prefix(driver))
+        if isinstance(data, dict) and data.get("accessToken"):
+            logger.info("%s /api/auth/session 已返回 accessToken（via=page）", _log_prefix(driver))
             return data
-        logger.info("%s 等待 ChatGPT session 写入 accessToken，当前响应 keys=%s", _log_prefix(driver), list(data.keys()))
+        logger.info(
+            "%s 等待 ChatGPT session 写入 accessToken（via=page），keys=%s status=%s",
+            _log_prefix(driver),
+            list(data.keys()) if isinstance(data, dict) else type(data),
+            (data or {}).get("_http_status") if isinstance(data, dict) else "-",
+        )
+        return data if isinstance(data, dict) else None
+    if result and result.get("error"):
+        logger.info("%s 页面内读取 session 失败：%s", _log_prefix(driver), str(result.get("error"))[:160])
     return None
+
+
+def _read_chatgpt_session_via_cookies(driver) -> dict | None:
+    """用浏览器 cookie 在 Python 侧直拉 session，绕过页面 SPA/JS 过渡期。
+
+    实测：You're all set 点 Continue 后，UI 可能已进主站，但页面内 fetch 长时间
+    只返回 WARNING_BANNER；此时 cookie 里往往已有 session-token，直拉可立刻拿到 AT。
+    """
+    cookies = _collect_chatgpt_cookies(driver)
+    hint = _cookie_auth_hint(cookies)
+    if not cookies:
+        logger.info("%s cookie 兜底：当前未收集到 chatgpt cookie", _log_prefix(driver))
+        return None
+    if not (hint["has_session_token"] or hint["has_next_auth"]):
+        logger.info(
+            "%s cookie 兜底：尚未出现 session-token，cookie=%s",
+            _log_prefix(driver),
+            hint["names"],
+        )
+        return None
+
+    ua = "Mozilla/5.0"
+    try:
+        ua = str(driver.execute_script("return navigator.userAgent || ''") or "") or ua
+    except Exception:
+        pass
+
+    headers = {
+        "accept": "application/json",
+        "referer": "https://chatgpt.com/",
+        "user-agent": ua,
+        "cache-control": "no-cache",
+    }
+    try:
+        # 优先 curl_cffi（与项目其它协议请求一致），失败再退 requests。
+        try:
+            from curl_cffi import requests as crequests
+            resp = crequests.get(
+                "https://chatgpt.com/api/auth/session",
+                cookies=cookies,
+                headers=headers,
+                timeout=15,
+                impersonate="chrome",
+            )
+            data = resp.json()
+            status = getattr(resp, "status_code", None)
+        except Exception:
+            import requests
+            resp = requests.get(
+                "https://chatgpt.com/api/auth/session",
+                cookies=cookies,
+                headers=headers,
+                timeout=15,
+            )
+            data = resp.json()
+            status = resp.status_code
+        if isinstance(data, dict) and data.get("accessToken"):
+            logger.info("%s /api/auth/session 已返回 accessToken（via=cookies status=%s）", _log_prefix(driver), status)
+            return data
+        logger.info(
+            "%s cookie 兜底仍无 accessToken：status=%s keys=%s cookie_hint=%s",
+            _log_prefix(driver),
+            status,
+            list(data.keys()) if isinstance(data, dict) else type(data),
+            {k: hint[k] for k in ("count", "has_session_token", "has_next_auth", "names")},
+        )
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        logger.info("%s cookie 兜底读取 session 失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:180])
+        return None
+
+
+def _read_chatgpt_session_once(driver) -> dict | None:
+    """读取 /api/auth/session；优先页面 fetch，失败/无 token 时用 cookie 兜底。"""
+    page_data = None
+    try:
+        page_data = _read_chatgpt_session_via_page(driver)
+        if isinstance(page_data, dict) and page_data.get("accessToken"):
+            return page_data
+    except Exception as exc:
+        logger.info("%s 页面 session 读取异常：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:160])
+
+    cookie_data = _read_chatgpt_session_via_cookies(driver)
+    if isinstance(cookie_data, dict) and cookie_data.get("accessToken"):
+        return cookie_data
+
+    # 返回任意一侧的响应，方便上层日志；没有 token 时仍视为未就绪。
+    return None
+
+
+def _force_chatgpt_home_for_session(driver) -> None:
+    """点完 all-set Continue 后强制进主站，促发 session cookie 落稳。"""
+    try:
+        logger.info("%s 已点 Continue，强制打开 chatgpt.com 主站以落稳 session", _log_prefix(driver))
+        _safe_get(driver, "https://chatgpt.com/", timeout=25, attempts=2, accept_hosts=("chatgpt.com",))
+        time.sleep(1.2)
+    except Exception as exc:
+        logger.warning("%s 强制打开 chatgpt.com 失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:160])
+
+
+def _detect_all_set_page(driver) -> dict:
+    """识别注册完成后的 You're all set 中间页，并定位 Continue 按钮。
+
+    该页上 accessToken 往往还没写进 /api/auth/session，必须点 Continue 后
+    才会完成登录态落 cookie；之前只轮询 session 会一直空等，直到人工点按钮。
+    """
+    try:
+        return driver.execute_script(r"""
+        const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+        const lower = bodyText.toLowerCase();
+        const looksAllSet = (
+          lower.includes("you're all set")
+          || lower.includes('you are all set')
+          || lower.includes('all set')
+          || bodyText.includes('一切就绪')
+          || bodyText.includes('全部完成')
+          || bodyText.includes('已准备就绪')
+        );
+        const buttons = [...document.querySelectorAll('button, a[role="button"], input[type="submit"]')]
+          .map(el => {
+            const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+            const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            return {el, text, lower: text.toLowerCase(), visible, disabled: !!el.disabled};
+          })
+          .filter(x => x.visible && !x.disabled && x.text);
+
+        // 只点独立的 Continue / 继续，避开 Continue with Google/Apple/Microsoft。
+        const continueBtn = buttons.find(x => {
+          if (x.lower === 'continue' || x.text === '继续' || x.lower === 'get started' || x.text === '开始使用') {
+            return true;
+          }
+          if ((x.lower.startsWith('continue') || x.text.startsWith('继续')) &&
+              !/(google|apple|microsoft|sso|github|phone|手机|电话)/i.test(x.text)) {
+            return x.lower === 'continue' || /^continue\b/.test(x.lower) && x.lower.split(/\s+/).length <= 2;
+          }
+          return false;
+        });
+
+        return {
+          ok: true,
+          looksAllSet,
+          bodyPreview: bodyText.slice(0, 180),
+          buttonTexts: buttons.map(x => x.text).slice(0, 12),
+          hasContinue: Boolean(continueBtn),
+          continueText: continueBtn ? continueBtn.text : '',
+        };
+        """) or {"ok": False}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _click_all_set_continue_if_present(driver, *, clicked_once: bool) -> bool:
+    """若在 You're all set 页，点击 Continue 以完成登录态写入。
+
+    返回 True 表示本轮实际点过 Continue（调用方应避免重复狂点）。
+    """
+    if clicked_once:
+        return False
+
+    state = _detect_all_set_page(driver)
+    if not state.get("ok"):
+        return False
+    if not (state.get("looksAllSet") or state.get("hasContinue")):
+        return False
+    # 没有 all-set 文案时，仅当页面按钮几乎只有 Continue 才点，降低误点风险。
+    if not state.get("looksAllSet"):
+        texts = [str(t or "").strip().lower() for t in (state.get("buttonTexts") or [])]
+        if not texts or not all(t in ("continue", "继续", "get started", "开始使用") for t in texts if t):
+            return False
+    if not state.get("hasContinue"):
+        logger.info(
+            "%s 检测到疑似 all-set 页但未找到 Continue 按钮 body=%s buttons=%s",
+            _log_prefix(driver),
+            str(state.get("bodyPreview") or "")[:120],
+            state.get("buttonTexts"),
+        )
+        return False
+
+    try:
+        target = driver.execute_script(r"""
+        const buttons = [...document.querySelectorAll('button, a[role="button"], input[type="submit"]')];
+        for (const el of buttons) {
+          const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+          const lower = text.toLowerCase();
+          const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+          if (!visible || el.disabled) continue;
+          if (lower === 'continue' || text === '继续' || lower === 'get started' || text === '开始使用') {
+            el.scrollIntoView({block:'center'});
+            return el;
+          }
+          if ((lower.startsWith('continue') || text.startsWith('继续')) &&
+              !/(google|apple|microsoft|sso|github|phone|手机|电话)/i.test(text) &&
+              lower.split(/\s+/).length <= 2) {
+            el.scrollIntoView({block:'center'});
+            return el;
+          }
+        }
+        return null;
+        """)
+        if not target:
+            return False
+        logger.info(
+            "%s 检测到 You're all set 页，自动点击 Continue（text=%s）以写入 session/accessToken",
+            _log_prefix(driver),
+            state.get("continueText") or "Continue",
+        )
+        _human_click(driver, target, label="all_set_continue")
+        time.sleep(1.5)
+        return True
+    except Exception as exc:
+        logger.warning("%s 自动点击 all-set Continue 失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:180])
+        return False
 
 
 def _switch_to_chatgpt_window_if_any(driver) -> bool:
@@ -1913,13 +2387,22 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
     旧逻辑会在 auth.openai.com 上一直等到总超时，Cloak/部分 Chromium 场景下
     实际账号已创建成功但当前句柄 URL 没及时更新，导致白等 120 秒。现在只给
     自动跳转 `auto_jump_wait` 秒；超过后立即主动打开 chatgpt.com 读 session。
+
+    另外：注册成功后常见 You're all set 中间页，该页必须点 Continue 后
+    session cookie / accessToken 才会稳定写入；这里会自动点一次，并：
+    1) 强制打开 chatgpt.com 主站
+    2) 页面 fetch 失败/仅 WARNING_BANNER 时，用浏览器 cookie 直拉 session
     """
     end = time.time() + timeout
     auto_jump_end = time.time() + max(3, int(auto_jump_wait or 15))
     last_data = None
     forced_chatgpt_open = False
+    all_set_clicked = False
+    post_continue_refreshed = False
+    empty_rounds = 0
 
     while time.time() < end:
+        _check_manual_stop()
         try:
             current = str(driver.current_url or '')
         except Exception:
@@ -1942,14 +2425,29 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                 continue
 
         if 'chatgpt.com' in current:
+            # 先处理 You're all set：否则 /api/auth/session 可能一直没有 accessToken。
+            if _click_all_set_continue_if_present(driver, clicked_once=all_set_clicked):
+                all_set_clicked = True
+                if not post_continue_refreshed:
+                    _force_chatgpt_home_for_session(driver)
+                    post_continue_refreshed = True
+                try:
+                    current = str(driver.current_url or '')
+                except Exception:
+                    current = current
             try:
                 data = _read_chatgpt_session_once(driver)
-                if data:
+                if data and data.get("accessToken"):
                     return data
-                last_data = "session 暂无 accessToken"
+                last_data = f"session 暂无 accessToken keys={list((data or {}).keys()) if isinstance(data, dict) else []}"
+                empty_rounds += 1
+                # 点过 Continue 后仍只有 WARNING_BANNER：隔几轮再强制刷一次主站。
+                if all_set_clicked and empty_rounds >= 3 and empty_rounds % 3 == 0:
+                    _force_chatgpt_home_for_session(driver)
+                    post_continue_refreshed = True
             except Exception as exc:
                 last_data = f"{type(exc).__name__}: {exc}"
-        time.sleep(2)
+        time.sleep(1.2 if all_set_clicked else 2)
 
     raise RuntimeError(f"等待 /api/auth/session accessToken 超时，最后响应: {str(last_data)[:800]}")
 
