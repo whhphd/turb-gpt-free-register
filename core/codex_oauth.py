@@ -4,7 +4,8 @@
 
 旧方案"复用注册的已登录 session"会撞 /choose-an-account 卡死（React SPA 解析不出
 可提交字段）。新方案改为用**全新干净 session**从头登录，走 OpenAI 标准风控路径，
-手机号验证靠接码平台自动收码，当前通过 core.sms_provider 支持 GrizzlySMS 和 L_API.md
+手机号验证靠接码平台自动收码，当前通过 core.sms_provider 支持
+GrizzlySMS / HeroSMS / SMSBower（SMS-Activate 兼容，OpenAI service=dr）以及 L/H 本地取号
 定义的本地 L 取号服务。
 
 完整接口链（2026-06-15 浏览器抓包确认，均 POST auth.openai.com，json）：
@@ -168,8 +169,58 @@ def _ensure_oai_context_url(auth_url: str, session: BrowserSession) -> str:
 # CPA 管理接口：授权地址由 CPA 生成，成功回调提交给 CPA
 # ============================================================
 
+def _sub2_configured() -> bool:
+    """判断 sub2api 管理接口是否已配置到可用状态。"""
+    try:
+        from config import sub2api as _sub2_cfg
+    except Exception:
+        return False
+    base = str(
+        getattr(_sub2_cfg, "SUB2API_API_BASE", "")
+        or getattr(_sub2_cfg, "SUB2_CODEX_API_BASE", "")
+        or ""
+    ).strip()
+    key = str(
+        getattr(_sub2_cfg, "SUB2_CODEX_API_TOKEN", "")
+        or getattr(_sub2_cfg, "SUB2API_API_KEY", "")
+        or getattr(_sub2_cfg, "SUB2API_API_TOKEN", "")
+        or ""
+    ).strip()
+    return bool(base and key)
+
+
+def _cpa_configured() -> bool:
+    url = str(getattr(_cfg, "CPA_MANAGEMENT_URL", "") or "").strip()
+    key = str(getattr(_cfg, "CPA_MANAGEMENT_KEY", "") or "").strip()
+    return bool(url and key)
+
+
 def _codex_auth_url_source() -> str:
-    return str(getattr(_cfg, "CODEX_AUTH_URL_SOURCE", "cpa") or "cpa").strip().lower()
+    """
+    解析授权地址来源。
+
+    默认 local：本程序自己做 PKCE + 换 token + 落盘，不依赖 CPA/sub2 admin key。
+    显式配置 cpa/sub2 但密钥缺失时，自动回退 local。
+    """
+    raw = str(getattr(_cfg, "CODEX_AUTH_URL_SOURCE", "local") or "local").strip().lower()
+    # 兼容别名
+    if raw in ("sub2api", "sub2_api", "sub"):
+        raw = "sub2"
+    if raw in ("self", "pkce", "native"):
+        raw = "local"
+    if raw == "cpa" and not _cpa_configured():
+        logger.warning(
+            "[Codex] CODEX_AUTH_URL_SOURCE=cpa 但未配置 CPA_MANAGEMENT_KEY，"
+            "已自动改用 local（本程序自行换 token 并保存凭据）"
+        )
+        return "local"
+    if raw == "sub2" and not _sub2_configured():
+        logger.warning(
+            "[Codex] CODEX_AUTH_URL_SOURCE=sub2 但未配置 SUB2API_API_BASE/KEY，"
+            "已自动改用 local（本程序自行换 token 并保存凭据）"
+        )
+        return "local"
+    return raw or "local"
 
 
 def _cpa_management_origin() -> str:
@@ -263,6 +314,30 @@ def _sub2_codex_headers() -> dict:
     return headers
 
 
+def _sub2_extract_error_message(payload: dict | None, fallback: str = "") -> str:
+    if not isinstance(payload, dict):
+        return fallback
+    for key in ("error", "message", "detail", "reason", "msg"):
+        val = payload.get(key)
+        if isinstance(val, dict):
+            nested = val.get("message") or val.get("error") or val.get("detail") or ""
+            if nested:
+                return str(nested)
+        if val not in (None, ""):
+            # sub2api 成功响应 message=success，失败时 message 才是错误
+            text = str(val)
+            if key == "message" and text.strip().lower() in ("success", "ok", "true"):
+                continue
+            return text
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for key in ("error", "message", "detail", "reason"):
+            val = data.get(key)
+            if val not in (None, ""):
+                return str(val)
+    return fallback
+
+
 def _sub2_codex_request_json(method: str, path: str, body: dict | None = None) -> dict:
     from config import sub2api as _sub2_cfg
     base = _sub2_codex_base()
@@ -283,14 +358,21 @@ def _sub2_codex_request_json(method: str, path: str, body: dict | None = None) -
         except Exception:
             payload = {}
         if resp.status_code < 200 or resp.status_code >= 300:
-            msg = ""
-            if isinstance(payload, dict):
-                msg = payload.get("error") or payload.get("message") or payload.get("detail") or payload.get("reason") or ""
+            msg = _sub2_extract_error_message(payload if isinstance(payload, dict) else None, "")
             raise RuntimeError(
                 f"[Codex][sub2] 接口失败 {method.upper()} {normalized_path} status={resp.status_code}: "
                 f"{msg or (resp.text or '')[:300]}"
             )
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        # sub2api 统一 envelope：{"code":0,"message":"success","data":...}
+        code = payload.get("code")
+        if code not in (None, 0, "0", "success", "ok", True):
+            msg = _sub2_extract_error_message(payload, f"code={code}")
+            raise RuntimeError(
+                f"[Codex][sub2] 接口业务失败 {method.upper()} {normalized_path}: {msg}"
+            )
+        return payload
     finally:
         try:
             session.close()
@@ -299,10 +381,20 @@ def _sub2_codex_request_json(method: str, path: str, body: dict | None = None) -
 
 
 def _request_sub2_authorize_url() -> dict:
-    """从 sub2 生成 Codex OAuth 授权地址；本地不生成 PKCE。"""
+    """从 sub2api 生成 Codex OAuth 授权地址；本地不生成 PKCE。
+
+    对接：POST /api/v1/admin/openai/generate-auth-url
+    响应 data: {auth_url, session_id}（state 从 auth_url 解析）
+    """
     from config import sub2api as _sub2_cfg
     path = str(getattr(_sub2_cfg, "SUB2_CODEX_AUTH_URL_PATH", "/api/v1/admin/openai/generate-auth-url") or "/api/v1/admin/openai/generate-auth-url")
-    logger.info("[Codex][sub2] 正在通过 sub2 接口生成授权地址...")
+    if not _sub2_configured():
+        raise RuntimeError(
+            "[Codex][sub2] 尚未配置 SUB2API_API_BASE / SUB2API_API_KEY，"
+            "无法通过 sub2api 生成授权地址"
+        )
+    logger.info("[Codex][sub2] 正在通过 sub2api 管理接口生成授权地址... base=%s path=%s", _sub2_codex_base(), path)
+    # 空 body 即可；可选 proxy_id / redirect_uri，当前用 sub2api 默认 localhost:1455 callback
     payload = _sub2_codex_request_json("POST", path, {})
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     auth_url = _first_non_empty(
@@ -319,13 +411,13 @@ def _request_sub2_authorize_url() -> dict:
         _extract_state_from_auth_url(auth_url),
     )
     if not auth_url.startswith("http"):
-        raise RuntimeError(f"[Codex][sub2] sub2 未返回有效 auth_url: {payload}")
+        raise RuntimeError(f"[Codex][sub2] sub2api 未返回有效 auth_url: {payload}")
     if not state:
         raise RuntimeError("[Codex][sub2] 授权地址缺少 state")
-    logger.info("[Codex][sub2] 已获取授权地址，state=%s...", state[:12])
+    logger.info("[Codex][sub2] 已获取授权地址 session_id=%s state=%s...", session_id or "-", state[:12])
     logger.info("[Codex][sub2] 完整授权地址: %s", auth_url)
     if not session_id:
-        logger.warning("[Codex][sub2] 授权地址响应缺少 session_id，后续 exchange-code 可能失败")
+        logger.warning("[Codex][sub2] 授权地址响应缺少 session_id，后续 create-from-oauth 会失败")
     return {"auth_url": auth_url, "state": state, "session_id": session_id, "origin": _sub2_codex_base(), "raw": payload}
 
 
@@ -349,8 +441,18 @@ def _summarize_sub2_response(payload: dict) -> str:
     return str(payload)[:300]
 
 
-def _submit_sub2_callback(callback_url: str, *, session_id: str = "", redirect_uri: str = "") -> dict:
-    """提交 OAuth callback 给 sub2。"""
+def _submit_sub2_callback(
+    callback_url: str,
+    *,
+    session_id: str = "",
+    redirect_uri: str = "",
+    name: str = "",
+) -> dict:
+    """提交 OAuth callback 给 sub2api。
+
+    默认对接：POST /api/v1/admin/openai/create-from-oauth
+    body: session_id + code + state (+ redirect_uri/name/concurrency/priority)
+    """
     from config import sub2api as _sub2_cfg
     path = str(getattr(_sub2_cfg, "SUB2_CODEX_CALLBACK_PATH", "/api/v1/admin/openai/create-from-oauth") or "/api/v1/admin/openai/create-from-oauth")
     mode = str(getattr(_sub2_cfg, "SUB2_CODEX_CALLBACK_PAYLOAD_MODE", "create_from_oauth") or "create_from_oauth").strip().lower()
@@ -364,7 +466,7 @@ def _submit_sub2_callback(callback_url: str, *, session_id: str = "", redirect_u
         code = (qs.get("code") or [""])[0]
         state = (qs.get("state") or [""])[0]
         if not session_id:
-            raise RuntimeError("[Codex][sub2] exchange-code 缺少 session_id")
+            raise RuntimeError("[Codex][sub2] create-from-oauth 缺少 session_id（generate-auth-url 应返回）")
         if not code:
             raise RuntimeError(f"[Codex][sub2] callback_url 缺少 code: {callback_url}")
         if not state:
@@ -372,16 +474,21 @@ def _submit_sub2_callback(callback_url: str, *, session_id: str = "", redirect_u
         body = {"session_id": session_id, "code": code, "state": state}
         if redirect_uri:
             body["redirect_uri"] = redirect_uri
+        if name:
+            body["name"] = str(name).strip()
         if mode in {"create_from_oauth", "create-from-oauth", "create_oauth_account"}:
             body.setdefault("concurrency", 3)
             body.setdefault("priority", 50)
+        if mode in {"exchange_code", "exchange-code"}:
+            # 仅换 token：走 exchange-code 路径
+            path = str(getattr(_sub2_cfg, "SUB2_CODEX_EXCHANGE_PATH", "/api/v1/admin/openai/exchange-code") or "/api/v1/admin/openai/exchange-code")
 
     max_attempts = max(1, int(getattr(_cfg, "CPA_CALLBACK_SUBMIT_RETRIES", 5) or 5))
     base_delay = max(1.0, float(getattr(_cfg, "CPA_CALLBACK_SUBMIT_RETRY_DELAY", 6) or 6))
     last_exc = None
     for attempt in range(1, max_attempts + 1):
         try:
-            logger.info("[Codex][sub2] 正在上传 OAuth callback（第 %s/%s 次）... callback=%s", attempt, max_attempts, callback_url)
+            logger.info("[Codex][sub2] 正在上传 OAuth callback 到 sub2api（第 %s/%s 次）... path=%s callback=%s", attempt, max_attempts, path, callback_url)
             payload = _sub2_codex_request_json("POST", path, body)
             logger.info("[Codex][sub2] callback 已上传并处理完成（第 %s 次成功）响应=%s", attempt, _summarize_sub2_response(payload))
             return payload
@@ -895,8 +1002,8 @@ def _do_phone_verification(session: BrowserSession) -> None:
                     _sleep_before_phone_retry(attempt, max_retries)
                     continue
 
-                # 通知平台短信已发出（status=1）
-                sms_provider.set_status(activation_id, 1, http=http)
+                # 通知平台短信已发出（status=1）；BAD_STATUS 等失败不能中断等码
+                sms_provider.mark_sms_sent(activation_id, http=http)
 
                 # 定时轮询接码平台获取短信。wait_for_sms_code 内部按 SMS_POLL_INTERVAL 轮询，
                 # 最长等待 SMS_CODE_WAIT；超时立即取消当前号并换号。
@@ -1123,19 +1230,85 @@ def _parse_id_token(id_token: str) -> dict:
 
 
 def build_codex_storage(token_resp: dict, id_claims: dict) -> dict:
-    """组装 CLIProxyAPI CodexTokenStorage JSON 结构。"""
+    """组装 CLIProxyAPI CodexTokenStorage JSON 结构（含导出 sub2 格式所需字段）。"""
     expires_in = token_resp.get("expires_in", 0) or 0
     expired_dt = datetime.now(timezone.utc) + _timedelta_seconds(expires_in)
     last_refresh_dt = datetime.now(timezone.utc)
+    plan = str(id_claims.get("plan_type") or "").strip()
+    email = str(id_claims.get("email") or "").strip()
+    account_id = str(id_claims.get("account_id") or "").strip()
     return {
         "id_token": token_resp.get("id_token", ""),
         "access_token": token_resp.get("access_token", ""),
         "refresh_token": token_resp.get("refresh_token", ""),
-        "account_id": id_claims.get("account_id", ""),
+        "account_id": account_id,
+        "chatgpt_account_id": account_id,
+        "client_id": str(getattr(_cfg, "CODEX_CLIENT_ID", "") or ""),
+        "plan_type": plan,
+        "chatgpt_plan_type": plan,
         "last_refresh": last_refresh_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "email": id_claims.get("email", ""),
+        "email": email,
         "type": "codex",
         "expired": expired_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "expires_at": expired_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def complete_local_codex_oauth(
+    *,
+    email: str,
+    code: str,
+    code_verifier: str,
+    callback_url: str = "",
+    proxy: str | None = None,
+) -> dict:
+    """
+    local 模式收尾：用本程序 PKCE verifier 换 token，并把完整凭据落盘。
+
+    不依赖 CPA / sub2api admin key。返回 {email, path, storage, plan, callback_url}。
+    """
+    if not code_verifier:
+        raise RuntimeError("[Codex] local 模式缺少 code_verifier，无法换 token")
+    if not code:
+        raise RuntimeError("[Codex] local 模式缺少 authorization code")
+
+    session = BrowserSession(proxy=proxy)
+    try:
+        token_resp = exchange_codex_token(session, code, code_verifier)
+    finally:
+        try:
+            # BrowserSession 可能没有 close；忽略
+            closer = getattr(session, "close", None)
+            if callable(closer):
+                closer()
+        except Exception:
+            pass
+
+    id_claims = _parse_id_token(token_resp.get("id_token", ""))
+    effective_email = str(id_claims.get("email") or email or "").strip() or email
+    storage = build_codex_storage(token_resp, id_claims)
+    # 确保邮箱写入 storage，便于后续导出
+    if not storage.get("email"):
+        storage["email"] = effective_email
+    plan = str(id_claims.get("plan_type") or storage.get("plan_type") or "").strip()
+    path = save_codex_credential(storage, effective_email, plan)
+
+    has_rt = bool(storage.get("refresh_token"))
+    has_at = bool(storage.get("access_token"))
+    logger.info(
+        "[Codex][local] 凭据已保存：email=%s plan=%s path=%s has_rt=%s has_at=%s",
+        effective_email, plan or "-", path, has_rt, has_at,
+    )
+    if not has_rt:
+        logger.warning("[Codex][local] 警告：token 响应缺少 refresh_token，后续导出/续期可能不可用")
+
+    return {
+        "email": effective_email,
+        "path": path,
+        "storage": storage,
+        "plan": plan,
+        "callback_url": callback_url,
+        "account_id": storage.get("account_id") or "",
     }
 
 
@@ -1269,6 +1442,9 @@ def _save_sub2_local_record(
         sub2_origin = _sub2_codex_base()
     except Exception:
         sub2_origin = ""
+    # create-from-oauth 的 data 里通常有 account id，回执里一并抽出方便后续导出
+    submit_data = submit_payload.get("data") if isinstance(submit_payload, dict) and isinstance(submit_payload.get("data"), dict) else {}
+    account_id = submit_data.get("id") if isinstance(submit_data, dict) else None
     record = {
         "type": "codex_sub2_callback",
         "email": email,
@@ -1276,12 +1452,339 @@ def _save_sub2_local_record(
         "auth_url": auth_url,
         "callback_url": callback_url,
         "sub2_origin": sub2_origin,
+        "sub2_account_id": account_id,
         "sub2_submit_response": submit_payload,
         "submitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "note": "授权地址由 sub2 生成；callback 已上传给 sub2。若 sub2 响应未包含 token，本文件为本地回执记录。",
+        "note": "授权地址由 sub2 生成；callback 已上传给 sub2。若 sub2 响应未包含 token，本文件为本地回执记录。下载 sub2api 格式时会按 account_id/email 从 sub2api 导出完整 credentials。",
     }
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def extract_sub2_account_ref(local: dict | None) -> dict:
+    """从本地 codex 记录解析 sub2api 账号引用：{id, email, plan}。"""
+    local = local if isinstance(local, dict) else {}
+    email = str(local.get("email") or "").strip()
+    plan = str(local.get("plan") or local.get("plan_type") or local.get("chatgpt_plan_type") or "").strip()
+    account_id = local.get("sub2_account_id") or local.get("account_id") or local.get("id")
+
+    submit = local.get("sub2_submit_response") if isinstance(local.get("sub2_submit_response"), dict) else {}
+    data = submit.get("data") if isinstance(submit.get("data"), dict) else {}
+    if account_id in (None, "", 0, "0"):
+        account_id = data.get("id")
+    if not email:
+        email = str(data.get("name") or "").strip()
+    creds = data.get("credentials") if isinstance(data.get("credentials"), dict) else {}
+    if not email:
+        email = str(creds.get("email") or "").strip()
+    if not plan:
+        plan = str(creds.get("plan_type") or "").strip()
+    if not email:
+        email = str(local.get("email") or "").strip()
+
+    try:
+        account_id_i = int(account_id) if account_id not in (None, "") else None
+    except (TypeError, ValueError):
+        account_id_i = None
+    return {"id": account_id_i, "email": email, "plan": plan}
+
+
+def _looks_like_token_credentials(creds: dict | None) -> bool:
+    if not isinstance(creds, dict):
+        return False
+    return bool(
+        creds.get("refresh_token")
+        or creds.get("access_token")
+        or creds.get("id_token")
+        or creds.get("rt")
+        or creds.get("at")
+    )
+
+
+def _normalize_openai_oauth_credentials(raw: dict | None, *, email: str = "", plan: str = "") -> dict:
+    """把本地 CPA/Codex/sub2 回执里的字段整理成 sub2api oauth credentials。"""
+    src = dict(raw or {}) if isinstance(raw, dict) else {}
+    # 兼容嵌套
+    nested = src.get("credentials") if isinstance(src.get("credentials"), dict) else {}
+    if nested:
+        merged = dict(nested)
+        for k, v in src.items():
+            if k != "credentials" and k not in merged:
+                merged[k] = v
+        src = merged
+
+    email = str(
+        email
+        or src.get("email")
+        or src.get("name")
+        or ""
+    ).strip()
+    plan = str(
+        plan
+        or src.get("plan_type")
+        or src.get("chatgpt_plan_type")
+        or src.get("plan")
+        or ""
+    ).strip()
+
+    access_token = str(src.get("access_token") or src.get("at") or "").strip()
+    refresh_token = str(src.get("refresh_token") or src.get("rt") or "").strip()
+    id_token = str(src.get("id_token") or "").strip()
+    client_id = str(
+        src.get("client_id")
+        or getattr(_cfg, "CODEX_CLIENT_ID", "")
+        or "app_EMoamEEZ73f0CkXaXp7hrann"
+    ).strip()
+
+    account_id = str(
+        src.get("chatgpt_account_id")
+        or src.get("account_id")
+        or src.get("acc_id")
+        or ""
+    ).strip()
+    user_id = str(
+        src.get("chatgpt_user_id")
+        or src.get("user_id")
+        or ""
+    ).strip()
+    org_id = str(src.get("organization_id") or src.get("org_id") or "").strip()
+
+    expires_at = src.get("expires_at") or src.get("expired") or src.get("expire_at") or ""
+    if isinstance(expires_at, (int, float)) and expires_at > 0:
+        # unix 秒
+        try:
+            expires_at = datetime.fromtimestamp(float(expires_at), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            expires_at = str(expires_at)
+    else:
+        expires_at = str(expires_at or "").strip()
+
+    creds: dict = {}
+    if access_token:
+        creds["access_token"] = access_token
+    if refresh_token:
+        creds["refresh_token"] = refresh_token
+    if id_token:
+        creds["id_token"] = id_token
+    if client_id:
+        creds["client_id"] = client_id
+    if email:
+        creds["email"] = email
+    if plan:
+        creds["plan_type"] = plan
+    if account_id:
+        creds["chatgpt_account_id"] = account_id
+        creds["account_id"] = account_id
+    if user_id:
+        creds["chatgpt_user_id"] = user_id
+    if org_id:
+        creds["organization_id"] = org_id
+    if expires_at:
+        creds["expires_at"] = expires_at
+    sub_exp = src.get("subscription_expires_at")
+    if sub_exp not in (None, ""):
+        creds["subscription_expires_at"] = sub_exp
+
+    # 保留其它非空扩展字段（不覆盖已规范化键）
+    skip = {
+        "access_token", "refresh_token", "id_token", "at", "rt", "client_id", "email", "name",
+        "plan_type", "chatgpt_plan_type", "plan", "chatgpt_account_id", "account_id", "acc_id",
+        "chatgpt_user_id", "user_id", "organization_id", "org_id", "expires_at", "expired",
+        "expire_at", "subscription_expires_at", "type", "credentials",
+    }
+    for k, v in src.items():
+        if k in skip or v in (None, "", [], {}):
+            continue
+        if k not in creds:
+            creds[k] = v
+    return creds
+
+
+def local_record_to_sub2api_account(
+    local: dict | None,
+    *,
+    local_filename: str = "",
+) -> tuple[dict, dict]:
+    """
+    离线把本地 codex 记录转成 sub2api accounts[] 单条。
+
+    不依赖 sub2api 号池是否还在；优先用本地已有 token/回执字段。
+    """
+    local = local if isinstance(local, dict) else {}
+    ref = extract_sub2_account_ref(local)
+    email = str(ref.get("email") or "").strip()
+    plan = str(ref.get("plan") or "").strip()
+    source = "local"
+
+    account: dict | None = None
+    creds: dict = {}
+
+    # 1) 已是 sub2 回执：直接用 create-from-oauth 返回的 data 骨架
+    if local.get("type") == "codex_sub2_callback" or str(local_filename).endswith("-sub2-callback.json"):
+        submit = local.get("sub2_submit_response") if isinstance(local.get("sub2_submit_response"), dict) else {}
+        data = submit.get("data") if isinstance(submit.get("data"), dict) else {}
+        if data:
+            account = {
+                "name": str(data.get("name") or email or "OpenAI OAuth Account").strip(),
+                "notes": data.get("notes"),
+                "platform": str(data.get("platform") or "openai"),
+                "type": str(data.get("type") or "oauth"),
+                "credentials": _normalize_openai_oauth_credentials(
+                    data.get("credentials") if isinstance(data.get("credentials"), dict) else data,
+                    email=email,
+                    plan=plan,
+                ),
+                "extra": data.get("extra") if isinstance(data.get("extra"), dict) else {},
+                "concurrency": int(data.get("concurrency") or 3),
+                "priority": int(data.get("priority") or 50),
+                "rate_multiplier": float(data.get("rate_multiplier") or 1),
+                "auto_pause_on_expired": bool(
+                    True if data.get("auto_pause_on_expired") is None else data.get("auto_pause_on_expired")
+                ),
+            }
+            source = "local_sub2_callback"
+            creds = account["credentials"]
+
+    # 2) 本地已是完整 codex/CPA 凭证（含 token）
+    if account is None or not _looks_like_token_credentials((account or {}).get("credentials")):
+        if _looks_like_token_credentials(local) or local.get("type") in ("codex", "openai", "oauth"):
+            creds = _normalize_openai_oauth_credentials(local, email=email, plan=plan)
+            if _looks_like_token_credentials(creds) or email:
+                account = {
+                    "name": email or str(local.get("name") or "OpenAI OAuth Account"),
+                    "platform": "openai",
+                    "type": "oauth",
+                    "credentials": creds,
+                    "extra": {
+                        "email": email,
+                        "source": "local_codex_credential",
+                        "local_filename": local_filename or "",
+                    },
+                    "concurrency": 3,
+                    "priority": 50,
+                    "rate_multiplier": 1,
+                    "auto_pause_on_expired": True,
+                }
+                source = "local_codex_credential"
+
+    # 3) 已经是 sub2api account 条目
+    if account is None and str(local.get("platform") or "").lower() == "openai" and isinstance(local.get("credentials"), dict):
+        account = {
+            "name": str(local.get("name") or email or "OpenAI OAuth Account"),
+            "notes": local.get("notes"),
+            "platform": "openai",
+            "type": str(local.get("type") or "oauth"),
+            "credentials": _normalize_openai_oauth_credentials(local.get("credentials"), email=email, plan=plan),
+            "extra": local.get("extra") if isinstance(local.get("extra"), dict) else {},
+            "concurrency": int(local.get("concurrency") or 3),
+            "priority": int(local.get("priority") or 50),
+            "rate_multiplier": float(local.get("rate_multiplier") or 1),
+            "auto_pause_on_expired": bool(
+                True if local.get("auto_pause_on_expired") is None else local.get("auto_pause_on_expired")
+            ),
+        }
+        if local.get("proxy_key"):
+            account["proxy_key"] = local.get("proxy_key")
+        source = "local_sub2_account"
+        creds = account["credentials"]
+
+    if account is None:
+        raise RuntimeError(
+            f"本地记录无法转换为 sub2api 账号格式：filename={local_filename or '-'} email={email or '-'}"
+        )
+
+    # 清理 notes=null 之类可选字段
+    if account.get("notes") in (None, ""):
+        account.pop("notes", None)
+
+    email = str((account.get("credentials") or {}).get("email") or account.get("name") or email or "").strip()
+    plan = str((account.get("credentials") or {}).get("plan_type") or plan or "").strip()
+    meta = {
+        "email": email,
+        "plan": plan,
+        "local_filename": local_filename,
+        "source": source,
+        "sub2_account_id": ref.get("id"),
+        "has_refresh_token": bool((account.get("credentials") or {}).get("refresh_token")),
+        "has_access_token": bool((account.get("credentials") or {}).get("access_token")),
+        "has_id_token": bool((account.get("credentials") or {}).get("id_token")),
+    }
+    return account, meta
+
+
+def build_sub2api_export_payload(accounts: list[dict]) -> dict:
+    """组装 sub2api accounts/data 导入包。"""
+    clean_accounts = [a for a in (accounts or []) if isinstance(a, dict)]
+    return {
+        "exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "proxies": [],
+        "accounts": clean_accounts,
+    }
+
+
+def download_sub2api_export_for_local(
+    local: dict,
+    *,
+    local_filename: str = "",
+    include_proxies: bool = False,  # 兼容旧参数；离线导出不依赖代理
+) -> tuple[dict, dict]:
+    """
+    把本地 codex 记录转成 sub2api 导出包。
+
+    纯离线转换，不依赖 sub2api 号池是否仍存在该账号。
+    """
+    _ = include_proxies
+    account, meta = local_record_to_sub2api_account(local, local_filename=local_filename)
+    payload = build_sub2api_export_payload([account])
+    meta["account_count"] = 1
+    return payload, meta
+
+
+def download_sub2api_export_bulk(
+    local_items: list[tuple[str, dict]],
+    *,
+    include_proxies: bool = False,
+) -> tuple[dict, list[dict], list[dict]]:
+    """
+    批量把本地记录转成一份 sub2api accounts/data JSON。
+
+    纯离线，不请求 sub2api 是否还存着这些号。
+    """
+    _ = include_proxies
+    accounts: list[dict] = []
+    added: list[dict] = []
+    errors: list[dict] = []
+    seen_emails: set[str] = set()
+
+    for fname, local in local_items:
+        try:
+            account, meta = local_record_to_sub2api_account(local, local_filename=fname)
+            email = str(meta.get("email") or "").strip().lower()
+            # 同邮箱去重，保留后出现的（通常更新）
+            if email and email in seen_emails:
+                accounts = [
+                    a for a in accounts
+                    if str((a.get("credentials") or {}).get("email") or a.get("name") or "").strip().lower() != email
+                ]
+                added = [x for x in added if str(x.get("email") or "").strip().lower() != email]
+            if email:
+                seen_emails.add(email)
+            accounts.append(account)
+            added.append({
+                "email": meta.get("email") or "",
+                "local_filenames": [fname],
+                "name": account.get("name") or meta.get("email") or "",
+                "plan": meta.get("plan") or "",
+                "source": meta.get("source") or "local",
+                "has_refresh_token": bool(meta.get("has_refresh_token")),
+                "has_access_token": bool(meta.get("has_access_token")),
+                "has_id_token": bool(meta.get("has_id_token")),
+            })
+        except Exception as exc:
+            errors.append({"filename": fname, "error": f"{type(exc).__name__}: {exc}"})
+
+    payload = build_sub2api_export_payload(accounts)
+    return payload, added, errors
 
 
 # ============================================================
@@ -1368,9 +1871,10 @@ def run_codex_oauth(
         logger.info(f"[Codex] 开始授权（全新 session）：{email}")
 
         # 1. 授权地址
-        #    默认由 CPA 生成（本地不生成 PKCE/state）；local 模式保留旧代码用于兼容。
+        #    默认 local：本程序 PKCE + 换 token + 落盘，不依赖 CPA/sub2 admin key。
         auth_source = _codex_auth_url_source()
         cpa_auth = None
+        sub2_auth = None
         code_verifier = None
         code_challenge = None
         auth_url = None
@@ -1383,11 +1887,12 @@ def run_codex_oauth(
             sub2_auth = _request_sub2_authorize_url()
             state = sub2_auth["state"]
             auth_url = sub2_auth["auth_url"]
-            logger.info(f"[Codex] 当前使用 sub2 授权地址: {auth_url}")
+            logger.info(f"[Codex] 当前使用 sub2api 授权地址: {auth_url}")
         elif auth_source == "local":
             code_verifier, code_challenge = _generate_pkce()
             state = _generate_state()
-            logger.info("[Codex] 当前使用本地 PKCE 生成授权地址，完整 URL 将在 bootstrap 阶段输出")
+            auth_url = _build_authorize_url(state, code_challenge, prompt="login")
+            logger.info("[Codex] 当前使用本地 PKCE 授权（自行换 token 并保存凭据）: %s", auth_url)
         else:
             raise RuntimeError(f"[Codex] 不支持的 CODEX_AUTH_URL_SOURCE={auth_source!r}")
 
@@ -1461,12 +1966,13 @@ def run_codex_oauth(
                 message=str(msg),
             )
 
-        # 7A-sub2. sub2 模式：把 callback URL 上传给 sub2。
+        # 7A-sub2. sub2api 模式：把 callback 提交给 create-from-oauth 创建账号。
         if auth_source == "sub2":
             submit_payload = _submit_sub2_callback(
                 callback_url,
                 session_id=(sub2_auth or {}).get("session_id", ""),
                 redirect_uri=(parse_qs(urlparse(auth_url or "").query).get("redirect_uri") or [""])[0],
+                name=email,
             )
             path = _save_sub2_local_record(
                 email=email,
@@ -1486,28 +1992,28 @@ def run_codex_oauth(
                 message=str(msg),
             )
 
-        # 7B. local 模式：保留旧实现，用本地 verifier 换 token 并保存 CPA 兼容授权文件。
-        if not code_verifier:
-            raise RuntimeError("[Codex] local 模式缺少 code_verifier")
-        token_resp = exchange_codex_token(session, code, code_verifier)
-
-        # 8. 解析 id_token + 落盘
-        id_claims = _parse_id_token(token_resp.get("id_token", ""))
-        effective_email = id_claims.get("email") or email
-        storage = build_codex_storage(token_resp, id_claims)
-        path = save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""))
-
+        # 7B. local 模式：本程序用 verifier 换 token，保存完整凭据供后续导出。
+        done = complete_local_codex_oauth(
+            email=email,
+            code=code,
+            code_verifier=code_verifier or "",
+            callback_url=callback_url,
+            proxy=proxy,
+        )
         logger.info(
-            f"[Codex] 成功：{effective_email}，plan={id_claims.get('plan_type') or 'unknown'}, "
-            f"account_id={id_claims.get('account_id') or 'unknown'}, 已保存到 {path}"
+            "[Codex] 成功：%s，plan=%s, account_id=%s, 已保存到 %s",
+            done.get("email"),
+            done.get("plan") or "unknown",
+            done.get("account_id") or "unknown",
+            done.get("path"),
         )
         return _codex_result(
             status="success",
             ok=True,
-            email=effective_email,
-            file_path=str(path),
+            email=done.get("email") or email,
+            file_path=str(done.get("path") or ""),
             callback_url=callback_url,
-            message=f"plan={id_claims.get('plan_type') or 'unknown'}",
+            message=f"local plan={done.get('plan') or 'unknown'}",
         )
     except AccountUnusableError as exc:
         logger.warning(f"[Codex] 账号已废（{exc.error_code}）：{email}")

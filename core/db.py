@@ -48,7 +48,12 @@ _LOCK = threading.RLock()
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    """业务时间戳统一用北京时间，避免服务器在海外时 UI 显示本地时区。"""
+    try:
+        from core.timeutil import beijing_now_iso
+        return beijing_now_iso()
+    except Exception:
+        return datetime.now().isoformat(timespec="seconds")
 
 
 def _ensure_storage() -> None:
@@ -1492,19 +1497,18 @@ def import_outlook_accounts(records: list[dict]) -> tuple[int, int]:
         return inserted, skipped
 
 
-def import_registered_email_accounts(records: list[dict], source: str | None) -> tuple[int, int]:
+def import_registered_email_accounts(records: list[dict], source: str | None = None) -> tuple[int, int]:
     """
     把邮箱素材直接导入为“已注册成功账号”，用于跳过注册、直接在账号页补跑 Codex 授权。
 
-    source:
-      - outlook: records 元素 {email,password,client_id,refresh_token[,access_token,totp_secret]}
-      - generic_api: records 元素 {email,code_url[,access_token,totp_secret]}
+    source（可空；优先用每条 record 的 source/kind）:
+      - outlook: {email,password,client_id,refresh_token[,access_token,totp_secret]}
+      - generic_api: {email,code_url[,access_token,totp_secret]}
+      - password_totp: {email,password,totp_secret[,access_token]}  邮箱+密码+2FA
 
     返回 (新增账号数, 跳过数)。已存在账号会跳过；邮箱池中已存在的素材会复用并标记 used。
     """
-    source = (source or "").strip().lower()
-    if source not in ("outlook", "generic_api"):
-        raise ValueError("source 必须显式传入 outlook / generic_api")
+    default_source = (source or "").strip().lower()
 
     with _LOCK:
         accounts = _load_accounts()
@@ -1521,11 +1525,23 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
                 skipped += 1
                 continue
 
+            row_source = (
+                str(raw.get("source") or raw.get("kind") or default_source or "")
+                .strip()
+                .lower()
+            )
+            if row_source not in ("outlook", "generic_api", "password_totp"):
+                skipped += 1
+                continue
+
             now = _now()
             original_line = email
             pool_row = None
+            password = (raw.get("password") or "").strip()
+            access_token = (raw.get("access_token") or raw.get("token") or "").strip()
+            totp_secret = (raw.get("totp_secret") or raw.get("totp") or "").strip() or None
 
-            if source == "generic_api":
+            if row_source == "generic_api":
                 code_url = (raw.get("code_url") or raw.get("url") or "").strip()
                 if not code_url:
                     skipped += 1
@@ -1550,8 +1566,14 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
                 pool_row["note"] = pool_row.get("note") or "导入为已注册账号，用于 Codex 授权"
                 pool_row["copy_line"] = _generic_api_email_line(pool_row)
                 original_line = _generic_api_email_line(pool_row)
+            elif row_source == "password_totp":
+                if not (password and totp_secret):
+                    skipped += 1
+                    continue
+                # 不进 outlook/generic 池；账号本身带 password + totp 即可补跑
+                original_line = "----".join([email, password, totp_secret])
+                pool_row = None
             else:
-                password = (raw.get("password") or "").strip()
                 client_id = (raw.get("client_id") or raw.get("clientId") or "").strip()
                 refresh_token = (raw.get("refresh_token") or raw.get("refreshToken") or "").strip()
                 if not (password and client_id and refresh_token):
@@ -1583,38 +1605,43 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
                 original_line = _outlook_line(pool_row)
 
             row_id = _next_id(accounts)
-            access_token = (raw.get("access_token") or raw.get("token") or "").strip()
-            totp_secret = (raw.get("totp_secret") or raw.get("totp") or "").strip() or None
             account = {
                 "id": row_id,
                 "email": email,
                 "created_at": now,
                 "access_token": access_token,
                 "totp_secret": totp_secret,
+                "password": password or None,
                 "user_id": raw.get("user_id"),
                 "user_name": raw.get("user_name") or "Imported Account",
                 "plan_type": raw.get("plan_type"),
                 "expires_at": raw.get("expires_at"),
                 "device_id": raw.get("device_id"),
                 "proxy_used": raw.get("proxy_used"),
-                "email_source": source,
-                "extra_json": json.dumps({"imported_registered": True}, ensure_ascii=False),
+                "email_source": row_source,
+                "extra_json": json.dumps(
+                    {"imported_registered": True, "import_kind": row_source},
+                    ensure_ascii=False,
+                ),
                 "codex_status": raw.get("codex_status") or "",
                 "codex_error": raw.get("codex_error"),
                 "updated_at": now,
                 "original_email_line": original_line,
             }
-            if source == "outlook":
+            if row_source == "outlook" and pool_row is not None:
                 account["password"] = pool_row.get("password")
                 account["client_id"] = pool_row.get("client_id")
                 account["refresh_token"] = pool_row.get("refresh_token")
             account["copy_line"] = _account_line(account)
             accounts.append(account)
 
-            pool_row["registered_account_id"] = row_id
-            pool_row["access_token"] = access_token
-            if totp_secret:
-                pool_row["totp_secret"] = totp_secret
+            if pool_row is not None:
+                pool_row["registered_account_id"] = row_id
+                pool_row["access_token"] = access_token
+                if totp_secret:
+                    pool_row["totp_secret"] = totp_secret
+                if password:
+                    pool_row["password"] = password
             inserted += 1
 
         _save_outlook(outlook_rows)
@@ -1875,18 +1902,56 @@ def list_codex_accounts() -> list[dict]:
             without_prefix = stem[len("codex-"):] if stem.startswith("codex-") else stem
             # plan 可能为空。简单做法：直接读 JSON 里的 email（更准），文件名只做 fallback
             email = content.get("email") or ""
+            account_id = content.get("account_id", "") or content.get("sub2_account_id", "") or ""
+            record_type = content.get("type", "codex")
+            plan = ""
+            expired = content.get("expired", "")
+            last_refresh = content.get("last_refresh", "")
+            access_preview = (content.get("access_token", "") or "")[:32]
+
+            # sub2 回执：token 在 sub2api 侧，本地只有 create-from-oauth 响应摘要
+            if record_type == "codex_sub2_callback" or fname.endswith("-sub2-callback.json"):
+                submit = content.get("sub2_submit_response") if isinstance(content.get("sub2_submit_response"), dict) else {}
+                data = submit.get("data") if isinstance(submit.get("data"), dict) else {}
+                creds = data.get("credentials") if isinstance(data.get("credentials"), dict) else {}
+                if not email:
+                    email = str(data.get("name") or creds.get("email") or "").strip()
+                if not account_id:
+                    account_id = data.get("id") or content.get("sub2_account_id") or ""
+                plan = str(creds.get("plan_type") or plan or "").strip()
+                expired = str(creds.get("expires_at") or expired or "").strip()
+                last_refresh = str(content.get("submitted_at") or data.get("updated_at") or last_refresh or "").strip()
+                # 回执不含 token，用 status 提示
+                status = data.get("credentials_status") if isinstance(data.get("credentials_status"), dict) else {}
+                if status:
+                    access_preview = (
+                        f"sub2#id={account_id} "
+                        f"rt={bool(status.get('has_refresh_token'))} "
+                        f"at={bool(status.get('has_access_token'))}"
+                    )[:48]
+                else:
+                    access_preview = f"sub2-callback#{account_id}"[:48]
+                record_type = "codex_sub2_callback"
+
             if not email:
                 # JSON 里 email 为空（旧 bug 产物），从文件名兜底
                 # 文件名格式 codex-{email}-{plan}.json，email 里可能有 - 但是常见邮箱不会有
                 # 简单做法：去掉末尾 -plan（如 -free / -plus / -team），剩下的当 email
                 parts = without_prefix.rsplit("-", 1)
-                if len(parts) == 2 and parts[1].lower() in ("free", "plus", "team", "pro", "enterprise"):
-                    email = parts[0]
+                if len(parts) == 2 and parts[1].lower() in ("free", "plus", "team", "pro", "enterprise", "callback"):
+                    # 兼容 codex-xxx-sub2-callback.json / codex-xxx-cpa-callback.json
+                    if parts[1].lower() == "callback":
+                        base = parts[0]
+                        if base.endswith("-sub2") or base.endswith("-cpa"):
+                            email = base.rsplit("-", 1)[0]
+                        else:
+                            email = base
+                    else:
+                        email = parts[0]
                 else:
                     email = without_prefix
-            # 推断 plan
-            plan = ""
-            if "-" in without_prefix:
+            # 推断 plan（文件名尾缀）
+            if not plan and "-" in without_prefix:
                 tail = without_prefix.rsplit("-", 1)[-1].lower()
                 if tail in ("free", "plus", "team", "pro", "enterprise"):
                     plan = tail
@@ -1895,11 +1960,11 @@ def list_codex_accounts() -> list[dict]:
                 "path": str(path),
                 "email": email,
                 "plan": plan,
-                "account_id": content.get("account_id", ""),
-                "type": content.get("type", "codex"),
-                "last_refresh": content.get("last_refresh", ""),
-                "expired": content.get("expired", ""),
-                "access_token_preview": (content.get("access_token", "") or "")[:32],
+                "account_id": account_id,
+                "type": record_type,
+                "last_refresh": last_refresh,
+                "expired": expired,
+                "access_token_preview": access_preview,
                 "size": path.stat().st_size,
                 "mtime": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
                 "exported_at": es.get("exported_at"),

@@ -8,14 +8,24 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
+from config import proxy as proxy_cfg
 from core import db
 from core.account_liveness import check_account_liveness, log_path
 from core.chatgpt_plan import resolve_plan_check_route
 
 logger = logging.getLogger(__name__)
 
-_WORKERS = 3
-_QUEUE_LIMIT = 500
+
+def _int_setting(name: str, default: int, lower: int, upper: int) -> int:
+    try:
+        value = int(getattr(proxy_cfg, name, default) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(lower, min(upper, value))
+
+
+_WORKERS = _int_setting("LIVE_CHECK_WORKERS", 3, 1, 32)
+_QUEUE_LIMIT = _int_setting("LIVE_CHECK_QUEUE_LIMIT", 500, _WORKERS, 5000)
 _EXECUTOR = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="live-check")
 _QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
 _RUNNING: set[int] = set()
@@ -47,16 +57,22 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             return {"ok": False, "status": "failed", "error": "账号已删除或查活状态已被重置"}
         route = resolve_plan_check_route(explicit_proxy=proxy)
         selected_proxy = route.get("proxy")
+        # auto 模式下不要把“单次 pick 到的 sticky”钉死整轮查活：
+        # 传 None 让预检每轮自己从 100 条池里换 IP；explicit_proxy 仍尊重调用方指定。
+        liveness_proxy = selected_proxy
+        if proxy is None and str(route.get("proxy_mode") or "") in {"auto", "proxy"} and selected_proxy:
+            liveness_proxy = None
         _append_log(
             email,
             "[查活] 开始后台执行 "
             f"trigger={trigger} network_route={route.get('network_route')} "
             f"proxy_mode={route.get('proxy_mode')} proxy_used={route.get('proxy_used') or '-'} "
-            f"fallback_reason={route.get('proxy_fallback_reason') or '-'}"
+            f"fallback_reason={route.get('proxy_fallback_reason') or '-'} "
+            f"liveness_proxy={'pool-rotate' if liveness_proxy is None and selected_proxy else (route.get('proxy_used') or '-')}"
         )
-        result = check_account_liveness(email, proxy=selected_proxy, clear_log=False)
-        # 早期 providers/csrf 403 通常是该出口被 CF 拦截，不代表账号死亡。
-        # auto/proxy 模式下如果用了代理，额外直连兜底一次，便于和套餐查询的 auto 语义保持接近。
+        result = check_account_liveness(email, proxy=liveness_proxy, clear_log=False)
+        # 早期 providers/csrf 403 是出口被 CF 拦，不代表号废。
+        # 有 PROXY_POOL 时只继续换 sticky，绝不回退 VPS 直连（机房 IP 几乎必 403，还会误导日志）。
         err_text = str(result.get("error") or "")
         if (
             not result.get("ok")
@@ -64,9 +80,11 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             and "403" in err_text
             and selected_proxy
             and str(route.get("network_route") or "") == "proxy"
+            and "deactivated" not in err_text.lower()
+            and "已废" not in err_text
         ):
-            _append_log(email, "[查活] 代理出口收到 403，尝试直连兜底一次")
-            result = check_account_liveness(email, proxy="", clear_log=False)
+            _append_log(email, "[查活] 代理轮换仍 403，再从 PROXY_POOL 整轮换 sticky 重试一次（不直连）")
+            result = check_account_liveness(email, proxy=None, clear_log=False)
         db.update_account_liveness(account_id, result)
         if result.get("ok"):
             _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")

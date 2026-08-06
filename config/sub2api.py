@@ -40,6 +40,28 @@ SUB2API_PROXY_KEY: str = ""
 
 
 # ============================================================
+# Codex 授权页 → 推送到 sub2api 号池（accounts/batch）
+# ============================================================
+
+# 目标分组 ID（sub2api 后台「分组」）。默认 8。
+SUB2API_POOL_GROUP_ID: int = 8
+
+# 单账号并发数。默认 50。
+SUB2API_POOL_CONCURRENCY: int = 50
+
+# 优先级 / 负载因子 / 计费倍率（对照 sub2api 创建账号表单）
+SUB2API_POOL_PRIORITY: int = 1
+SUB2API_POOL_LOAD_FACTOR: int = 10
+SUB2API_POOL_RATE_MULTIPLIER: float = 1.0
+
+# 单次 HTTP batch 打包条数（过大可能超时）
+SUB2API_POOL_BATCH_SIZE: int = 50
+
+# 过期是否自动暂停调度
+SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED: bool = True
+
+
+# ============================================================
 # Codex OAuth 授权对接 sub2
 # 当 config.codex.CODEX_AUTH_URL_SOURCE="sub2" 时使用：
 #   1) 从 sub2 获取 Codex 授权链接
@@ -81,6 +103,13 @@ apply_env_overrides(globals(), {
     'SUB2API_API_TIMEOUT': 'int',
     'SUB2API_OUTPUT_PATH': 'str',
     'SUB2API_PROXY_KEY': 'str',
+    'SUB2API_POOL_GROUP_ID': 'int',
+    'SUB2API_POOL_CONCURRENCY': 'int',
+    'SUB2API_POOL_PRIORITY': 'int',
+    'SUB2API_POOL_LOAD_FACTOR': 'int',
+    'SUB2API_POOL_RATE_MULTIPLIER': 'float',
+    'SUB2API_POOL_BATCH_SIZE': 'int',
+    'SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED': 'bool',
     'SUB2_CODEX_API_BASE': 'str',
     'SUB2_CODEX_AUTH_URL_PATH': 'str',
     'SUB2_CODEX_CALLBACK_PATH': 'str',

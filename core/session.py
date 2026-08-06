@@ -203,11 +203,17 @@ class BrowserSession:
         except Exception:
             return {}
 
+        # 轮转代理（rotate）每次连接 IP 都可能变，不能按 proxy URL 缓存，否则会一直复用首次出口画像。
+        proxy_l = str(self.proxy or "").lower()
+        is_rotating = any(x in proxy_l for x in ("rotate", "rotating", "sticky=false", "session-"))
         cache_key = self.proxy or "__direct__"
-        with _GEO_CACHE_LOCK:
-            cached = _GEO_CACHE.get(cache_key)
-            if cached is not None:
-                return dict(cached)
+        if not is_rotating:
+            with _GEO_CACHE_LOCK:
+                cached = _GEO_CACHE.get(cache_key)
+                if cached is not None:
+                    return dict(cached)
+        else:
+            cache_key = f"{self.proxy}|{self.device_id}"
 
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         for url in endpoints:

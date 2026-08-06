@@ -489,23 +489,51 @@ EDITABLE_FIELDS = [
         "key": "PLAN_CHECK_JITTER", "file": "proxy.py", "type": "float", "group": "代理池",
         "label": "套餐/Agent请求随机抖动(秒)", "help": "在查套餐和生成 Agent Token 的最小间隔上增加随机延迟，避免请求过于规律",
     },
-    # ---- 提链 ----
+    {
+        "key": "LIVE_CHECK_WORKERS", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "查活并发数", "help": "账号查活后台线程数；1-32，改后需重启 WebUI",
+    },
+    {
+        "key": "LIVE_CHECK_QUEUE_LIMIT", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "查活队列上限", "help": "查活排队任务上限，建议 100-1000",
+    },
+    # ---- 提链（多 Provider）----
+    {
+        "key": "EXTRACT_LINK_PROVIDER", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "提链 API", "help": "oai9=Kakao多任务API（推荐）；convertmove=旧 Customer API",
+    },
     {
         "key": "EXTRACT_LINK_API_BASE", "file": "extract_link.py", "type": "str", "group": "提链",
-        "label": "提链服务地址", "help": "填写提链服务 API 地址",
+        "label": "提链服务地址", "help": "站点根地址。oai9 填其域名；convertmove 填 https://convertmove.cc.cd（不要带 path）",
     },
     {
         "key": "EXTRACT_LINK_CDK", "file": "extract_link.py", "type": "str", "group": "提链",
-        "label": "提链 CDK", "help": "创建提链任务和监听任务事件使用；成功提链扣 1 次",
+        "label": "卡密/CDK", "help": "oai9=card 卡密；convertmove=CDK。成功扣次规则以后端为准",
         "storage": "env", "secret": True,
     },
     {
         "key": "EXTRACT_LINK_TYPE", "file": "extract_link.py", "type": "str", "group": "提链",
-        "label": "提链类型", "help": "支持 pix / upi / kakao_pay / ideal",
+        "label": "提链类型", "help": "oai9 目前仅 kakao_pay；convertmove 支持 pix/upi/kakao_pay/ideal",
+    },
+    {
+        "key": "EXTRACT_LINK_PLAN_TYPE", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "oai9 套餐类型", "help": "提交 oai9 任务时的 plan_type，文档示例 plus",
+    },
+    {
+        "key": "EXTRACT_LINK_PROMO_CODE", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "oai9 promo_code", "help": "可空；需要促销码时填写",
     },
     {
         "key": "EXTRACT_LINK_WORKERS", "file": "extract_link.py", "type": "int", "group": "提链",
-        "label": "提链并发数", "help": "批量提链后台线程数，建议 1-4",
+        "label": "提链并发数", "help": "账号页可同时点多个号；oai9 支持多任务，建议 2-5",
+    },
+    {
+        "key": "EXTRACT_LINK_EVENT_TIMEOUT", "file": "extract_link.py", "type": "int", "group": "提链",
+        "label": "提链等待超时", "help": "单任务轮询最长秒数，默认 240",
+    },
+    {
+        "key": "EXTRACT_LINK_POLL_INTERVAL", "file": "extract_link.py", "type": "int", "group": "提链",
+        "label": "提链轮询间隔", "help": "查询任务状态间隔秒数；oai9 建议 5",
     },
     # ---- Codex 配置 ----
     {
@@ -536,11 +564,35 @@ EDITABLE_FIELDS = [
         "key": "SUB2API_PROXY_KEY", "file": "sub2api.py", "type": "str", "group": "Codex",
         "label": "Agent sub2 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key",
     },
+    {
+        "key": "SUB2API_POOL_GROUP_ID", "file": "sub2api.py", "type": "int", "group": "Codex",
+        "label": "号池分组ID", "help": "Codex 授权页「推送号池」默认分组 id，默认 8",
+    },
+    {
+        "key": "SUB2API_POOL_CONCURRENCY", "file": "sub2api.py", "type": "int", "group": "Codex",
+        "label": "号池并发", "help": "推送到 sub2api 号池时每账号 concurrency，默认 50",
+    },
+    {
+        "key": "SUB2API_POOL_PRIORITY", "file": "sub2api.py", "type": "int", "group": "Codex",
+        "label": "号池优先级", "help": "推送号池 priority，默认 1",
+    },
+    {
+        "key": "SUB2API_POOL_LOAD_FACTOR", "file": "sub2api.py", "type": "int", "group": "Codex",
+        "label": "号池负载因子", "help": "推送号池 load_factor，默认 10",
+    },
+    {
+        "key": "SUB2API_POOL_RATE_MULTIPLIER", "file": "sub2api.py", "type": "float", "group": "Codex",
+        "label": "号池计费倍率", "help": "推送号池 rate_multiplier，默认 1",
+    },
+    {
+        "key": "SUB2API_POOL_BATCH_SIZE", "file": "sub2api.py", "type": "int", "group": "Codex",
+        "label": "号池批次大小", "help": "accounts/batch 单次打包条数，默认 50",
+    },
     # ---- 接码平台 ----
     # ---- Codex：基础 / CPA / sub2api 配置 ----
     {
         "key": "CODEX_AUTH_URL_SOURCE", "file": "codex.py", "type": "str", "group": "Codex",
-        "label": "授权地址来源", "help": "cpa=CPA生成并上传CPA；sub2=sub2生成并上传sub2；local=本地PKCE",
+        "label": "授权地址来源", "help": "local=本程序 PKCE 自行换 token 并保存凭据（推荐，不依赖 admin key）；sub2=sub2api 管理接口；cpa=CPA 管理接口。sub2/cpa 密钥缺失时自动回退 local",
     },
     {
         "key": "CPA_MANAGEMENT_URL", "file": "codex.py", "type": "str", "group": "Codex",
@@ -562,15 +614,71 @@ EDITABLE_FIELDS = [
 
     {
         "key": "SMS_PROVIDER", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "接码通道", "help": "grizzly / l / h；l 使用 L_API.md，h 使用 H_API.md 定义的本地取号服务",
+        "label": "接码通道", "help": "grizzly / herosms / smsbower / l / h；HeroSMS/SMSBower 为 SMS-Activate 兼容通道，OpenAI 服务码 dr",
     },
     {
         "key": "SMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "国家代码", "help": "传给接码平台的 country；GrizzlySMS 常用：美国=187；H 通道作为 H_API.md 的 country",
+        "label": "国家代码", "help": "传给接码平台的 country；OpenAI 推荐泰国=52（走 SMS）；美国=187；H 通道作为 H_API.md 的 country",
     },
     {
         "key": "SMS_SERVICE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "服务/项目代码", "help": "GrizzlySMS/L 作为 service；H 通道作为 H_API.md 的 projectId",
+        "label": "服务/项目代码", "help": "HeroSMS/SMSBower/Grizzly 上 OpenAI=dr；L 作为 service；H 通道作为 projectId",
+    },
+    {
+        "key": "SMS_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "最高单价", "help": "硬上限（美元）。选供应商/价位时不会超过此值；留空=不限。例：0.35",
+    },
+    {
+        "key": "SMS_MIN_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "最低单价", "help": "可选地板价，挡极端低价虚拟号（如 0.004）；留空/0=不限",
+    },
+    {
+        "key": "SMS_PREFERRED_COUNTRIES", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "优先国家", "help": "逗号分隔。白名单为空时也当作硬白名单。同国先换供应商，再换其它优先国。例：52 或 52,6,16",
+    },
+    {
+        "key": "SMS_COUNTRY_WHITELIST", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "国家白名单(手动)", "help": "硬限制国家码，逗号分隔。非空优先于 API Top。例：52,6,16。留空则走「服务Top白名单」或优先国家",
+    },
+    {
+        "key": "SMS_USE_TOP_COUNTRIES_WHITELIST", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "用服务Top当白名单", "help": "开启后（且手动白名单为空）调用 getTopCountriesByService 取该服务 TopN 国+Gold供应商作为白名单（SMSBower推荐）",
+    },
+    {
+        "key": "SMS_TOP_COUNTRIES_LIMIT", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "Top国家数量", "help": "getTopCountriesByService 取前 N 国，默认 10",
+    },
+    {
+        "key": "SMS_TOP_COUNTRIES_CACHE_SEC", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "Top白名单缓存秒", "help": "Top 国家/供应商结果缓存时间，默认 300",
+    },
+    {
+        "key": "SMS_ALLOW_OUTSIDE_WHITELIST", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "允许白名单外国家", "help": "默认关闭。开启后才会在自动跨国家时扩到 getPrices 其它有货国（易出低质号）",
+    },
+    {
+        "key": "SMS_AUTO_COUNTRY", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "自动跨国家", "help": "开启后在白名单内按「国家×供应商×价位」轮换；关闭则主要用 SMS_COUNTRY/名单第一国",
+    },
+    {
+        "key": "SMS_PROVIDER_MIN_STOCK", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "供应商最低库存", "help": "getPricesV3 中该供应商 count 低于此值不选，默认 15",
+    },
+    {
+        "key": "SMS_PRICE_FLOOR_RATIO", "file": "codex.py", "type": "float", "group": "接码平台",
+        "label": "低价过滤比例", "help": "相对该国中位价：price < 中位×比例 的高库存档首轮跳过（防垃圾虚拟号），默认 0.25",
+    },
+    {
+        "key": "SMS_ACQUIRE_MAX_SLOTS", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "单次最多尝试槽数", "help": "一次取号最多尝试多少个（国家×供应商）候选，默认 12",
+    },
+    {
+        "key": "SMS_AUTO_COUNTRY_MIN_STOCK", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "旧-最低库存", "help": "兼容字段；>0 时覆盖「供应商最低库存」",
+    },
+    {
+        "key": "SMS_AUTO_COUNTRY_MAX_PRICE", "file": "codex.py", "type": "float", "group": "接码平台",
+        "label": "旧-最高价", "help": "兼容字段；>0 时与「最高单价」取更严（更小）",
     },
     {
         "key": "SMS_MAX_RETRIES", "file": "codex.py", "type": "int", "group": "接码平台",
@@ -584,6 +692,24 @@ EDITABLE_FIELDS = [
         "key": "SMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "GrizzlySMS API密钥", "help": "GrizzlySMS 平台 API Key，保存在 .env（SMS_API_KEY），不写回 config/*.py",
         "storage": "env", "secret": True,
+    },
+    {
+        "key": "HEROSMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS API密钥", "help": "HeroSMS 独立 API Key，保存在 .env（HEROSMS_API_KEY）；OpenAI 服务码 dr",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "HEROSMS_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS API 地址", "help": "默认 https://hero-sms.com/stubs/handler_api.php，一般不用改",
+    },
+    {
+        "key": "SMSBOWER_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower API密钥", "help": "SMSBower 独立 API Key，保存在 .env（SMSBOWER_API_KEY）；OpenAI 服务码 dr",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMSBOWER_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower API 地址", "help": "默认 https://smsbower.page/stubs/handler_api.php，一般不用改",
     },
     {
         "key": "H_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",

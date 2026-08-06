@@ -154,10 +154,10 @@
     .status-running { color: var(--amber); background: #fff7e6; }
     .status-success { color: var(--green); background: #e9f7ef; }
     .extract-link-cell {
-      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-      margin-top: 4px; max-width: 100%;
+      display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap;
+      margin-top: 4px; max-width: 280px; min-width: 0;
     }
-    .extract-link-cell .pill { min-width: auto; padding: 4px 10px; }
+    .extract-link-cell .pill { min-width: auto; padding: 4px 10px; flex: 0 0 auto; }
     .extract-link-btn {
       min-height: 26px; border: 1px solid #cfe7dc; border-radius: 999px;
       padding: 0 10px; font-size: 12px; font-weight: 800; line-height: 1;
@@ -172,9 +172,15 @@
       display: inline-flex; align-items: center; gap: 4px;
     }
     .extract-link-error {
-      flex-basis: 100%; color: var(--red); font-size: 12px; line-height: 1.35;
-      max-width: 260px; white-space: normal; overflow-wrap: anywhere;
+      flex: 1 1 100%; min-width: 0; max-width: 100%;
+      color: var(--red); font-size: 12px; line-height: 1.4;
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+      overflow: hidden; text-overflow: ellipsis;
+      word-break: break-word; overflow-wrap: anywhere;
+      cursor: help;
     }
+    .accounts-table-v2 .extract-link-cell { max-width: 260px; }
+    .accounts-table-v2 td .extract-link-error { max-width: 240px; }
     .agent-token-cell { margin-top: 4px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
     .agent-token-cell button { min-height:24px; border:1px solid #b9dfc9; border-radius:999px; background:#f0fbf5; color:#166534; padding:0 9px; font-size:12px; font-weight:800; cursor:pointer; }
     .agent-token-cell .agent-download { border-color:#bdd0ff; background:#f3f7ff; color:#1d4ed8; }
@@ -1972,8 +1978,38 @@
           </span>
         </label>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnStartV2">开始注册</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnGcashSessionStartV2" title="Cloak 注册入库后保活浏览器；复制 AT 去第三方提链，再贴支付链接提取 GCash 二维码">注册+gcash提链</button>
       </div>
       <div id="regWarnV2"></div>
+      <section class="gcash-session-panel" id="gcashSessionPanelV2" aria-label="GCash 提链会话" style="display:none;margin:12px 0 16px;padding:14px 16px;border:1px solid #d9ecff;border-radius:10px;background:linear-gradient(180deg,#f5faff 0%,#fff 100%);">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-bottom:10px;">
+          <strong style="font-size:14px;">GCash 提链会话</strong>
+          <span class="pill" id="gcashSessStatusV2" style="background:#ecf5ff;color:#409eff;">idle</span>
+          <span class="muted mono" id="gcashSessEmailV2" style="font-size:12px;"></span>
+          <span class="muted" id="gcashSessMsgV2" style="font-size:12px;flex:1;min-width:180px;"></span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnGcashCopyAtV2" disabled>复制 accessToken</button>
+          <button type="button" class="jobs-tb-btn" id="btnGcashRefreshQrV2" disabled>重抽二维码</button>
+          <button type="button" class="jobs-tb-btn" id="btnGcashDownloadQrV2" disabled>下载二维码</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnGcashCloseV2" disabled>确认关闭浏览器</button>
+        </div>
+        <div id="gcashAtBoxV2" style="display:none;margin-bottom:10px;">
+          <div class="muted" style="font-size:12px;margin-bottom:4px;">accessToken（可点「复制」或手动全选 Ctrl+C）</div>
+          <textarea id="gcashAtTextV2" readonly rows="3" style="width:100%;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;font-size:11px;padding:8px 10px;border:1px solid #dcdfe6;border-radius:6px;resize:vertical;word-break:break-all;"></textarea>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px;">
+          <input id="gcashPayUrlV2" type="url" placeholder="粘贴第三方返回的支付/GCash 链接（https://…）" style="flex:1;min-width:240px;padding:8px 10px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;" disabled>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnGcashOpenUrlV2" disabled>在浏览器打开并抽码</button>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;">
+          <div id="gcashQrWrapV2" style="display:none;text-align:center;">
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">GCash 二维码（可右键复制图片）</div>
+            <img id="gcashQrImgV2" alt="GCash QR" style="max-width:280px;max-height:280px;border:1px solid #ebeef5;border-radius:8px;background:#fff;padding:8px;">
+          </div>
+          <pre id="gcashSessLogV2" class="log" style="flex:1;min-width:220px;max-height:220px;margin:0;font-size:11px;background:#0f172a0a;border-radius:8px;padding:8px 10px;overflow:auto;"></pre>
+        </div>
+      </section>
       <div class="jobs-table-v2-wrap">
         <table class="jobs-table-v2">
           <colgroup>
@@ -2143,8 +2179,12 @@
         <button type="button" class="jobs-tb-btn" id="btnRefreshCodexV2" title="重新加载 Codex 凭证列表">刷新</button>
       </div>
       <div class="jobs-toolbar-v2" id="codexToolbarV2">
-        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCodexDownloadBulkV2" disabled title="把选中的多个本地凭证打包成一个 JSON 文件下载（备份/迁移用，CPA 不能直接读，需先解包）">下载本地</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCodexDownloadBulkV2" disabled title="下载选中凭证：sub2 回执会自动从 sub2api 导出可导入格式；CPA 凭证则打包本地 JSON">下载本地</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexDownloadBulkSub2V2" disabled title="把选中本地记录离线转换成 sub2api accounts/data JSON（不依赖号池是否还在）">下载sub2</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexDownloadBulkCpaV2" disabled title="从 CPA auth-files 下载选中账号的真实 Codex JSON，并打包成 ZIP（可直接解压放入 CPA auth-dir）">从CPA下载</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexPushPoolV2" disabled title="把勾选的 Codex 授权凭证推送到 sub2api 号池（默认分组8 / 并发50，可在配置改）">推送号池</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexUploadPushPoolV2" title="手动上传 CPA 或 sub2api 格式 JSON，自动识别转换后按保存的号池配置推送（凭据不动，concurrency/分组等用配置覆盖）">上传推送号池</button>
+        <input type="file" id="codexUploadPoolFilesV2" accept=".json,application/json" multiple hidden>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnCodexDeleteBulkV2" disabled title="删除选中的本地 Codex JSON 凭证文件">删除选中</button>
       </div>
       <div class="codex-table-v2-wrap">
@@ -2274,8 +2314,12 @@
   <div class="outlook-import-dialog" role="document">
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
-        <h3 id="outlookImportTitle">导入邮箱素材</h3>
-        <p>Outlook：邮箱----密码----clientId----refreshToken；通用 API：邮箱----取码地址（---- 或 ==== 均可）。默认按「已注册成功账号」导入，方便在账号页补跑 Codex。</p>
+        <h3 id="outlookImportTitle">导入账号 / 邮箱素材</h3>
+        <p>支持粘贴已有账号后到「账号」页手动补跑 Codex。常用两种：
+          <br>① <code>邮箱----取码地址</code>
+          <br>② <code>邮箱----密码----2FA密钥</code>
+          <br>也兼容 Outlook 四段：邮箱----密码----clientId----refreshToken（---- / ==== / | 均可）
+        </p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseOutlookImport" aria-label="关闭">×</button>
     </div>
@@ -2284,22 +2328,24 @@
       <label class="outlook-import-field">
         <span>导入类型</span>
         <div class="outlook-v2-select" id="importSourceV2Wrap">
-          <button type="button" class="outlook-v2-select-btn" id="importSourceV2Btn" aria-haspopup="listbox" aria-expanded="false">Outlook 邮箱池</button>
+          <button type="button" class="outlook-v2-select-btn" id="importSourceV2Btn" aria-haspopup="listbox" aria-expanded="false">自动识别格式</button>
           <div class="outlook-v2-select-menu" role="listbox">
-            <button type="button" class="outlook-v2-select-item is-active" data-value="outlook" role="option">Outlook 邮箱池</button>
-            <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">通用 API 取码邮箱</button>
+            <button type="button" class="outlook-v2-select-item is-active" data-value="auto" role="option">自动识别格式</button>
+            <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">邮箱----取码地址</button>
+            <button type="button" class="outlook-v2-select-item" data-value="password_totp" role="option">邮箱----密码----2FA</button>
+            <button type="button" class="outlook-v2-select-item" data-value="outlook" role="option">Outlook 邮箱池</button>
           </div>
-          <input type="hidden" id="importSourceV2" value="outlook">
+          <input type="hidden" id="importSourceV2" value="auto">
         </div>
-        <span class="outlook-import-hint">注册来源可在配置里填多个，例如：outlook,generic_api</span>
+        <span class="outlook-import-hint">默认「自动识别」可混贴多种格式；补跑前请勾选下方「已注册账号」</span>
       </label>
       <label class="outlook-import-check">
         <input id="importAsRegisteredV2" type="checkbox" checked>
-        <span>导入后默认视为「注册成功账号」（邮箱池标记已用，并出现在账号页，可直接批量补跑 Codex）</span>
+        <span>导入为「已注册成功账号」（出现在账号页，可直接批量补跑 Codex）</span>
       </label>
       <label class="outlook-import-field">
-        <span>邮箱素材</span>
-        <textarea id="importTextV2" placeholder="Outlook: email----password----clientId----refreshToken&#10;通用API: email----取码地址"></textarea>
+        <span>账号列表</span>
+        <textarea id="importTextV2" placeholder="邮箱----https://取码接口地址&#10;邮箱----密码----2FA密钥&#10;邮箱----密码----clientId----refreshToken"></textarea>
       </label>
     </div>
     <div class="outlook-import-foot">
@@ -2505,14 +2551,48 @@ function jobsV2OpIcons() {
     del: `<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`,
   };
 }
-function showToast(t) { const el=$('#toast'); el.textContent=t; el.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>el.classList.remove('show'),1400); }
-async function copyText(text) {
-  if (!text) return;
+function showToast(t) { const el=$('#toast'); el.textContent=t; el.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>el.classList.remove('show'),2200); }
+/** 可靠复制：Clipboard API（带超时）→ textarea+execCommand 降级。成功返回 true。 */
+async function copyText(text, { silent = false } = {}) {
+  const value = String(text ?? '');
+  if (!value) {
+    if (!silent) showToast('可复制内容为空');
+    return false;
+  }
+  // 1) Clipboard API（部分环境会挂起，必须超时兜底）
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await Promise.race([
+        navigator.clipboard.writeText(value),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('clipboard_timeout')), 800)),
+      ]);
+      if (!silent) showToast('已复制');
+      return true;
+    } catch (e) {
+      // 继续降级
+    }
+  }
+  // 2) 经典 textarea 方案（不依赖 secure context）
   try {
-    if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
-    else { const a=document.createElement('textarea'); a.value=text; a.style.position='fixed'; a.style.opacity='0'; document.body.appendChild(a); a.select(); document.execCommand('copy'); a.remove(); }
-    showToast('已复制');
-  } catch(e) { showToast('复制失败'); }
+    const a = document.createElement('textarea');
+    a.value = value;
+    a.setAttribute('readonly', '');
+    a.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;outline:none;box-shadow:none;background:transparent;opacity:0;z-index:-1;';
+    document.body.appendChild(a);
+    a.focus();
+    a.select();
+    a.setSelectionRange(0, a.value.length);
+    const ok = document.execCommand('copy');
+    a.remove();
+    if (ok) {
+      if (!silent) showToast('已复制');
+      return true;
+    }
+  } catch (e) {
+    // fallthrough
+  }
+  if (!silent) showToast('复制失败，请手动全选复制');
+  return false;
 }
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -2652,6 +2732,214 @@ function bindJobsBodyEvents(bodyEl) {
 (() => {
   const startV2 = $('#btnStartV2');
   if (startV2) startV2.addEventListener('click', () => startRegistrationFromInputs($('#regCountV2'), $('#regWorkersV2'), startV2));
+  // GCash 提链会话
+  (function bindGcashSession() {
+    let pollTimer = null;
+    let lastSess = null;
+    let cachedAccessToken = ''; // 首次拉取后缓存，避免每次复制都等接口
+    const $id = (id) => document.getElementById(id);
+    function showAtText(token) {
+      const box = $id('gcashAtBoxV2');
+      const ta = $id('gcashAtTextV2');
+      if (!box || !ta) return;
+      if (token) {
+        ta.value = token;
+        box.style.display = '';
+      } else {
+        ta.value = '';
+        box.style.display = 'none';
+      }
+    }
+    function setPanelVisible(on) {
+      const p = $id('gcashSessionPanelV2');
+      if (p) p.style.display = on ? '' : 'none';
+    }
+    function renderSess(s) {
+      lastSess = s || null;
+      if (!s || s.status === 'idle' || s.status === 'closed' || s.status === 'failed') {
+        if (s && (s.status === 'closed' || s.status === 'failed')) {
+          cachedAccessToken = '';
+        }
+        // 无会话时仍可显示面板（用户刚点过启动则保持）
+        if (!$id('gcashSessionPanelV2') || $id('gcashSessionPanelV2').dataset.pinned !== '1') {
+          setPanelVisible(false);
+        }
+      } else {
+        setPanelVisible(true);
+        $id('gcashSessionPanelV2').dataset.pinned = '1';
+      }
+      if (!s) return;
+      if (!s.has_access_token) {
+        // 注册中清空展示，避免旧 token
+        if (s.status === 'registering') {
+          cachedAccessToken = '';
+          showAtText('');
+        }
+      }
+      const st = $id('gcashSessStatusV2');
+      if (st) st.textContent = s.status || 'idle';
+      const em = $id('gcashSessEmailV2');
+      if (em) em.textContent = s.email || '';
+      const msg = $id('gcashSessMsgV2');
+      if (msg) msg.textContent = s.message || s.error || '';
+      const readyAt = s.status === 'ready_at' || s.status === 'qr_ready' || s.status === 'opening_url';
+      const hasQr = !!s.qr_ready && !!s.qr_base64;
+      const copyBtn = $id('btnGcashCopyAtV2');
+      if (copyBtn) copyBtn.disabled = !s.has_access_token;
+      const urlInp = $id('gcashPayUrlV2');
+      if (urlInp) {
+        urlInp.disabled = !(s.status === 'ready_at' || s.status === 'qr_ready');
+        if (s.payment_url && !urlInp.value) urlInp.value = s.payment_url;
+      }
+      const openBtn = $id('btnGcashOpenUrlV2');
+      if (openBtn) openBtn.disabled = !(s.status === 'ready_at' || s.status === 'qr_ready');
+      const refreshBtn = $id('btnGcashRefreshQrV2');
+      if (refreshBtn) refreshBtn.disabled = !(s.status === 'qr_ready' || s.status === 'ready_at') || !s.active;
+      const dlBtn = $id('btnGcashDownloadQrV2');
+      if (dlBtn) dlBtn.disabled = !hasQr;
+      const closeBtn = $id('btnGcashCloseV2');
+      if (closeBtn) closeBtn.disabled = !s.active && s.status !== 'registering';
+      const wrap = $id('gcashQrWrapV2');
+      const img = $id('gcashQrImgV2');
+      if (wrap && img) {
+        if (hasQr) {
+          wrap.style.display = '';
+          img.src = 'data:image/png;base64,' + s.qr_base64;
+        } else {
+          wrap.style.display = 'none';
+          img.removeAttribute('src');
+        }
+      }
+      const logEl = $id('gcashSessLogV2');
+      if (logEl && Array.isArray(s.log_tail)) {
+        logEl.textContent = s.log_tail.join('\n');
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      // 轮询：活跃会话
+      if (s.active || s.status === 'registering') startPoll();
+      else stopPoll();
+    }
+    async function pollOnce() {
+      try {
+        const r = await api('/api/gcash-session');
+        renderSess(r.session || { status: 'idle' });
+      } catch (e) { /* ignore */ }
+    }
+    function startPoll() {
+      if (pollTimer) return;
+      pollTimer = setInterval(pollOnce, 2000);
+    }
+    function stopPoll() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+    const startBtn = $id('btnGcashSessionStartV2');
+    if (startBtn) startBtn.addEventListener('click', async () => {
+      if (!confirm('将启动 1 次 Cloak 注册并保活浏览器（不跑 Codex）。\n注册成功后可复制 AT、粘贴支付链接提取 GCash 二维码。\n继续？')) return;
+      startBtn.disabled = true;
+      setPanelVisible(true);
+      $id('gcashSessionPanelV2').dataset.pinned = '1';
+      cachedAccessToken = '';
+      showAtText('');
+      try {
+        const r = await api('/api/gcash-session/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        renderSess(r.session || {});
+        showToast('GCash 会话已启动，正在注册…');
+        startPoll();
+        loadSummary();
+        if (typeof refreshJobs === 'function') refreshJobs();
+      } catch (err) {
+        showToast('启动失败: ' + err.message);
+      } finally {
+        startBtn.disabled = false;
+      }
+    });
+    const copyBtn = $id('btnGcashCopyAtV2');
+    if (copyBtn) copyBtn.addEventListener('click', async () => {
+      copyBtn.disabled = true;
+      try {
+        let token = cachedAccessToken;
+        if (!token) {
+          const r = await api('/api/gcash-session/access-token');
+          token = r.access_token || '';
+          if (token) cachedAccessToken = token;
+        }
+        if (!token) throw new Error('无 AT（会话可能未就绪或已重启丢失）');
+        showAtText(token);
+        // silent：自己控制 toast，避免 copyText 与这里双 toast
+        const ok = await copyText(token, { silent: true });
+        if (ok) {
+          showToast('已复制 accessToken（' + token.length + ' 字符）');
+        } else {
+          // 剪贴板失败：自动选中文本框，方便手动 Ctrl+C
+          const ta = $id('gcashAtTextV2');
+          if (ta) { ta.focus(); ta.select(); }
+          showToast('自动复制失败：文本框已选中，请按 Ctrl+C');
+        }
+      } catch (err) {
+        showToast('复制失败: ' + err.message);
+      } finally {
+        // ready 时才重新启用
+        if (lastSess && lastSess.has_access_token) copyBtn.disabled = false;
+      }
+    });
+    const openBtn = $id('btnGcashOpenUrlV2');
+    if (openBtn) openBtn.addEventListener('click', async () => {
+      const url = ($id('gcashPayUrlV2')?.value || '').trim();
+      if (!url) { showToast('请先粘贴支付链接'); return; }
+      openBtn.disabled = true;
+      try {
+        showToast('正在浏览器打开并抽码，请稍候…');
+        const r = await api('/api/gcash-session/open-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        renderSess(r.session || {});
+        showToast(r.session?.qr_ready ? '二维码已提取' : '已打开链接');
+      } catch (err) {
+        showToast('打开/抽码失败: ' + err.message);
+        pollOnce();
+      } finally {
+        openBtn.disabled = false;
+      }
+    });
+    const refreshBtn = $id('btnGcashRefreshQrV2');
+    if (refreshBtn) refreshBtn.addEventListener('click', async () => {
+      try {
+        const r = await api('/api/gcash-session/refresh-qr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        renderSess(r.session || {});
+        showToast('二维码已更新');
+      } catch (err) {
+        showToast('重抽失败: ' + err.message);
+      }
+    });
+    const dlBtn = $id('btnGcashDownloadQrV2');
+    if (dlBtn) dlBtn.addEventListener('click', () => {
+      window.open('/api/gcash-session/qr.png?t=' + Date.now(), '_blank');
+    });
+    const closeBtn = $id('btnGcashCloseV2');
+    if (closeBtn) closeBtn.addEventListener('click', async () => {
+      const force = lastSess && lastSess.status === 'registering';
+      const note = force
+        ? '注册仍在进行，强制关闭将中断并尝试关掉浏览器。确定？'
+        : '确认 Plus 已到账并关闭保活浏览器？';
+      if (!confirm(note)) return;
+      try {
+        const r = await api('/api/gcash-session/close', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: !!force }),
+        });
+        renderSess(r.session || { status: 'closed' });
+        showToast('浏览器已关闭');
+        stopPoll();
+      } catch (err) {
+        showToast('关闭失败: ' + err.message);
+      }
+    });
+    // 进入注册页时轻量拉一次状态
+    pollOnce();
+  })();
   const delV2 = $('#btnDeleteSelectedJobsV2');
   if (delV2) delV2.addEventListener('click', deleteSelectedJobs);
   const retryV2 = $('#btnRetrySelectedJobsV2');
@@ -3168,6 +3456,34 @@ function _planAction(r) {
   }
   return `<button data-plan-check="${esc(r.id)}" title="查询当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>`;
 }
+function _fmtExtractError(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return { short: '未知原因', full: '未知原因' };
+  // 去掉异常类型前缀
+  s = s.replace(/^(RuntimeError|ValueError|Exception|Error):\s*/i, '');
+  // 若仍夹带 last={...} 大 JSON，截断为状态摘要
+  const lastIdx = s.search(/\blast\s*=\s*\{/i);
+  if (lastIdx >= 0) {
+    const head = s.slice(0, lastIdx).trim().replace(/[;，,\s]+$/, '');
+    let tail = s.slice(lastIdx);
+    // 尽量从 JSON 里抠 status / progress
+    const st = (tail.match(/"status"\s*:\s*"([^"]+)"/) || [])[1] || '';
+    const label = (tail.match(/"status_label"\s*:\s*"([^"]+)"/) || [])[1]
+      || (tail.match(/"progress_message"\s*:\s*"([^"]+)"/) || [])[1] || '';
+    const step = (tail.match(/"progress_step"\s*:\s*(\d+)/) || [])[1];
+    const total = (tail.match(/"progress_total"\s*:\s*(\d+)/) || [])[1];
+    const bits = [head || '提链失败'];
+    if (st) bits.push('status=' + st);
+    if (label) bits.push(label);
+    if (step && total) bits.push(step + '/' + total);
+    s = bits.join(' · ');
+  }
+  // 压扁空白
+  s = s.replace(/\s+/g, ' ').trim();
+  const full = s;
+  const short = s.length > 72 ? (s.slice(0, 70) + '…') : s;
+  return { short, full };
+}
 function _fmtExtractExpire(v) {
   if (!v) return '';
   const raw = String(v).trim();
@@ -3197,8 +3513,8 @@ function _extractLinkCell(r) {
     return `<div class="extract-link-cell"><span class="pill status-success" title="${title || esc(link)}">提链成功${typ ? '(' + esc(typ) + ')' : ''}</span>${copy}${qrBtn}${expireHtml}</div>`;
   }
   if (s === 'failed') {
-    const reason = err || msg || '未知原因';
-    return `<div class="extract-link-cell"><span class="pill status-failed" title="${esc(reason)}">提链失败</span><div class="extract-link-error" title="${esc(reason)}">${esc(reason)}</div></div>`;
+    const fmt = _fmtExtractError(err || msg || '未知原因');
+    return `<div class="extract-link-cell"><span class="pill status-failed" title="${esc(fmt.full)}">提链失败</span><div class="extract-link-error" title="${esc(fmt.full)}">${esc(fmt.short)}</div></div>`;
   }
   return '';
 }
@@ -3208,8 +3524,8 @@ function _extractLinkAction(r) {
   const plan = (r.current_plan_type || r.plan_type || '').toString().toLowerCase();
   const eligible = plan === 'free' && !!r.plus_trial_eligible;
   if (!eligible) return '';
-  const failedReason = s === 'failed' ? (r.extract_link_error || r.extract_link_message || '') : '';
-  return `<button class="good" data-extract-link="${esc(r.id)}" title="${esc(failedReason ? '重新提链；上次失败原因：' + failedReason : '为该 free(可Plus试用) 账号创建 PIX/UPI/KAKAO_PAY/IDEAL 提链任务')}">提链</button>`;
+  const failedReason = s === 'failed' ? _fmtExtractError(r.extract_link_error || r.extract_link_message || '').full : '';
+  return `<button class="good" data-extract-link="${esc(r.id)}" title="${esc(failedReason ? '重新提链；上次失败：' + failedReason : '为该 free(可Plus试用) 账号创建提链任务')}">提链</button>`;
 }
 function _codexAction(r) {
   const s = r.codex_status || '';
@@ -4639,15 +4955,19 @@ async function doImportOutlook() {
   if (!text.trim()) { showToast('请粘贴邮箱素材'); return; }
   if (submitBtn) submitBtn.disabled = true;
   try {
-    const source = sourceEl ? sourceEl.value : 'outlook';
+    const source = sourceEl ? sourceEl.value : 'auto';
     const as_registered = registeredEl ? !!registeredEl.checked : true;
     const r = await api('/api/outlook/import', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text, source, as_registered}) });
     const mode = r.as_registered ? '已注册账号' : '邮箱池素材';
-    const msg = `按 ${mode} 导入：解析 ${r.parsed} 行，新增 ${r.inserted}，跳过 ${r.skipped}${r.as_registered ? '；可到“账号”页选择后批量补跑 Codex' : ''}`;
+    const kinds = Array.isArray(r.kinds) && r.kinds.length ? `，类型=${r.kinds.join('+')}` : '';
+    const msg = `按 ${mode} 导入：解析 ${r.parsed} 行，新增 ${r.inserted}，跳过 ${r.skipped}${kinds}${r.as_registered ? '；可到“账号”页选择后批量补跑 Codex' : ''}`;
     if (resultEl) resultEl.innerHTML = `<div class="banner info">${esc(msg)}</div>`;
     if (textEl) textEl.value = '';
-    setPoolSourceV2(source);
-    setImportSourceV2(source);
+    // 邮箱池筛选：有 outlook/generic 时切过去；纯 password_totp 只刷新账号页
+    if (Array.isArray(r.kinds)) {
+      if (r.kinds.includes('outlook')) setPoolSourceV2('outlook');
+      else if (r.kinds.includes('generic_api')) setPoolSourceV2('generic_api');
+    }
     loadOutlook(); loadAccounts(); loadSummary();
     showToast(`导入完成：新增 ${r.inserted}，跳过 ${r.skipped}`);
     setTimeout(closeOutlookImportModal, 600);
@@ -4739,7 +5059,7 @@ async function loadCodex() {
 const CODEX_SELECTED = new Set();
 function _codexUpdateSelectedHint() {
   const none = CODEX_SELECTED.size === 0;
-  ['btnCodexDownloadBulkV2', 'btnCodexDownloadBulkCpaV2', 'btnCodexDeleteBulkV2'].forEach(id => {
+  ['btnCodexDownloadBulkV2', 'btnCodexDownloadBulkSub2V2', 'btnCodexDownloadBulkCpaV2', 'btnCodexPushPoolV2', 'btnCodexDeleteBulkV2'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = none;
   });
@@ -4788,8 +5108,11 @@ function renderCodex() {
   body.innerHTML = rows.map(r => {
     const checked = CODEX_SELECTED.has(r.filename) ? 'checked' : '';
     const exported = (r.exported_count || 0) > 0;
+    const isSub2 = String(r.type || '').includes('sub2') || String(r.filename || '').includes('sub2-callback');
     const moreItems = [
+      `<button type="button" class="good" data-codex-download-sub2="${esc(r.filename)}" title="从 sub2api 导出可导入 JSON（含完整 token）">从sub2下载</button>`,
       `<button type="button" class="good" data-codex-download-cpa="${esc(r.filename)}" title="按邮箱从 CPA auth-files 下载真实 Codex JSON">从CPA下载</button>`,
+      isSub2 ? `<button type="button" data-codex-download-raw="${esc(r.filename)}" title="下载本地原始 sub2 回执（不含 token）">原始回执</button>` : '',
       exported ? `<button type="button" data-codex-reset="${esc(r.filename)}" title="重新标记为未导出">重置标记</button>` : '',
     ].filter(Boolean).join('');
     return `
@@ -4797,7 +5120,7 @@ function renderCodex() {
       <td class="col-check"><input type="checkbox" class="codex-row-check" data-fname="${esc(r.filename)}" ${checked}></td>
       <td class="col-email" title="${esc(r.email || '')}">
         <div class="acc-v2-email">${esc(r.email || '-')}</div>
-        <div class="acc-v2-sub" title="${esc(r.filename)}">${esc(r.filename)}</div>
+        <div class="acc-v2-sub" title="${esc(r.filename)}">${esc(r.filename)}${isSub2 ? ' · sub2' : ''}</div>
       </td>
       <td class="col-plan">${esc(r.plan || '-')}</td>
       <td class="col-status">${_codexStatusBadge(r)}</td>
@@ -4806,7 +5129,7 @@ function renderCodex() {
       <td class="col-time" title="${esc(r.expired || '-')}">${esc(r.expired || '-')}</td>
       <td class="col-actions">
         <div class="acc-v2-actions">
-          <button type="button" class="primary" data-codex-download="${esc(r.filename)}" title="下载本地 codex_accounts/ 中的 JSON/回执">本地下载</button>
+          <button type="button" class="primary" data-codex-download="${esc(r.filename)}" title="${isSub2 ? '从 sub2api 导出可导入格式（含 token）' : '下载本地 codex_accounts/ 中的 JSON'}">${isSub2 ? '下载sub2' : '本地下载'}</button>
           <button type="button" class="danger" data-codex-delete="${esc(r.filename)}" title="删除本地 Codex JSON 凭证文件">删除</button>
           <div class="acc-v2-more">
             <button type="button" class="acc-v2-more-btn" data-codex-more-toggle aria-haspopup="true">更多</button>
@@ -4851,6 +5174,41 @@ async function onCodexBodyClick(e) {
   }
   if (e.target.closest('.acc-v2-more-menu')) closeCodexV2MoreMenus();
 
+  const dlSub2 = e.target.closest('[data-codex-download-sub2]');
+  if (dlSub2) {
+    const fname = dlSub2.dataset.codexDownloadSub2;
+    dlSub2.disabled = true;
+    try {
+      const resp = await fetch(`/api/codex/download-from-sub2/${encodeURIComponent(fname)}`);
+      if (!resp.ok) {
+        const errBody = await resp.json().catch(() => ({}));
+        throw new Error(errBody.error || ('HTTP ' + resp.status));
+      }
+      const cd = resp.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename="([^"]+)"/);
+      const dlname = m ? m[1] : fname.replace(/-sub2-callback\.json$/i, '-sub2api.json');
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = dlname;
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+      showToast('已从 sub2api 导出');
+      setTimeout(loadCodex, 600);
+    } catch (err) {
+      showToast('从 sub2 下载失败: ' + err.message);
+    } finally {
+      dlSub2.disabled = false;
+    }
+    return;
+  }
+  const dlRaw = e.target.closest('[data-codex-download-raw]');
+  if (dlRaw) {
+    const fname = dlRaw.dataset.codexDownloadRaw;
+    window.location.href = `/api/codex/download/${encodeURIComponent(fname)}?format=raw`;
+    showToast('开始下载原始回执');
+    return;
+  }
   const dlCpa = e.target.closest('[data-codex-download-cpa]');
   if (dlCpa) {
     const fname = dlCpa.dataset.codexDownloadCpa;
@@ -4915,9 +5273,10 @@ async function onCodexBodyClick(e) {
 async function codexDownloadBulkLocal() {
   if (CODEX_SELECTED.size === 0) return;
   const filenames = Array.from(CODEX_SELECTED);
-  const note = `选中 ${filenames.length} 个凭证，打包到一个 JSON 文件下载。\n\n` +
-               `⚠ 这个聚合格式 CPA 不能直接读，主要用于备份/迁移。\n` +
-               `要给 CPA 用请用每行的"下载 JSON"单个下载。\n\n继续？`;
+  const note = `选中 ${filenames.length} 个凭证下载。\n\n` +
+               `• 若主要是 sub2 回执：自动从 sub2api 导出可导入 JSON（含 token）\n` +
+               `• 若是 CPA/本地凭证：打包原始 JSON（备份用）\n\n` +
+               `需要强制 sub2 格式请点「下载sub2」。\n\n继续？`;
   if (!confirm(note)) return;
   const btn = $('#btnCodexDownloadBulkV2');
   if (btn) btn.disabled = true;
@@ -4925,7 +5284,7 @@ async function codexDownloadBulkLocal() {
     const resp = await fetch('/api/codex/download-bulk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filenames }),
+      body: JSON.stringify({ filenames, format: 'auto' }),
     });
     if (!resp.ok) {
       const e = await resp.json().catch(() => ({}));
@@ -4945,6 +5304,47 @@ async function codexDownloadBulkLocal() {
     setTimeout(loadCodex, 600);
   } catch(err) {
     showToast('批量下载失败: ' + err.message);
+  } finally {
+    _codexUpdateSelectedHint();
+  }
+}
+async function codexDownloadBulkSub2() {
+  if (CODEX_SELECTED.size === 0) return;
+  const filenames = Array.from(CODEX_SELECTED);
+  const note = `选中 ${filenames.length} 个本地记录，将离线转换为 sub2api 账号 JSON。\n\n` +
+               `• 不依赖 sub2api 号池里账号是否还在\n` +
+               `• 输出 accounts/data 格式，便于迁移/备份/再导入\n` +
+               `• 若本地回执本身不含 token，导出文件里也可能没有 RT/AT\n\n继续？`;
+  if (!confirm(note)) return;
+  const btn = $('#btnCodexDownloadBulkSub2V2');
+  if (btn) btn.disabled = true;
+  try {
+    const resp = await fetch('/api/codex/download-bulk-from-sub2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filenames, include_proxies: false }),
+    });
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      const detail = Array.isArray(e.errors) && e.errors.length
+        ? ('；' + e.errors.slice(0, 3).map(x => `${x.filename}: ${x.error}`).join('；'))
+        : '';
+      throw new Error((e.error || ('HTTP ' + resp.status)) + detail);
+    }
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const dlname = m ? m[1] : `sub2api-accounts-bulk-${Date.now()}.json`;
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = dlname;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+    showToast(`已从 sub2api 导出 ${filenames.length} 个`);
+    CODEX_SELECTED.clear();
+    setTimeout(loadCodex, 600);
+  } catch (err) {
+    showToast('从 sub2 批量下载失败: ' + err.message);
   } finally {
     _codexUpdateSelectedHint();
   }
@@ -5008,6 +5408,127 @@ async function codexDeleteBulk() {
     _codexUpdateSelectedHint();
   }
 }
+function _codexPoolCfgVal(key, def) {
+  try {
+    const f = (CONFIG || []).find(x => x.key === key);
+    if (f && f.value !== undefined && f.value !== null && String(f.value) !== '') return f.value;
+  } catch (e) {}
+  return def;
+}
+function _codexPoolPushParams() {
+  return {
+    groupId: Number(_codexPoolCfgVal('SUB2API_POOL_GROUP_ID', 8)),
+    concurrency: Number(_codexPoolCfgVal('SUB2API_POOL_CONCURRENCY', 50)),
+    priority: Number(_codexPoolCfgVal('SUB2API_POOL_PRIORITY', 1)),
+    loadFactor: Number(_codexPoolCfgVal('SUB2API_POOL_LOAD_FACTOR', 10)),
+    rateMultiplier: Number(_codexPoolCfgVal('SUB2API_POOL_RATE_MULTIPLIER', 1)),
+  };
+}
+function _formatPoolPushResult(r, prefix) {
+  const ok = Number(r.success || 0);
+  const fail = Number(r.failed || 0);
+  const skip = Number(r.skipped || 0);
+  const cfg = r.config || {};
+  let msg = `${prefix || '号池推送完成'}：成功 ${ok}，失败 ${fail}，跳过 ${skip}`;
+  if (r.account_count != null) msg += `，解析账号 ${r.account_count}`;
+  if (cfg.group_id != null) msg += `（group=${cfg.group_id}, concurrency=${cfg.concurrency}）`;
+  const fails = (r.results || []).filter(x => !x.ok).slice(0, 3);
+  if (fails.length) {
+    msg += '；示例: ' + fails.map(x => `${x.email || x.filename}: ${x.error || 'fail'}`).join('；');
+  }
+  const fmts = r.formats || {};
+  const fmtKeys = Object.keys(fmts);
+  if (fmtKeys.length) {
+    const sample = fmtKeys.slice(0, 3).map(k => `${k}→${fmts[k]}`).join('，');
+    msg += `；格式: ${sample}`;
+  }
+  return msg;
+}
+async function codexPushPoolBulk() {
+  if (CODEX_SELECTED.size === 0) return;
+  const filenames = Array.from(CODEX_SELECTED);
+  const p = _codexPoolPushParams();
+  const note =
+    `确定把选中的 ${filenames.length} 个 Codex 授权推送到 sub2api 号池吗？\n\n` +
+    `• 接口：POST /api/v1/admin/accounts/batch\n` +
+    `• 分组 ID：${p.groupId}\n` +
+    `• 并发 concurrency：${p.concurrency}\n` +
+    `• 平台/类型：openai / oauth\n` +
+    `• 仅推送含 access_token 的 codex-*.json（sub2-callback 回执会跳过）\n` +
+    `• 号池参数用「配置 → Codex」保存值，不读 JSON 里的 concurrency/分组\n\n继续？`;
+  if (!confirm(note)) return;
+  const btn = $('#btnCodexPushPoolV2');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/codex/push-sub2-pool', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filenames,
+        group_id: p.groupId,
+        concurrency: p.concurrency,
+        priority: p.priority,
+        load_factor: p.loadFactor,
+        rate_multiplier: p.rateMultiplier,
+      }),
+    });
+    showToast(_formatPoolPushResult(r));
+    CODEX_SELECTED.clear();
+    loadCodex();
+  } catch (err) {
+    showToast('推送号池失败: ' + err.message);
+    _codexUpdateSelectedHint();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+function codexUploadPushPoolPick() {
+  const input = $('#codexUploadPoolFilesV2');
+  if (!input) return;
+  input.value = '';
+  input.click();
+}
+async function codexUploadPushPoolOnFiles(ev) {
+  const input = ev && ev.target ? ev.target : $('#codexUploadPoolFilesV2');
+  const fileList = input && input.files ? Array.from(input.files) : [];
+  if (!fileList.length) return;
+  const p = _codexPoolPushParams();
+  const names = fileList.map(f => f.name).slice(0, 8).join('\n  ');
+  const more = fileList.length > 8 ? `\n  …共 ${fileList.length} 个` : '';
+  const note =
+    `确定上传并推送以下 ${fileList.length} 个 JSON 到 sub2api 号池吗？\n\n` +
+    `  ${names}${more}\n\n` +
+    `• 自动识别 CPA codex / sub2api 单账号 / sub2api export(accounts)\n` +
+    `• 核心凭据（token 等）原样使用，不改写\n` +
+    `• 号池参数覆盖为：group=${p.groupId}, concurrency=${p.concurrency}, priority=${p.priority}\n` +
+    `• JSON 内自带的 concurrency/group_ids 等一律忽略\n\n继续？`;
+  if (!confirm(note)) {
+    if (input) input.value = '';
+    return;
+  }
+  const btn = $('#btnCodexUploadPushPoolV2');
+  if (btn) btn.disabled = true;
+  try {
+    const fd = new FormData();
+    fileList.forEach(f => fd.append('files', f, f.name));
+    fd.append('group_id', String(p.groupId));
+    fd.append('concurrency', String(p.concurrency));
+    fd.append('priority', String(p.priority));
+    fd.append('load_factor', String(p.loadFactor));
+    fd.append('rate_multiplier', String(p.rateMultiplier));
+    // 不要设 Content-Type，让浏览器带 multipart boundary
+    const r = await api('/api/codex/push-sub2-pool-upload', {
+      method: 'POST',
+      body: fd,
+    });
+    showToast(_formatPoolPushResult(r, '上传推送完成'));
+  } catch (err) {
+    showToast('上传推送号池失败: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (input) input.value = '';
+  }
+}
 (function bindCodexV2() {
   const qV2 = $('#qCodexV2');
   if (qV2) qV2.addEventListener('input', debounce(() => {
@@ -5024,7 +5545,12 @@ async function codexDeleteBulk() {
   if (refreshV2) refreshV2.addEventListener('click', loadCodex);
   const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
   bind('btnCodexDownloadBulkV2', codexDownloadBulkLocal);
+  bind('btnCodexDownloadBulkSub2V2', codexDownloadBulkSub2);
   bind('btnCodexDownloadBulkCpaV2', codexDownloadBulkCpa);
+  bind('btnCodexPushPoolV2', codexPushPoolBulk);
+  bind('btnCodexUploadPushPoolV2', codexUploadPushPoolPick);
+  const uploadInput = $('#codexUploadPoolFilesV2');
+  if (uploadInput) uploadInput.addEventListener('change', codexUploadPushPoolOnFiles);
   bind('btnCodexDeleteBulkV2', codexDeleteBulk);
   document.addEventListener('click', (e) => {
     if (e.target.closest('.codex-table-v2 .acc-v2-more')) return;
@@ -5060,10 +5586,12 @@ function emailConfigSectionForKey(key) {
 }
 
 function smsConfigSectionForKey(key) {
-  if (['SMS_PROVIDER','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_RETRIES','SMS_CODE_WAIT'].includes(key)) {
-    return ['通用接码', '接码通道选择、国家/服务代码、等待和重试参数；H 通道可复用 SMS_SERVICE/SMS_COUNTRY 作为 projectId/country'];
+  if (['SMS_PROVIDER','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_PRICE','SMS_MIN_PRICE','SMS_PREFERRED_COUNTRIES','SMS_AUTO_COUNTRY','SMS_PROVIDER_MIN_STOCK','SMS_PRICE_FLOOR_RATIO','SMS_ACQUIRE_MAX_SLOTS','SMS_AUTO_COUNTRY_MIN_STOCK','SMS_AUTO_COUNTRY_MAX_PRICE','SMS_MAX_RETRIES','SMS_CODE_WAIT'].includes(key)) {
+    return ['通用接码', '通道/服务码、价格上下限、优先国家、供应商库存与价位策略、跨国家轮换与重试；HeroSMS/SMSBower 按国家×供应商×价位在上限内省钱选号'];
   }
   if (key === 'SMS_API_KEY') return ['GrizzlySMS', 'GrizzlySMS 平台 API Key 配置'];
+  if (key.startsWith('HEROSMS_')) return ['HeroSMS', 'HeroSMS 独立 API Key；OpenAI 服务码 dr；可查询余额/价格/最优国家'];
+  if (key.startsWith('SMSBOWER_')) return ['SMSBower', 'SMSBower 独立 API Key；OpenAI 服务码 dr；可查询余额/价格/最优国家'];
   if (key.startsWith('H_')) return ['H 接码', 'H_API.md 本地 H 取号服务配置；项目ID/国家留空时复用通用字段'];
   if (key.startsWith('L_')) return ['L 接码', 'L_API.md 本地 L 取号服务配置'];
   return ['其他接码配置', ''];
@@ -5253,6 +5781,7 @@ function setRegistrationDriverValue(value) {
   if (sectionMount) renderRegistrationEpSelect(sectionMount, 'configRegistrationSelectV2');
   bindRoxyWorkspaceToolsV2();
   bindCloudMailToolsV2();
+  bindSmsQueryToolsV2();
 }
 function renderRegistrationEpSelect(mount, wrapId) {
   if (!mount) return;
@@ -5422,6 +5951,9 @@ function renderSectionedConfigSectionV2(name, fields, sectionForKey, preferred, 
   if (name === '邮箱 / OTP' && active === 'CloudMail') {
     extra = renderCloudMailTokenToolsV2();
   }
+  if (name === '接码平台' && (active === 'HeroSMS' || active === 'SMSBower' || active === 'GrizzlySMS')) {
+    extra = renderSmsQueryToolsV2(active);
+  }
   return `
     <section class="config-section-v2" id="${esc(slug)}" data-config-section="${esc(name)}">
       ${renderConfigSectionHead(name, '')}
@@ -5469,6 +6001,160 @@ function bindCloudMailToolsV2() {
   if (domainBtn && !domainBtn.dataset.bound) {
     domainBtn.dataset.bound = '1';
     domainBtn.addEventListener('click', () => loadCloudMailDomainsV2());
+  }
+}
+
+function _smsProviderIdForSection(section) {
+  if (section === 'HeroSMS') return 'herosms';
+  if (section === 'SMSBower') return 'smsbower';
+  if (section === 'GrizzlySMS') return 'grizzly';
+  return String(_configValueV2('SMS_PROVIDER') || 'grizzly').trim().toLowerCase();
+}
+function _smsApiKeyKeyForProvider(provider) {
+  if (provider === 'herosms') return 'HEROSMS_API_KEY';
+  if (provider === 'smsbower') return 'SMSBOWER_API_KEY';
+  return 'SMS_API_KEY';
+}
+function renderSmsQueryToolsV2(section) {
+  const provider = _smsProviderIdForSection(section);
+  return `
+    <div class="roxy-workspace-box" style="margin-top:18px;">
+      <div>
+        <b>${esc(section)} 查询</b>
+        <div class="hint">用当前表单中的 API Key / 服务码 / 国家查询余额、价格和国家排名。OpenAI 服务码一般为 <span class="mono">dr</span>。查询不会扣费。</div>
+      </div>
+      <div class="action-cell">
+        <button class="btn primary" type="button" id="btnSmsBalanceV2" data-sms-provider="${esc(provider)}">查余额</button>
+        <button class="btn" type="button" id="btnSmsPricesV2" data-sms-provider="${esc(provider)}">查价格</button>
+        <button class="btn" type="button" id="btnSmsTopCountriesV2" data-sms-provider="${esc(provider)}">国家排名</button>
+        <button class="btn" type="button" id="btnSmsBestCountryV2" data-sms-provider="${esc(provider)}">最优国家</button>
+      </div>
+      <div id="smsQueryStatusV2" class="muted" style="font-size:12px;white-space:pre-wrap;">未查询</div>
+    </div>
+  `;
+}
+function bindSmsQueryToolsV2() {
+  const balanceBtn = $('#btnSmsBalanceV2');
+  const pricesBtn = $('#btnSmsPricesV2');
+  const topBtn = $('#btnSmsTopCountriesV2');
+  const bestBtn = $('#btnSmsBestCountryV2');
+  if (balanceBtn && !balanceBtn.dataset.bound) {
+    balanceBtn.dataset.bound = '1';
+    balanceBtn.addEventListener('click', () => querySmsBalanceV2(balanceBtn.dataset.smsProvider));
+  }
+  if (pricesBtn && !pricesBtn.dataset.bound) {
+    pricesBtn.dataset.bound = '1';
+    pricesBtn.addEventListener('click', () => querySmsPricesV2(pricesBtn.dataset.smsProvider));
+  }
+  if (topBtn && !topBtn.dataset.bound) {
+    topBtn.dataset.bound = '1';
+    topBtn.addEventListener('click', () => querySmsTopCountriesV2(topBtn.dataset.smsProvider));
+  }
+  if (bestBtn && !bestBtn.dataset.bound) {
+    bestBtn.dataset.bound = '1';
+    bestBtn.addEventListener('click', () => querySmsBestCountryV2(bestBtn.dataset.smsProvider));
+  }
+}
+function _smsQueryPayload(provider) {
+  const keyName = _smsApiKeyKeyForProvider(provider);
+  return {
+    provider,
+    api_key: _configValueV2(keyName).trim(),
+    service: _configValueV2('SMS_SERVICE').trim() || 'dr',
+    country: _configValueV2('SMS_COUNTRY').trim(),
+  };
+}
+async function querySmsBalanceV2(provider) {
+  const status = $('#smsQueryStatusV2');
+  if (status) status.textContent = `正在查询 ${provider} 余额...`;
+  try {
+    const r = await api('/api/sms/balance', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(_smsQueryPayload(provider)),
+    });
+    if (status) status.innerHTML = `✅ ${esc(provider)} 余额：<b class="mono">${esc(String(r.balance))}</b>`;
+    showToast(`${provider} 余额 ${r.balance}`);
+  } catch (e) {
+    if (status) status.innerHTML = `<span style="color:var(--red);">查余额失败：${esc(e.message)}</span>`;
+  }
+}
+async function querySmsPricesV2(provider) {
+  const status = $('#smsQueryStatusV2');
+  if (status) status.textContent = `正在查询 ${provider} 价格...`;
+  try {
+    const payload = _smsQueryPayload(provider);
+    const r = await api('/api/sms/prices', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const prices = r.prices || {};
+    let line = '';
+    // 常见格式: {country: {service: {cost, count}}}
+    const cty = payload.country || Object.keys(prices)[0] || '';
+    const byCountry = prices[cty] || prices;
+    const svc = payload.service || 'dr';
+    const item = (byCountry && byCountry[svc]) || byCountry || {};
+    if (item && (item.cost != null || item.price != null || item.count != null)) {
+      line = `国家 ${cty || '-'} / 服务 ${svc}：价格 ${item.cost ?? item.price ?? '-'}，库存 ${item.count ?? '-'}`;
+    } else {
+      const text = JSON.stringify(prices);
+      line = text.length > 500 ? text.slice(0, 500) + '…' : text;
+    }
+    if (status) status.innerHTML = `✅ ${esc(provider)} 价格：${esc(line)}`;
+    showToast(`${provider} 价格已查询`);
+  } catch (e) {
+    if (status) status.innerHTML = `<span style="color:var(--red);">查价格失败：${esc(e.message)}</span>`;
+  }
+}
+async function querySmsTopCountriesV2(provider) {
+  const status = $('#smsQueryStatusV2');
+  if (status) status.textContent = `正在查询 ${provider} 国家排名...`;
+  try {
+    const r = await api('/api/sms/top-countries', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({..._smsQueryPayload(provider), top_n: 12}),
+    });
+    const rows = Array.isArray(r.countries) ? r.countries : [];
+    if (!rows.length) {
+      if (status) status.textContent = `⚠️ ${provider} 暂无可用国家/库存`;
+      return;
+    }
+    const lines = rows.map((row, i) =>
+      `${i + 1}. 国家 ${row.country}${row.name ? '(' + row.name + ')' : ''}  价 ${row.price}  库存 ${row.count}`
+    );
+    if (status) status.textContent = `✅ ${provider} 服务 ${r.service || 'dr'} 国家排名：\n` + lines.join('\n');
+    showToast(`${provider} 已返回 ${rows.length} 个国家`);
+  } catch (e) {
+    if (status) status.innerHTML = `<span style="color:var(--red);">国家排名失败：${esc(e.message)}</span>`;
+  }
+}
+async function querySmsBestCountryV2(provider) {
+  const status = $('#smsQueryStatusV2');
+  if (status) status.textContent = `正在计算 ${provider} 最优国家...`;
+  try {
+    const r = await api('/api/sms/best-country', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(_smsQueryPayload(provider)),
+    });
+    if (!r.country) {
+      if (status) status.textContent = `⚠️ ${provider} 未找到满足条件的国家（检查库存/白名单/最高价）`;
+      return;
+    }
+    const d = r.detail || {};
+    if (status) {
+      status.innerHTML =
+        `✅ ${esc(provider)} 最优国家：<b class="mono">${esc(String(r.country))}</b>` +
+        (d.price != null ? `，价格 ${esc(String(d.price))}` : '') +
+        (d.count != null ? `，库存 ${esc(String(d.count))}` : '') +
+        `（可填到 SMS_COUNTRY）`;
+    }
+    showToast(`${provider} 最优国家 ${r.country}`);
+  } catch (e) {
+    if (status) status.innerHTML = `<span style="color:var(--red);">最优国家失败：${esc(e.message)}</span>`;
   }
 }
 function _configValueV2(key) {
@@ -5642,7 +6328,7 @@ function renderConfigSectionV2(name, fields) {
       name,
       fields,
       smsConfigSectionForKey,
-      ['通用接码', 'GrizzlySMS', 'H 接码', 'L 接码', '其他接码配置'],
+      ['通用接码', 'GrizzlySMS', 'HeroSMS', 'SMSBower', 'H 接码', 'L 接码', '其他接码配置'],
       { get: () => CONFIG_SMS_ACTIVE_SECTION_V2, set: v => { CONFIG_SMS_ACTIVE_SECTION_V2 = v; } },
       'sms-section-v2'
     );
@@ -5672,6 +6358,7 @@ function renderConfigLayoutV2() {
   if (sectionMount) renderRegistrationEpSelect(sectionMount, 'configRegistrationSelectV2');
   bindRoxyWorkspaceToolsV2();
   bindCloudMailToolsV2();
+  bindSmsQueryToolsV2();
 }
 function scrollToConfigSection(slug) {
   const el = document.getElementById(slug);

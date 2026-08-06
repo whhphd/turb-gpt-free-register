@@ -63,10 +63,11 @@ CODEX_OAUTH_DRIVER: str = "roxy"
 # ============================================================
 
 # 授权地址来源：
-#   "cpa"   = 通过 CPA 管理接口 /v0/management/codex-auth-url 生成（推荐）
-#   "sub2"  = 通过 sub2 管理接口生成，并把 callback 上传到 sub2
-#   "local" = 使用本模块保留的本地 PKCE 生成逻辑（兼容旧方案）
-CODEX_AUTH_URL_SOURCE: str = "cpa"
+#   "local" = 本程序本地 PKCE 生成授权地址、自行换 token 并保存凭据（推荐；不依赖 CPA/sub2 admin key）
+#   "sub2"  = 通过 sub2api 管理接口生成，并把 callback 上传到 sub2api（需 SUB2API_API_BASE + SUB2API_API_KEY）
+#   "cpa"   = 通过 CPA 管理接口 /v0/management/codex-auth-url 生成
+# 显式配置 cpa/sub2 但密钥缺失时，会自动回退到 local。
+CODEX_AUTH_URL_SOURCE: str = "local"
 
 # CPA 管理页面或服务地址，例如 http://localhost:8317/admin/oauth
 # 实际请求会取 origin，调用：
@@ -91,28 +92,82 @@ CPA_SAVE_CALLBACK_RECEIPT: bool = True
 # ============================================================
 # 接码平台（手机短信验证用）
 # SMS_PROVIDER:
-#   "grizzly" = GrizzlySMS，接口说明见 https://api.grizzlysms.com
-#   "l"       = 本地 L 取号服务，接口说明见 L_API.md
-#   "h"       = 本地 H 取号服务，接口说明见 H_API.md
+#   "grizzly"  = GrizzlySMS，接口说明见 https://api.grizzlysms.com
+#   "herosms"  = HeroSMS（SMS-Activate 兼容），https://hero-sms.com
+#   "smsbower" = SMSBower（SMS-Activate 兼容），https://smsbower.page
+#   "l"        = 本地 L 取号服务，接口说明见 L_API.md
+#   "h"        = 本地 H 取号服务，接口说明见 H_API.md
 # ============================================================
 
 SMS_PROVIDER: str = "l"
 
-# 接码 API 基址（GET handler）
+# GrizzlySMS API 基址（GET handler）
 SMS_API_BASE: str = "https://api.grizzlysms.com/stubs/handler_api.php"
 
-# 接码 API 密钥（在 GrizzlySMS 后台 → 设置 获取）
+# GrizzlySMS API 密钥（在 GrizzlySMS 后台 → 设置 获取）
 # 留空时 Codex 授权的手机验证步会失败；如不需要 Codex 自动授权，把 ENABLE_CODEX_AUTO=False。
 SMS_API_KEY: str = env_str("SMS_API_KEY", "")
 
-# 服务代码：OpenAI = "dr"
-SMS_SERVICE: str = "openai"
+# HeroSMS（独立 key，与 Grizzly/SMSBower 分开）
+HEROSMS_API_BASE: str = "https://hero-sms.com/stubs/handler_api.php"
+HEROSMS_API_KEY: str = env_str("HEROSMS_API_KEY", "")
 
-# 国家代码：葡萄牙 = "117" / 美国 = "187"
-SMS_COUNTRY: str = "10"
+# SMSBower（独立 key）
+SMSBOWER_API_BASE: str = "https://smsbower.page/stubs/handler_api.php"
+SMSBOWER_API_KEY: str = env_str("SMSBOWER_API_KEY", "")
 
-# 单个号愿意支付的最高价格（留空=不限）。透传给 getNumber 的 maxPrice。
-SMS_MAX_PRICE: str = ""
+# 服务代码：HeroSMS/SMSBower/Grizzly 上 OpenAI = "dr"；L/H 按各自文档填写
+SMS_SERVICE: str = "dr"
+
+# 国家代码：泰国=52（OpenAI 确认走 SMS）/ 美国=187 / 葡萄牙=117
+SMS_COUNTRY: str = "52"
+
+# 单个号愿意支付的最高价格（硬上限，留空=不限）。前端可配；选供应商/价位时不会超过此值。
+SMS_MAX_PRICE: str = "0.35"
+
+# 最低单价（可选，留空/0=不限）。用于挡极端低价虚拟号，例如 0.004。
+SMS_MIN_PRICE: str = ""
+
+# 优先国家列表（逗号分隔）。同国先换供应商/价位，再换其它优先国。
+# 当 SMS_COUNTRY_WHITELIST 为空时，本列表同时作为硬白名单（默认不再乱扩到全世界）。
+# 52=泰国（OpenAI 确认走 SMS）
+SMS_PREFERRED_COUNTRIES: str = "52"
+
+# 接码国家硬白名单（逗号分隔）。非空时只从这些国家取号，绝不扩展到白名单外。
+# 例：52,6,16,36。留空时：若开启「按服务 Top 白名单」则用 API TopN；否则用优先国家。
+SMS_COUNTRY_WHITELIST: str = ""
+
+# 是否允许在白名单之外扩展到 getPrices 其它有货国（默认 False）
+SMS_ALLOW_OUTSIDE_WHITELIST: bool = False
+
+# 用接码平台 getTopCountriesByService 的 TopN 当动态白名单（SMSBower/Hero 推荐）。
+# 手动 SMS_COUNTRY_WHITELIST 非空时仍以手动为准。
+SMS_USE_TOP_COUNTRIES_WHITELIST: bool = True
+
+# Top 国家数量上限（API 通常返回 10）
+SMS_TOP_COUNTRIES_LIMIT: int = 10
+
+# Top 白名单缓存秒数，避免每次取号都打 API
+SMS_TOP_COUNTRIES_CACHE_SEC: int = 300
+
+# 自动跨国家选号（herosms/smsbower）：在白名单内按「国家×供应商×价位」轮换；
+# 仅当 SMS_ALLOW_OUTSIDE_WHITELIST=True 时才会扩到白名单外其它有货国。
+SMS_AUTO_COUNTRY: bool = True
+
+# 供应商最低库存（getPricesV3 的 count）
+SMS_PROVIDER_MIN_STOCK: int = 15
+
+# 兼容旧字段：自动选国最低库存（若 >0 可覆盖 SMS_PROVIDER_MIN_STOCK）
+SMS_AUTO_COUNTRY_MIN_STOCK: int = 0
+
+# 兼容旧字段：自动选国最高价；>0 时与 SMS_MAX_PRICE 取更严（更小）的那个
+SMS_AUTO_COUNTRY_MAX_PRICE: float = 0
+
+# 相对该国中位价的地板比例：price < median*ratio 且库存很大时，首轮跳过（防垃圾虚拟号）
+SMS_PRICE_FLOOR_RATIO: float = 0.25
+
+# 单次取号最多尝试几个（国家×供应商）候选槽
+SMS_ACQUIRE_MAX_SLOTS: int = 12
 
 # 一个号收不到短信/被拒时，换号重试的最大次数
 SMS_MAX_RETRIES: int = 10
@@ -161,4 +216,45 @@ L_ADMIN_AUTH_CODE: str = env_str("L_ADMIN_AUTH_CODE", "")
 L_PHONE_PREFIX: str = ""
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_API_KEY': 'str', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})
+apply_env_overrides(globals(), {
+    'ENABLE_CODEX_AUTO': 'bool',
+    'CODEX_OAUTH_DRIVER': 'str',
+    'CODEX_AUTH_URL_SOURCE': 'str',
+    'CPA_MANAGEMENT_URL': 'str',
+    'CPA_MANAGEMENT_KEY': 'str',
+    'CPA_REQUEST_TIMEOUT': 'int',
+    'CPA_CALLBACK_SUBMIT_RETRIES': 'int',
+    'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int',
+    'CPA_SAVE_CALLBACK_RECEIPT': 'bool',
+    'SMS_PROVIDER': 'str',
+    'SMS_COUNTRY': 'str',
+    'SMS_SERVICE': 'str',
+    'SMS_MAX_PRICE': 'str',
+    'SMS_MIN_PRICE': 'str',
+    'SMS_PREFERRED_COUNTRIES': 'str',
+    'SMS_COUNTRY_WHITELIST': 'str',
+    'SMS_ALLOW_OUTSIDE_WHITELIST': 'bool',
+    'SMS_USE_TOP_COUNTRIES_WHITELIST': 'bool',
+    'SMS_TOP_COUNTRIES_LIMIT': 'int',
+    'SMS_TOP_COUNTRIES_CACHE_SEC': 'int',
+    'SMS_AUTO_COUNTRY': 'bool',
+    'SMS_PROVIDER_MIN_STOCK': 'int',
+    'SMS_AUTO_COUNTRY_MIN_STOCK': 'int',
+    'SMS_AUTO_COUNTRY_MAX_PRICE': 'float',
+    'SMS_PRICE_FLOOR_RATIO': 'float',
+    'SMS_ACQUIRE_MAX_SLOTS': 'int',
+    'SMS_MAX_RETRIES': 'int',
+    'SMS_CODE_WAIT': 'int',
+    'SMS_API_KEY': 'str',
+    'HEROSMS_API_BASE': 'str',
+    'HEROSMS_API_KEY': 'str',
+    'SMSBOWER_API_BASE': 'str',
+    'SMSBOWER_API_KEY': 'str',
+    'H_API_BASE': 'str',
+    'H_ADMIN_AUTH_CODE': 'str',
+    'H_PHONE_PREFIX': 'str',
+    'H_PHONE_ACQUIRE_MODE': 'str',
+    'L_API_BASE': 'str',
+    'L_ADMIN_AUTH_CODE': 'str',
+    'L_PHONE_PREFIX': 'str',
+})

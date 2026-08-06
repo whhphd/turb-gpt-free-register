@@ -11,6 +11,7 @@
 """
 from config.env_loader import apply_env_overrides
 import random
+import time
 
 
 # 本地代理入口；实际出口地区以代理/分流规则为准。
@@ -18,6 +19,10 @@ import random
 PROXY_POOL = [
     "socks5://127.0.0.1:7897",
 ]
+
+# sticky 代理被 CF 403/429 后的冷却，避免查活并发反复抽到同一坏 IP
+_PROXY_COOLDOWN_UNTIL: dict[str, float] = {}
+_PROXY_COOLDOWN_SEC = 900
 
 # 套餐/Plus 试用资格查询与 Codex Agent Token 生成共用这组独立网络策略，
 # 避免批量请求被注册代理池中的临时本地代理拖垮，也避免无条件直连造成出口策略失控。
@@ -46,10 +51,44 @@ PLAN_CHECK_QUEUE_LIMIT = 500
 PLAN_CHECK_MIN_INTERVAL = 0.4
 PLAN_CHECK_JITTER = 0.3
 
+# 账号查活后台并发（与查套餐分开的线程池）。
+LIVE_CHECK_WORKERS = 3
+LIVE_CHECK_QUEUE_LIMIT = 500
 
-def pick_proxy() -> str:
-    """从代理池中随机抽取一个代理 URL；池为空时返回空串（即不使用代理）。"""
-    return random.choice(PROXY_POOL) if PROXY_POOL else ""
+
+def mark_proxy_cooldown(proxy: str, *, reason: str = "403", cooldown: int | None = None) -> None:
+    """标记代理暂时不可用（查活/预检 403 后调用）。"""
+    p = str(proxy or "").strip()
+    if not p:
+        return
+    sec = int(cooldown if cooldown is not None else _PROXY_COOLDOWN_SEC)
+    _PROXY_COOLDOWN_UNTIL[p] = time.time() + max(30, sec)
+
+
+def pick_proxy(exclude: set[str] | list[str] | None = None) -> str:
+    """从代理池中随机抽取一个代理 URL；池为空时返回空串（即不使用代理）。
+
+    exclude: 本次调用额外排除的代理（例如本轮已 403 的 sticky）。
+    优先跳过冷却中的代理；若全部冷却则回退到未排除全集。
+    """
+    if not PROXY_POOL:
+        return ""
+    excluded = {str(x).strip() for x in (exclude or []) if str(x).strip()}
+    now = time.time()
+    # 清理过期冷却
+    for k, exp in list(_PROXY_COOLDOWN_UNTIL.items()):
+        if exp <= now:
+            _PROXY_COOLDOWN_UNTIL.pop(k, None)
+
+    candidates = [
+        p for p in PROXY_POOL
+        if p and p not in excluded and float(_PROXY_COOLDOWN_UNTIL.get(p) or 0) <= now
+    ]
+    if not candidates:
+        candidates = [p for p in PROXY_POOL if p and p not in excluded]
+    if not candidates:
+        return ""
+    return random.choice(candidates)
 
 
 # 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理
@@ -68,5 +107,7 @@ apply_env_overrides(globals(), {
     'PLAN_CHECK_QUEUE_LIMIT': 'int',
     'PLAN_CHECK_MIN_INTERVAL': 'float',
     'PLAN_CHECK_JITTER': 'float',
+    'LIVE_CHECK_WORKERS': 'int',
+    'LIVE_CHECK_QUEUE_LIMIT': 'int',
 })
 PROXY = pick_proxy()

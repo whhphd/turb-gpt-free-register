@@ -24,6 +24,11 @@ from core.browser_use_registration import (
     _click_passwordless_signup_if_present,
 )
 from core.humanize import delay as human_delay
+from core.totp_login import (
+    generate_totp_code,
+    is_totp_page_playwright,
+    load_totp_secret,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -555,6 +560,12 @@ def _fill_email_for_codex(page, email: str) -> None:
 
 
 def _looks_email_otp_page(page) -> bool:
+    # TOTP/Authenticator 与邮箱 OTP 输入框形态相近，必须先排除
+    try:
+        if is_totp_page_playwright(page):
+            return False
+    except Exception:
+        pass
     url = _page_url(page).lower()
     if "email-verification" in url or "email_otp" in url or ("verify" in url and "email" in url):
         return True
@@ -562,6 +573,101 @@ def _looks_email_otp_page(page) -> bool:
         return page.locator("input[autocomplete='one-time-code'], input[name='code'], input[inputmode='numeric']").count() > 0
     except Exception:
         return False
+
+
+def _submit_code_form_bu(page) -> bool:
+    return bool(
+        _click_first_any_frame(
+            page,
+            [
+                "button[type='submit']",
+                "button:has-text('Continue')",
+                "button:has-text('Verify')",
+                "button:has-text('Confirm')",
+                "button:has-text('Submit')",
+                "button:has-text('続行')",
+                "button:has-text('送信')",
+                "button:has-text('继续')",
+                "button:has-text('验证')",
+                "form button",
+            ],
+            timeout_ms=4000,
+        )
+    )
+
+
+def _fill_totp_if_present_bu(
+    page,
+    email: str,
+    *,
+    totp_secret: str | None = None,
+    timeout: int = 12,
+    max_attempts: int = 3,
+) -> bool:
+    """Playwright 路径：检测并自动填写 TOTP。"""
+    secret = load_totp_secret(email, totp_secret)
+    end = time.time() + max(1, int(timeout))
+    saw = False
+    while time.time() < end:
+        if is_totp_page_playwright(page):
+            saw = True
+            break
+        url = _page_url(page).lower()
+        if _is_callback_url(url) or any(x in url for x in ("add-phone", "phone-verification", "consent", "workspace")):
+            return False
+        if _looks_next_step_after_login(page) and not is_totp_page_playwright(page):
+            return False
+        time.sleep(0.3)
+    if not saw:
+        return False
+    if not secret:
+        try:
+            from core.totp_login import playwright_page_snapshot
+            snap = playwright_page_snapshot(page)
+            snap_brief = {
+                "url": str(snap.get("url") or "")[:240],
+                "title": str(snap.get("title") or "")[:80],
+                "text": str(snap.get("text") or "")[:240],
+            }
+        except Exception as snap_exc:
+            snap_brief = {"error": f"{type(snap_exc).__name__}: {snap_exc}"}
+        raise RuntimeError(
+            f"检测到 TOTP/Authenticator 页面，但账号 {email} 无 totp_secret，无法自动填写 2FA；"
+            f"page={snap_brief}"
+        )
+    used: set[str] = set()
+    for attempt in range(1, max_attempts + 1):
+        code = generate_totp_code(secret, wait_near_boundary=True)
+        if code in used:
+            time.sleep(1.2)
+            code = generate_totp_code(secret, wait_near_boundary=True)
+        used.add(code)
+        logger.info(
+            "[Codex][BrowserUse] 检测到 TOTP 页，自动填写动态码（%s/%s）code=%s",
+            attempt,
+            max_attempts,
+            code,
+        )
+        _clear_otp_inputs(page)
+        _type_otp(page, code)
+        _bu_delay("otp_input")
+        _submit_code_form_bu(page)
+        wait_end = time.time() + 25
+        while time.time() < wait_end:
+            if not is_totp_page_playwright(page):
+                logger.info("[Codex][BrowserUse] TOTP 已通过：%s", _current_state_for_log(page))
+                return True
+            body = ""
+            try:
+                body = (page.locator("body").inner_text(timeout=800) or "").lower()
+            except Exception:
+                pass
+            if any(x in body for x in ("incorrect", "invalid", "expired", "错误", "过期", "无效")):
+                break
+            time.sleep(0.4)
+        if attempt < max_attempts:
+            time.sleep(1.2)
+    raise RuntimeError(f"TOTP 连续 {max_attempts} 次未通过")
 
 
 def _install_account_dead_response_tracker(page) -> dict:
@@ -648,8 +754,16 @@ def _maybe_click_passwordless_after_email(page, email: str, timeout: int = 18) -
         logger.info("[Codex][BrowserUse] 已点击一次性验证码入口，未立即检测到 OTP 页，继续后续 OTP 轮询")
 
 
-def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_tracker: dict | None = None) -> None:
+def _fill_email_and_otp(
+    page,
+    email: str,
+    otp_provider,
+    auth_url: str,
+    dead_tracker: dict | None = None,
+    totp_secret: str | None = None,
+) -> None:
     otp_after_ts = time.time()
+    secret = load_totp_secret(email, totp_secret)
     logger.info("[Codex][BrowserUse] 打开授权地址")
     logger.info("[Codex][BrowserUse] 完整授权地址: %s", auth_url)
     _t_goto = _StepTimer("打开授权页")
@@ -672,9 +786,13 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
     except Exception as exc:
         if _looks_next_step_after_login(page):
             logger.info("[Codex][BrowserUse] 未检测到邮箱输入框，但页面已进入后续授权步骤：%s", _current_state_for_log(page))
+            _fill_totp_if_present_bu(page, email, totp_secret=secret, timeout=8)
             return
         logger.error("[Codex][BrowserUse] 未检测到邮箱输入框，当前页面状态：%s", _current_state_for_log(page))
         raise RuntimeError(f"Codex BrowserUse 授权页未出现邮箱输入框：{str(exc)[:220]}") from exc
+
+    if _fill_totp_if_present_bu(page, email, totp_secret=secret, timeout=4):
+        return
 
     used_codes: set[str] = set()
 
@@ -687,8 +805,8 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
             page.goto(auth_url, wait_until="domcontentloaded", timeout=_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
             _bu_delay("navigate")
             _maybe_accept_cookies(page)
-            if _looks_email_otp_page(page) or _looks_next_step_after_login(page):
-                logger.info("[Codex][BrowserUse] 重开授权后已在 OTP/下一步页面：%s", _current_state_for_log(page))
+            if is_totp_page_playwright(page) or _looks_email_otp_page(page) or _looks_next_step_after_login(page):
+                logger.info("[Codex][BrowserUse] 重开授权后已在 OTP/TOTP/下一步页面：%s", _current_state_for_log(page))
                 return
             _fill_email_for_codex(page, email)
             logger.info("[Codex][BrowserUse] 已重新提交邮箱触发 OTP")
@@ -700,9 +818,13 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
     for attempt in range(1, 4):
         wait_end = time.time() + 35
         while time.time() < wait_end and not _looks_email_otp_page(page):
+            if is_totp_page_playwright(page):
+                break
             if any(x in _page_url(page).lower() for x in ("phone", "workspace", "consent", "localhost:1455")):
                 return
             time.sleep(0.4)
+        if _fill_totp_if_present_bu(page, email, totp_secret=secret, timeout=3):
+            return
         logger.info("[Codex][BrowserUse] 等待邮箱 OTP：%s（%s/3）", email, attempt)
         _t_otp_wait = _StepTimer("等待邮箱 OTP")
         try:
@@ -710,6 +832,8 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
             _t_otp_wait.done()
         except Exception as exc:
             _t_otp_wait.done(f"failed={type(exc).__name__}: {str(exc)[:160]}")
+            if _fill_totp_if_present_bu(page, email, totp_secret=secret, timeout=3):
+                return
             if attempt >= 3:
                 raise
             logger.warning(
@@ -722,25 +846,14 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
             continue
         used_codes.add(str(code))
         logger.info("[Codex][BrowserUse] 邮箱 OTP 收到：%s", code)
+        if is_totp_page_playwright(page):
+            if _fill_totp_if_present_bu(page, email, totp_secret=secret, timeout=8):
+                return
         _t_otp_submit = _StepTimer("提交邮箱 OTP")
         _clear_otp_inputs(page)
         _type_otp(page, code)
         _bu_delay("otp_input")
-        _click_first_any_frame(
-            page,
-            [
-                "button[type='submit']",
-                "button:has-text('Continue')",
-                "button:has-text('Verify')",
-                "button:has-text('Submit')",
-                "button:has-text('続行')",
-                "button:has-text('送信')",
-                "button:has-text('继续')",
-                "button:has-text('验证')",
-                "form button",
-            ],
-            timeout_ms=4000,
-        )
+        _submit_code_form_bu(page)
         outcome = _wait_after_email_submit(page, timeout=30 if _fast_mode() else 45, dead_tracker=dead_tracker)
         _t_otp_submit.done(f"state={outcome}")
         logger.info("[Codex][BrowserUse] 邮箱 OTP 提交后状态：%s", outcome)
@@ -748,6 +861,7 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
             error_code = str(outcome).split(":", 1)[1] or "account_deactivated"
             raise AccountUnusableError(f"账号已废（{error_code}）", error_code=error_code)
         if outcome in ("accepted", "callback", "unknown"):
+            _fill_totp_if_present_bu(page, email, totp_secret=secret, timeout=12)
             return
         if attempt >= 3:
             raise RuntimeError("Codex 邮箱验证码连续错误/过期")
@@ -1209,7 +1323,8 @@ def _do_phone_verification_if_present(page) -> None:
                 return
             if send_state != "code_page":
                 raise RuntimeError(f"提交手机号后未确认发送短信/进入验证码页：state={send_state}, page={_current_state_for_log(page)}")
-            sms_provider.set_status(activation_id, 1, http=http)
+            # setStatus=1 失败（BAD_STATUS 等）不能中断等码
+            sms_provider.mark_sms_sent(activation_id, http=http)
             _t_sms = _StepTimer(f"等待手机短信 attempt={attempt}")
             sms_code = sms_provider.wait_for_sms_code(activation_id, http)
             _t_sms.done()
@@ -1307,6 +1422,7 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
     page = None
     try:
         auth_source = proto._codex_auth_url_source()
+        sub2_auth = None
         if auth_source == "cpa":
             cpa_auth = proto._request_cpa_authorize_url()
             auth_url = cpa_auth["auth_url"]
@@ -1345,7 +1461,11 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
             page.set_default_navigation_timeout(_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
             dead_tracker = _install_account_dead_response_tracker(page)
 
-            _fill_email_and_otp(page, email, otp_provider, auth_url, dead_tracker=dead_tracker)
+            secret = load_totp_secret(email, None)
+            if secret:
+                logger.info("[Codex][BrowserUse] 账号已配置 TOTP secret，登录流将自动填写 2FA")
+            _fill_email_and_otp(page, email, otp_provider, auth_url, dead_tracker=dead_tracker, totp_secret=secret)
+            _fill_totp_if_present_bu(page, email, totp_secret=secret, timeout=8)
             _do_phone_verification_if_present(page)
             logger.info("[Codex][BrowserUse] 手机验证处理完成/无需处理，等待授权确认和 callback")
             _t_callback = _StepTimer("等待 consent/workspace/callback")
@@ -1379,6 +1499,7 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     callback_url,
                     session_id=(sub2_auth or {}).get("session_id", ""),
                     redirect_uri=(proto.parse_qs(proto.urlparse(auth_url or "").query).get("redirect_uri") or [""])[0],
+                    name=email,
                 )
                 file_path = proto._save_sub2_local_record(
                     email=email,
@@ -1398,11 +1519,22 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     message=str(msg),
                 )
 
-            token_payload = proto._exchange_codex_token(code, code_verifier)
-            storage = proto._build_codex_storage(token_payload)
-            path = proto._save_codex_credential(email, storage)
+            done = proto.complete_local_codex_oauth(
+                email=email,
+                code=code,
+                code_verifier=code_verifier or "",
+                callback_url=callback_url,
+                proxy=proxy,
+            )
             _t_all.done("success")
-            return proto._codex_result(status="success", ok=True, email=email, file_path=str(path), callback_url=callback_url)
+            return proto._codex_result(
+                status="success",
+                ok=True,
+                email=done.get("email") or email,
+                file_path=str(done.get("path") or ""),
+                callback_url=callback_url,
+                message=f"local plan={done.get('plan') or 'unknown'}",
+            )
     except AccountUnusableError as exc:
         logger.warning("[Codex][BrowserUse] 账号已废：%s，%s", email, exc.error_code)
         return proto._codex_result(

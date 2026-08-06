@@ -18,6 +18,15 @@ import webbrowser
 from pathlib import Path
 from threading import Timer
 
+# 业务展示与日志统一按北京时间（服务器海外部署时尤其重要）
+os.environ.setdefault("TZ", "Asia/Shanghai")
+try:
+    import time as _time_mod
+    if hasattr(_time_mod, "tzset"):
+        _time_mod.tzset()
+except Exception:
+    pass
+
 # 必须在导入会创建 curl_cffi Session 的模块前修复 CA 路径（中文目录兼容）。
 try:
     from core.ca_bundle import ensure_ascii_ca_bundle
@@ -122,3 +131,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

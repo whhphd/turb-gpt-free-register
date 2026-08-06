@@ -1310,59 +1310,71 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.post("/api/outlook/import")
     def api_outlook_import():
         """
-        粘贴文本导入邮箱素材。
-        Outlook：email----password----clientId----refreshToken
-        通用 API：email----code_url
-        分隔符兼容 ---- 与 ====。
+        粘贴文本导入邮箱素材 / 已注册账号。
+
+        支持格式（---- 或 ==== 或 |）：
+          - 邮箱----取码地址
+          - 邮箱----密码----2FA密钥
+          - 邮箱----密码----clientId----refreshToken   (Outlook)
+        source 可选：auto / generic_api / password_totp / outlook
         """
+        from core.account_import import parse_import_text
+
         data = request.get_json(silent=True) or {}
-        source = (data.get("source") or data.get("type") or "").strip()
-        if source not in ("outlook", "generic_api"):
-            return jsonify({"ok": False, "error": "导入时请选择具体类型：Outlook 或 通用 API"}), 400
+        source = (data.get("source") or data.get("type") or "auto").strip().lower()
+        if source in ("", "all"):
+            source = "auto"
+        if source not in ("auto", "outlook", "generic_api", "password_totp"):
+            return jsonify({
+                "ok": False,
+                "error": "导入类型请选：自动识别 / 取码地址 / 密码+2FA / Outlook",
+            }), 400
         text = data.get("text") or ""
-        as_registered = bool(data.get("as_registered", False))
-        records = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("----") if "----" in line else line.split("====")
-            parts = [p.strip() for p in parts]
-            if source == "generic_api":
-                if len(parts) < 2:
-                    continue
-                records.append({
-                    "email": parts[0],
-                    "code_url": parts[1],
-                    "access_token": parts[2] if len(parts) > 2 else "",
-                    "totp_secret": parts[3] if len(parts) > 3 else "",
-                })
-                continue
-            if len(parts) < 4:
-                continue
-            records.append({
-                "email": parts[0],
-                "password": parts[1],
-                "client_id": parts[2],
-                "refresh_token": parts[3],
-                "access_token": parts[4] if len(parts) > 4 else "",
-                "totp_secret": parts[5] if len(parts) > 5 else "",
-            })
+        as_registered = bool(data.get("as_registered", True))
+        preferred = None if source == "auto" else source
+        records, parse_errors = parse_import_text(text, preferred_source=preferred)
         if not records:
-            need = "2 段：邮箱----取码地址" if source == "generic_api" else "4 段：email----password----clientId----refreshToken"
-            return jsonify({"ok": False, "error": f"未解析到有效邮箱行（需 {need}，---- 或 ==== 分隔）"}), 400
+            return jsonify({
+                "ok": False,
+                "error": (
+                    "未解析到有效账号行。支持：\n"
+                    "1) 邮箱----取码地址\n"
+                    "2) 邮箱----密码----2FA密钥\n"
+                    "3) 邮箱----密码----clientId----refreshToken\n"
+                    + (("\n".join(parse_errors[:5])) if parse_errors else "")
+                ),
+                "parse_errors": parse_errors[:20],
+            }), 400
+
+        # 非「已注册」模式：密码+2FA 没有邮箱池概念，强制按已注册账号入库
+        kinds = {str(r.get("kind") or r.get("source") or "") for r in records}
+        if not as_registered and ("password_totp" in kinds or source == "password_totp"):
+            as_registered = True
+
         if as_registered:
-            inserted, skipped = db.import_registered_email_accounts(records, source=source)
-        elif source == "generic_api":
-            inserted, skipped = db.import_generic_api_emails(records)
+            # 混合类型：按每条 record 的 source 入库
+            inserted, skipped = db.import_registered_email_accounts(records, source=None)
         else:
-            inserted, skipped = db.import_outlook_accounts(records)
+            # 仅邮箱池素材：只吃单一类型
+            only = list(kinds)
+            if len(only) != 1 or only[0] not in ("outlook", "generic_api"):
+                return jsonify({
+                    "ok": False,
+                    "error": "导入到邮箱池时请选择单一类型（Outlook 或 取码地址），或勾选「导入为已注册账号」",
+                }), 400
+            if only[0] == "generic_api":
+                inserted, skipped = db.import_generic_api_emails(records)
+            else:
+                inserted, skipped = db.import_outlook_accounts(records)
+
         return jsonify({
             "ok": True,
             "inserted": inserted,
             "skipped": skipped,
             "parsed": len(records),
             "as_registered": as_registered,
+            "kinds": sorted(kinds),
+            "parse_errors": parse_errors[:20],
         })
 
     @app.post("/api/outlook/status")
@@ -1559,13 +1571,55 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/api/codex/download/<path:filename>")
     def api_codex_download(filename: str):
         """
-        下载一个 CPA 兼容的 codex-*.json 文件，下载即标记为已导出（计数+1）。
-        前端通过浏览器原生下载触发（a 标签 / window.location）。
+        下载一个本地 codex-*.json。
+
+        - 普通 CPA/Codex 凭证：原样下载
+        - sub2-callback 回执：自动从 sub2api 导出可导入格式（含完整 token）
+          可用 ?format=raw 强制下载原始回执
         """
+        import json as _json
+        prefer_raw = str(request.args.get("format") or "").strip().lower() in ("raw", "local", "receipt")
         try:
             content, fname = db.read_codex_credential(filename)
+            try:
+                local = _json.loads(content)
+            except Exception:
+                local = {}
+            is_sub2_receipt = (
+                isinstance(local, dict)
+                and (
+                    local.get("type") == "codex_sub2_callback"
+                    or fname.endswith("-sub2-callback.json")
+                )
+            )
+            if is_sub2_receipt and not prefer_raw:
+                from core.codex_oauth import download_sub2api_export_for_local, extract_sub2_account_ref
+                payload, meta = download_sub2api_export_for_local(local, local_filename=fname)
+                ref = extract_sub2_account_ref(local)
+                email = str(meta.get("email") or ref.get("email") or "account").strip() or "account"
+                safe_email = email.replace("/", "_").replace("\\", "_").replace("@", "_at_")
+                dl_name = f"sub2api-{safe_email}.json"
+                db.mark_codex_exported(fname)
+                return Response(
+                    _json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    mimetype="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
+                )
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 404
+        except Exception as exc:
+            # sub2 导出失败时仍允许下载原始回执，避免完全不可用
+            logger.warning("本地下载自动导出 sub2api 失败，回退原始文件 filename=%s err=%s", filename, exc)
+            try:
+                content, fname = db.read_codex_credential(filename)
+            except ValueError as ve:
+                return jsonify({"ok": False, "error": str(ve)}), 404
+            db.mark_codex_exported(fname)
+            return Response(
+                content,
+                mimetype="application/json",
+                headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+            )
         db.mark_codex_exported(fname)
         return Response(
             content,
@@ -1595,6 +1649,129 @@ def create_app(auth_code: str | None = None) -> Flask:
             cpa_text,
             mimetype="application/json",
             headers={"Content-Disposition": f'attachment; filename="{cpa_name}"'},
+        )
+
+    @app.get("/api/codex/download-from-sub2/<path:filename>")
+    def api_codex_download_from_sub2(filename: str):
+        """
+        按本地 codex 记录（含 sub2-callback 回执）从 sub2api 导出可导入账号包。
+
+        返回 sub2api accounts/data 格式：
+          {exported_at, proxies, accounts:[...含完整 token...]}
+        可直接用 POST /api/v1/admin/accounts/data 导入。
+        """
+        import json as _json
+        try:
+            content, fname = db.read_codex_credential(filename)
+            try:
+                local = _json.loads(content)
+            except Exception:
+                local = {}
+            from core.codex_oauth import download_sub2api_export_for_local, extract_sub2_account_ref
+            payload, meta = download_sub2api_export_for_local(local, local_filename=fname)
+            ref = extract_sub2_account_ref(local)
+            email = str(meta.get("email") or ref.get("email") or "account").strip() or "account"
+            safe_email = email.replace("/", "_").replace("\\", "_").replace("@", "_at_")
+            dl_name = f"sub2api-{safe_email}.json"
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except Exception as exc:
+            logger.exception("从 sub2api 导出失败 filename=%s", filename)
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 502
+        db.mark_codex_exported(fname)
+        return Response(
+            _json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            mimetype="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
+        )
+
+    @app.post("/api/codex/download-bulk-from-sub2")
+    def api_codex_download_bulk_from_sub2():
+        """
+        批量从 sub2api 导出选中本地记录对应账号，输出一份可直接导入的 sub2api JSON。
+
+        Body: {"filenames": ["codex-xxx-sub2-callback.json", ...], "include_proxies": false}
+        响应：sub2api accounts/data 格式 JSON attachment。
+        """
+        import json as _json
+        from datetime import datetime as _dt
+        from core.codex_oauth import download_sub2api_export_bulk
+
+        data = request.get_json(silent=True) or {}
+        filenames = data.get("filenames") or []
+        include_proxies = bool(data.get("include_proxies") or False)
+        if not isinstance(filenames, list) or not filenames:
+            return jsonify({"ok": False, "error": "filenames 必须是非空数组"}), 400
+        if len(filenames) > 1000:
+            return jsonify({"ok": False, "error": "单次最多 1000 个"}), 400
+
+        local_items = []
+        prep_errors = []
+        for fname in filenames:
+            if not isinstance(fname, str):
+                prep_errors.append({"filename": str(fname), "error": "非字符串"})
+                continue
+            try:
+                content, real_fname = db.read_codex_credential(fname)
+                try:
+                    local = _json.loads(content)
+                except Exception:
+                    local = {}
+                local_items.append((real_fname, local if isinstance(local, dict) else {}))
+            except Exception as exc:
+                prep_errors.append({"filename": fname, "error": f"{type(exc).__name__}: {exc}"})
+
+        try:
+            payload, added, errors = download_sub2api_export_bulk(
+                local_items,
+                include_proxies=include_proxies,
+            )
+        except Exception as exc:
+            logger.exception("批量从 sub2api 导出失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 502
+
+        errors = list(prep_errors) + list(errors or [])
+        accounts = payload.get("accounts") if isinstance(payload, dict) else []
+        if not accounts:
+            return jsonify({
+                "ok": False,
+                "error": "没有成功从 sub2api 导出任何账号",
+                "errors": errors,
+            }), 502
+
+        # 标记导出成功的本地文件
+        marked = set()
+        for item in added:
+            for lf in (item.get("local_filenames") or []):
+                if lf and lf not in marked:
+                    try:
+                        db.mark_codex_exported(lf)
+                        marked.add(lf)
+                    except Exception:
+                        pass
+        # 兜底：若关联不到 local 文件，按输入文件名标记
+        if not marked:
+            for fname, _local in local_items:
+                try:
+                    db.mark_codex_exported(fname)
+                except Exception:
+                    pass
+
+        # 附加导出清单，方便核对（不影响 sub2api 导入：多余字段一般可忽略）
+        out = dict(payload) if isinstance(payload, dict) else {}
+        out["_export_meta"] = {
+            "source": "sub2api",
+            "count": len(accounts),
+            "files": added,
+            "errors": errors,
+            "exported_at_local": _dt.now().isoformat(timespec="seconds"),
+        }
+        now = _dt.now()
+        dl_name = f"sub2api-accounts-bulk-{now.strftime('%Y%m%d-%H%M%S')}.json"
+        return Response(
+            _json.dumps(out, ensure_ascii=False, indent=2) + "\n",
+            mimetype="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
         )
 
     @app.post("/api/codex/download-bulk-from-cpa")
@@ -1663,21 +1840,119 @@ def create_app(auth_code: str | None = None) -> Flask:
             headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
         )
 
+    @app.post("/api/codex/push-sub2-pool")
+    def api_codex_push_sub2_pool():
+        """把勾选的本地 Codex JSON 推送到 sub2api 号池。
+
+        Body:
+          {
+            filenames: ["codex-xxx.json", ...],
+            group_id?: 8,
+            concurrency?: 50,
+            priority?: 1,
+            load_factor?: 10,
+            rate_multiplier?: 1
+          }
+        """
+        data = request.get_json(silent=True) or {}
+        filenames = data.get("filenames") or data.get("files") or []
+        if not isinstance(filenames, list) or not filenames:
+            return jsonify({"ok": False, "error": "filenames 必须是非空数组"}), 400
+        try:
+            from core.sub2api_pool_push import push_codex_files_to_pool
+            result = push_codex_files_to_pool(
+                [str(x) for x in filenames],
+                group_id=data.get("group_id"),
+                concurrency=data.get("concurrency"),
+                priority=data.get("priority"),
+                load_factor=data.get("load_factor"),
+                rate_multiplier=data.get("rate_multiplier"),
+            )
+        except Exception as exc:
+            logger.exception("推送 sub2api 号池失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+        return jsonify(result)
+
+    @app.post("/api/codex/push-sub2-pool-upload")
+    def api_codex_push_sub2_pool_upload():
+        """手动上传 CPA / sub2api JSON，自动识别格式后按保存的号池配置推送。
+
+        multipart/form-data:
+          files: 一个或多个 .json
+          group_id / concurrency / priority / load_factor / rate_multiplier: 可选覆盖
+
+        号池调度参数用保存配置（或 form 覆盖），JSON 内 concurrency/group 等一律忽略；
+        仅使用 JSON 中的 OAuth 核心凭据。
+        """
+        files = request.files.getlist("files") or request.files.getlist("file") or []
+        if not files:
+            # 兼容单文件字段名 json / upload
+            for key in ("json", "upload", "file"):
+                f = request.files.get(key)
+                if f:
+                    files = [f]
+                    break
+        if not files:
+            return jsonify({"ok": False, "error": "请上传至少一个 JSON 文件（字段 files）"}), 400
+        if len(files) > 200:
+            return jsonify({"ok": False, "error": "单次最多上传 200 个文件"}), 400
+
+        def _form_num(key, cast=int):
+            raw = request.form.get(key)
+            if raw is None or str(raw).strip() == "":
+                return None
+            try:
+                return cast(raw)
+            except Exception:
+                return None
+
+        uploads = []
+        for f in files:
+            fname = (getattr(f, "filename", None) or "upload.json").strip() or "upload.json"
+            try:
+                raw = f.read()
+            except Exception as exc:
+                return jsonify({"ok": False, "error": f"读取文件失败 {fname}: {exc}"}), 400
+            if not raw:
+                continue
+            if len(raw) > 8 * 1024 * 1024:
+                return jsonify({"ok": False, "error": f"文件过大: {fname}（单文件上限 8MB）"}), 400
+            uploads.append((fname, raw))
+
+        if not uploads:
+            return jsonify({"ok": False, "error": "上传文件均为空"}), 400
+
+        try:
+            from core.sub2api_pool_push import push_uploaded_json_to_pool
+            result = push_uploaded_json_to_pool(
+                uploads,
+                group_id=_form_num("group_id", int),
+                concurrency=_form_num("concurrency", int),
+                priority=_form_num("priority", int),
+                load_factor=_form_num("load_factor", int),
+                rate_multiplier=_form_num("rate_multiplier", float),
+            )
+        except Exception as exc:
+            logger.exception("上传推送 sub2api 号池失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+        return jsonify(result)
+
     @app.post("/api/codex/download-bulk")
     def api_codex_download_bulk():
         """
-        批量下载选中的 codex 凭证，打包到一个 JSON 文件里。
+        批量下载选中的 codex 凭证。
 
-        Body: {"filenames": ["codex-xxx.json", ...]}
-        响应：聚合 JSON（attachment 触发浏览器下载），结构：
-            {
-              "exported_at": "...",
-              "count": N,
-              "credentials": [{"filename": "...", "data": {...原始凭证内容...}}, ...],
-              "errors": [...]   // 仅当部分失败时出现
-            }
-        注意：聚合格式**不能直接被 CPA 读**，CPA 是按单文件加载 auths/ 目录的。
-              本接口主要用途是备份 / 跨机迁移 / 二次处理。
+        Body:
+          {
+            "filenames": ["codex-xxx.json", ...],
+            "format": "auto" | "raw" | "sub2api"
+          }
+
+        format:
+          - auto（默认）：若全部/多数是 sub2 回执，则导出 sub2api 可导入格式；否则打包原始本地 JSON
+          - raw：始终打包本地原始文件（备份用）
+          - sub2api：强制从 sub2api 导出 accounts/data 格式
+
         每个成功的凭证会自动标记 mark_exported（计数+1）。
         """
         import json as _json
@@ -1685,30 +1960,98 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         data = request.get_json(silent=True) or {}
         filenames = data.get("filenames") or []
+        fmt = str(data.get("format") or "auto").strip().lower()
+        if fmt in ("sub2", "sub2_api", "sub2-api"):
+            fmt = "sub2api"
         if not isinstance(filenames, list) or not filenames:
             return jsonify({"ok": False, "error": "filenames 必须是非空数组"}), 400
         if len(filenames) > 1000:
             return jsonify({"ok": False, "error": "单次最多 1000 个"}), 400
 
-        bundle = []
-        errors = []
+        # 先读本地文件，决定格式
+        local_items = []
+        read_errors = []
         for fname in filenames:
             if not isinstance(fname, str):
-                errors.append({"filename": str(fname), "error": "非字符串"})
+                read_errors.append({"filename": str(fname), "error": "非字符串"})
                 continue
             try:
                 content, real_fname = db.read_codex_credential(fname)
-                parsed = _json.loads(content)
+                try:
+                    parsed = _json.loads(content)
+                except Exception:
+                    parsed = {}
+                local_items.append((real_fname, parsed if isinstance(parsed, dict) else {}, content))
+            except Exception as exc:
+                read_errors.append({"filename": fname, "error": f"{type(exc).__name__}: {exc}"})
+
+        sub2_count = 0
+        for _fname, parsed, _raw in local_items:
+            if parsed.get("type") == "codex_sub2_callback" or str(_fname).endswith("-sub2-callback.json"):
+                sub2_count += 1
+        use_sub2 = fmt == "sub2api" or (fmt == "auto" and local_items and sub2_count >= max(1, (len(local_items) + 1) // 2))
+
+        if use_sub2:
+            from core.codex_oauth import download_sub2api_export_bulk
+            try:
+                payload, added, errors = download_sub2api_export_bulk(
+                    [(f, p) for f, p, _ in local_items],
+                    include_proxies=bool(data.get("include_proxies") or False),
+                )
+            except Exception as exc:
+                logger.exception("批量本地下载转 sub2api 失败")
+                return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 502
+            errors = list(read_errors) + list(errors or [])
+            accounts = payload.get("accounts") if isinstance(payload, dict) else []
+            if not accounts:
+                return jsonify({
+                    "ok": False,
+                    "error": "没有成功导出任何 sub2api 账号（可改 format=raw 下载原始回执）",
+                    "errors": errors,
+                }), 502
+            for item in added:
+                for lf in (item.get("local_filenames") or []):
+                    try:
+                        db.mark_codex_exported(lf)
+                    except Exception:
+                        pass
+            if not any((item.get("local_filenames") or []) for item in added):
+                for f, _p, _ in local_items:
+                    try:
+                        db.mark_codex_exported(f)
+                    except Exception:
+                        pass
+            out = dict(payload) if isinstance(payload, dict) else {}
+            out["_export_meta"] = {
+                "source": "sub2api",
+                "requested_format": fmt,
+                "count": len(accounts),
+                "files": added,
+                "errors": errors,
+            }
+            now = _dt.now()
+            dl_name = f"sub2api-accounts-bulk-{now.strftime('%Y%m%d-%H%M%S')}.json"
+            return Response(
+                _json.dumps(out, ensure_ascii=False, indent=2) + "\n",
+                mimetype="application/json",
+                headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
+            )
+
+        bundle = []
+        errors = list(read_errors)
+        for real_fname, parsed, _content in local_items:
+            try:
                 bundle.append({"filename": real_fname, "data": parsed})
                 db.mark_codex_exported(real_fname)
             except Exception as exc:
-                errors.append({"filename": fname, "error": f"{type(exc).__name__}: {exc}"})
+                errors.append({"filename": real_fname, "error": f"{type(exc).__name__}: {exc}"})
 
         now = _dt.now()
         result = {
             "exported_at": now.isoformat(timespec="seconds"),
             "count": len(bundle),
             "credentials": bundle,
+            "format": "raw",
         }
         if errors:
             result["errors"] = errors
@@ -2061,6 +2404,82 @@ def create_app(auth_code: str | None = None) -> Flask:
             result["compact"] = True
             return jsonify(result)
         return jsonify(rows)
+
+    # ---------- 注册 + GCash 提链交互会话 ----------
+    @app.get("/api/gcash-session")
+    def api_gcash_session_get():
+        from core import gcash_session as gs
+        return jsonify({"ok": True, "session": gs.get_session()})
+
+    @app.post("/api/gcash-session/start")
+    def api_gcash_session_start():
+        """启动：Cloak 注册入库 + 保活浏览器，不跑 Codex。"""
+        from core import gcash_session as gs
+        try:
+            result = gs.start_session()
+        except Exception as exc:
+            logger.exception("启动 GCash 会话失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        if not result.get("ok"):
+            return jsonify(result), 409
+        return jsonify(result)
+
+    @app.get("/api/gcash-session/access-token")
+    def api_gcash_session_access_token():
+        from core import gcash_session as gs
+        result = gs.get_access_token()
+        if not result.get("ok"):
+            return jsonify(result), 400
+        return jsonify(result)
+
+    @app.post("/api/gcash-session/open-url")
+    def api_gcash_session_open_url():
+        """在保活浏览器打开支付链接并提取 GCash 二维码。Body: {url}"""
+        from core import gcash_session as gs
+        data = request.get_json(silent=True) or {}
+        url = data.get("url") or data.get("payment_url") or ""
+        try:
+            result = gs.open_payment_url(str(url or ""))
+        except Exception as exc:
+            logger.exception("GCash 打开链接失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        if not result.get("ok"):
+            return jsonify(result), 400
+        return jsonify(result)
+
+    @app.post("/api/gcash-session/refresh-qr")
+    def api_gcash_session_refresh_qr():
+        from core import gcash_session as gs
+        try:
+            result = gs.refresh_qr()
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        if not result.get("ok"):
+            return jsonify(result), 400
+        return jsonify(result)
+
+    @app.get("/api/gcash-session/qr.png")
+    def api_gcash_session_qr_png():
+        from core import gcash_session as gs
+        from flask import send_file
+        path = gs.qr_file_path()
+        if path is None:
+            return jsonify({"ok": False, "error": "二维码尚未就绪"}), 404
+        return send_file(path, mimetype="image/png", as_attachment=False, download_name="gcash-qr.png")
+
+    @app.post("/api/gcash-session/close")
+    def api_gcash_session_close():
+        """用户确认关闭浏览器。Body 可选 {force: true} 强制打断注册中会话。"""
+        from core import gcash_session as gs
+        data = request.get_json(silent=True) or {}
+        force = bool(data.get("force"))
+        try:
+            result = gs.close_session(force=force)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        if not result.get("ok"):
+            return jsonify(result), 409
+        return jsonify(result)
 
     @app.post("/api/jobs")
     def api_jobs_create():
@@ -2484,5 +2903,138 @@ def create_app(auth_code: str | None = None) -> Flask:
                 else f"⚠️ 已写入文件但热加载失败（{reload_err}），需重启 Web 服务才能生效"
             ),
         })
+
+    # ----------------------------------------------------------
+    # 接码平台查询（余额 / 价格 / 最优国家）
+    # ----------------------------------------------------------
+    def _sms_query_provider(data: dict | None = None) -> str:
+        data = data or {}
+        raw = str(data.get("provider") or "").strip().lower()
+        if raw:
+            return raw
+        from config import codex as codex_cfg
+        return str(getattr(codex_cfg, "SMS_PROVIDER", "grizzly") or "grizzly").strip().lower()
+
+    def _sms_query_service(data: dict | None = None) -> str:
+        data = data or {}
+        raw = str(data.get("service") or "").strip()
+        if raw:
+            return raw
+        from config import codex as codex_cfg
+        return str(getattr(codex_cfg, "SMS_SERVICE", "dr") or "dr").strip() or "dr"
+
+    def _sms_query_country(data: dict | None = None) -> str:
+        data = data or {}
+        if "country" in (data or {}):
+            return str(data.get("country") or "").strip()
+        from config import codex as codex_cfg
+        return str(getattr(codex_cfg, "SMS_COUNTRY", "") or "").strip()
+
+    def _apply_sms_key_override(provider: str, data: dict | None = None) -> None:
+        """允许 UI 用表单里尚未保存的 key 临时查询。"""
+        data = data or {}
+        key = str(data.get("api_key") or "").strip()
+        if not key:
+            return
+        from config import codex as codex_cfg
+        attr = {
+            "grizzly": "SMS_API_KEY",
+            "herosms": "HEROSMS_API_KEY",
+            "smsbower": "SMSBOWER_API_KEY",
+        }.get(provider)
+        if attr:
+            setattr(codex_cfg, attr, key)
+
+    @app.post("/api/sms/balance")
+    def api_sms_balance():
+        data = request.get_json(silent=True) or {}
+        provider = _sms_query_provider(data)
+        try:
+            from core import sms_provider
+            _apply_sms_key_override(provider, data)
+            balance = sms_provider.get_balance(provider=provider)
+            return jsonify({"ok": True, "provider": provider, "balance": balance})
+        except Exception as exc:
+            logger.exception("查询接码余额失败 provider=%s", provider)
+            return jsonify({"ok": False, "provider": provider, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/sms/prices")
+    def api_sms_prices():
+        data = request.get_json(silent=True) or {}
+        provider = _sms_query_provider(data)
+        service = _sms_query_service(data)
+        country = _sms_query_country(data)
+        try:
+            from core import sms_provider
+            _apply_sms_key_override(provider, data)
+            prices = sms_provider.get_prices(provider=provider, service=service, country=country or None)
+            return jsonify({
+                "ok": True,
+                "provider": provider,
+                "service": service,
+                "country": country,
+                "prices": prices,
+            })
+        except Exception as exc:
+            logger.exception("查询接码价格失败 provider=%s", provider)
+            return jsonify({"ok": False, "provider": provider, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/sms/top-countries")
+    def api_sms_top_countries():
+        data = request.get_json(silent=True) or {}
+        provider = _sms_query_provider(data)
+        service = _sms_query_service(data)
+        top_n = data.get("top_n", 15)
+        try:
+            top_n = int(top_n)
+        except (TypeError, ValueError):
+            top_n = 15
+        try:
+            from core import sms_provider
+            _apply_sms_key_override(provider, data)
+            rows = sms_provider.get_top_countries(provider=provider, service=service)
+            rows = [r for r in rows if (r.get("count") or 0) > 0]
+            if top_n > 0:
+                rows = rows[:top_n]
+            return jsonify({
+                "ok": True,
+                "provider": provider,
+                "service": service,
+                "countries": rows,
+            })
+        except Exception as exc:
+            logger.exception("查询接码国家价格失败 provider=%s", provider)
+            return jsonify({"ok": False, "provider": provider, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/sms/best-country")
+    def api_sms_best_country():
+        data = request.get_json(silent=True) or {}
+        provider = _sms_query_provider(data)
+        service = _sms_query_service(data)
+        try:
+            from core import sms_provider
+            _apply_sms_key_override(provider, data)
+            min_stock = data.get("min_stock")
+            max_price = data.get("max_price")
+            best = sms_provider.get_best_country(
+                provider=provider,
+                service=service,
+                min_stock=min_stock,
+                max_price=max_price,
+            )
+            detail = None
+            if best:
+                rows = sms_provider.get_top_countries(provider=provider, service=service)
+                detail = next((r for r in rows if str(r.get("country")) == str(best)), None)
+            return jsonify({
+                "ok": True,
+                "provider": provider,
+                "service": service,
+                "country": best,
+                "detail": detail,
+            })
+        except Exception as exc:
+            logger.exception("自动选国失败 provider=%s", provider)
+            return jsonify({"ok": False, "provider": provider, "error": f"{type(exc).__name__}: {exc}"}), 400
 
     return app

@@ -323,6 +323,113 @@ def _activate_totp(
     return True
 
 
+def build_session_from_browser_driver(
+    driver,
+    *,
+    proxy: str | None = None,
+    device_id: str | None = None,
+) -> BrowserSession:
+    """把指纹浏览器里的登录 cookie 导入协议层 BrowserSession，供 2FA enroll 使用。
+
+    Cloak/Roxy 注册走浏览器自动化，没有现成的 BrowserSession；
+    2FA 的 reauth/enroll 仍是 HTTP 协议路径，需要 cookie jar。
+    """
+    # proxy=None 表示让 BrowserSession 自己从池抽；显式 "" 才是直连
+    session = BrowserSession(proxy=proxy)
+    raw_cookies: list[dict] = []
+    try:
+        raw_cookies = list(driver.get_cookies() or [])
+    except Exception as exc:
+        logger.warning("[2FA] driver.get_cookies 失败：%s", str(exc)[:160])
+
+    # CDP 补充 HttpOnly（session-token 等）
+    try:
+        if hasattr(driver, "execute_cdp_cmd"):
+            for source in (
+                {"urls": ["https://chatgpt.com/", "https://auth.openai.com/"]},
+                {},
+            ):
+                try:
+                    raw = driver.execute_cdp_cmd("Network.getCookies", source) or {}
+                except Exception:
+                    continue
+                for item in raw.get("cookies") or []:
+                    name = str(item.get("name") or "").strip()
+                    if not name:
+                        continue
+                    if any(str(c.get("name") or "") == name for c in raw_cookies):
+                        continue
+                    raw_cookies.append({
+                        "name": name,
+                        "value": item.get("value") or "",
+                        "domain": item.get("domain") or "",
+                        "path": item.get("path") or "/",
+                    })
+    except Exception as exc:
+        logger.debug("[2FA] CDP 取 cookie 失败：%s", str(exc)[:120])
+
+    imported = 0
+    oai_did = None
+    for item in raw_cookies:
+        name = str(item.get("name") or "").strip()
+        value = str(item.get("value") or "")
+        if not name:
+            continue
+        domain = str(item.get("domain") or "").strip() or ".chatgpt.com"
+        path = str(item.get("path") or "/").strip() or "/"
+        # curl_cffi 对 domain 前导点兼容性不一，两边都试
+        set_ok = False
+        for dom in (domain, domain.lstrip("."), f".{domain.lstrip('.')}"):
+            try:
+                session.session.cookies.set(name, value, domain=dom, path=path)
+                set_ok = True
+                break
+            except Exception:
+                continue
+        if not set_ok:
+            try:
+                session.session.cookies.set(name, value)
+                set_ok = True
+            except Exception:
+                pass
+        if set_ok:
+            imported += 1
+        if name == "oai-did" and value:
+            oai_did = value
+
+    if device_id:
+        session.device_id = str(device_id)
+    elif oai_did:
+        session.device_id = oai_did
+
+    logger.info(
+        "[2FA] 已从浏览器导入 cookie=%s device_id=%s proxy=%s",
+        imported,
+        (session.device_id or "")[:18],
+        "yes" if session.proxy else "direct",
+    )
+    return session
+
+
+def setup_2fa_from_browser_driver(
+    driver,
+    email: str,
+    *,
+    proxy: str | None = None,
+    device_id: str | None = None,
+    otp_code: str | None = None,
+) -> str:
+    """Cloak/Roxy 注册完成后：用浏览器 cookie 建协议会话并完成 2FA。"""
+    session = build_session_from_browser_driver(driver, proxy=proxy, device_id=device_id)
+    try:
+        return setup_2fa(session, email, otp_code=otp_code)
+    finally:
+        try:
+            session.session.close()
+        except Exception:
+            pass
+
+
 def setup_2fa(session: BrowserSession, email: str, otp_code: str | None = None) -> str:
     """
     完整的 2FA 设置流程。
