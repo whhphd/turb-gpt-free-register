@@ -520,10 +520,19 @@ def _find_by_email(rows: list[dict], email: str) -> dict | None:
     return next((r for r in rows if (r.get("email") or "").lower() == target), None)
 
 
+def normalize_direct_card_status(value: Any) -> str:
+    """直卡开通：仅「已用」算已用；缺字段/空/其它一律视为未用。"""
+    raw = str(value or "").strip().lower()
+    if raw in {"已用", "used", "yes", "y", "1", "true"}:
+        return "已用"
+    return "未用"
+
+
 def _decorate_account(row: dict) -> dict:
     out = dict(row)
     out["note"] = out.get("note") or ""
     out["note_updated_at"] = out.get("note_updated_at") or ""
+    out["direct_card_status"] = normalize_direct_card_status(out.get("direct_card_status"))
     plan_status = out.get("plan_check_status")
     if plan_status in {"queued", "running"}:
         try:
@@ -1123,6 +1132,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "codex_agent_status", "codex_agent_message",
         "codex_agent_runtime_id", "codex_agent_sub2api_url",
         "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
+        "direct_card_status",
     )
     with _LOCK:
         all_rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q)
@@ -1145,6 +1155,8 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
                     item.pop(expire_key, None)
             item["codex_agent_has_token"] = bool(str(row.get("codex_agent_token") or "").strip())
             item["has_access_token"] = bool(str(row.get("access_token") or "").strip())
+            # 轮询合并时也必须带上，避免前端直卡状态被冲掉/看不到
+            item["direct_card_status"] = normalize_direct_card_status(row.get("direct_card_status"))
             items.append(item)
         latest = max((str(row.get("updated_at") or "") for row in all_rows), default="")
         # updated_at 目前只有秒级精度；一次快速查询可能在同一秒内完成
@@ -1217,6 +1229,25 @@ def update_account_note(acc_id: int, note: str) -> bool:
         row["updated_at"] = now
         _save_accounts(rows)
         return True
+
+
+def update_account_direct_card_status(acc_id: int, status: str = "已用") -> dict | None:
+    """更新账号直卡开通属性（未用/已用）。返回装饰后的账号；不存在返回 None。"""
+    status_norm = normalize_direct_card_status(status)
+    # 允许显式写回「未用」；默认入口传「已用」
+    if str(status or "").strip() in {"未用", "unused", "no", "0", "false"}:
+        status_norm = "未用"
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return None
+        now = _now()
+        row["direct_card_status"] = status_norm
+        row["direct_card_updated_at"] = now
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return _decorate_account(row)
 
 
 def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:

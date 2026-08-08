@@ -366,10 +366,18 @@ def _login_via_password_totp(
                 code = generate_totp_code(secret, wait_near_boundary=True)
             used_codes.add(code)
             try:
-                referer = continue_url if (
-                    "totp" in str(continue_url).lower() or "factor" in str(continue_url).lower()
-                ) else "https://auth.openai.com/multi-factor/totp"
-                totp_data = verify_login_totp(session, code, referer=referer)
+                cu = str(continue_url or "")
+                referer = cu if (
+                    "totp" in cu.lower()
+                    or "factor" in cu.lower()
+                    or "mfa" in cu.lower()
+                ) else "https://auth.openai.com/mfa-challenge"
+                totp_data = verify_login_totp(
+                    session,
+                    code,
+                    referer=referer,
+                    challenge_url=cu if "mfa-challenge" in cu.lower() else referer,
+                )
                 continue_url, page_type = extract_auth_continue(totp_data)
                 last_exc = None
                 break
@@ -377,6 +385,13 @@ def _login_via_password_totp(
                 last_exc = exc
                 logger.warning("[查活] TOTP 无效（%s/3）：%s", attempt, str(exc)[:160])
                 time.sleep(1.2)
+            except RuntimeError as exc:
+                # schema/参数错误不应傻重试 3 次不同码
+                if "参数均不匹配" in str(exc) or "missing" in str(exc).lower():
+                    raise
+                last_exc = exc
+                logger.warning("[查活] TOTP 失败（%s/3）：%s", attempt, str(exc)[:160])
+                time.sleep(1.0)
         if last_exc is not None:
             raise last_exc
         on_email_otp_page = needs_email_otp_step(page_type, continue_url)
@@ -410,10 +425,16 @@ def _login_via_password_totp(
             if secret and not needs_totp_step(page_type, continue_url):
                 logger.info("[查活] continue 仍为中间页，尝试补交 TOTP")
                 code = generate_totp_code(secret, wait_near_boundary=True)
-                totp_data = verify_login_totp(session, code)
+                totp_data = verify_login_totp(
+                    session,
+                    code,
+                    challenge_url=str(continue_url or ""),
+                    referer=str(continue_url or "") or "https://auth.openai.com/mfa-challenge",
+                )
                 continue_url, page_type = extract_auth_continue(totp_data)
-        if any(k in str(continue_url).lower() for k in ("/log-in", "/password", "email-verification", "factor-totp", "multi-factor")) \
-                and "authorize/continue" not in str(continue_url).lower() and "callback" not in str(continue_url).lower():
+        if any(k in str(continue_url).lower() for k in (
+            "/log-in", "/password", "email-verification", "factor-totp", "multi-factor", "mfa-challenge",
+        )) and "authorize/continue" not in str(continue_url).lower() and "callback" not in str(continue_url).lower():
             raise RuntimeError(
                 f"密码/2FA 后仍停在中间页，未拿到 OAuth continue_url: page={page_type or '-'} url={continue_url}"
             )

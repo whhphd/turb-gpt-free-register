@@ -977,7 +977,7 @@ def _do_phone_verification(session: BrowserSession) -> None:
         for attempt in range(1, max_retries + 1):
             activation_id = None
             try:
-                activation_id, phone = sms_provider.acquire_number(http)
+                activation_id, phone = sms_provider.acquire_number(http, attempt_index=attempt)
                 logger.info(
                     f"[Codex] 手机验证尝试 {attempt}/{max_retries}，"
                     f"provider={provider}, activation_id={activation_id}, 号码=+{phone}"

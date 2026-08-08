@@ -93,9 +93,14 @@ def _compact_account_for_list(row: dict) -> dict:
         "user_name", "email_source", "note", "archived", "created_at",
         "plan_type", "current_plan_type", "plus_trial_eligible",
         "plan_check_status", "codex_status", "codex_agent_status",
+        "direct_card_status",
     ):
         if key in row:
             out[key] = row.get(key)
+    # 无字段时列表也固定给「未用」，避免前端再判空
+    out["direct_card_status"] = (
+        "已用" if str(out.get("direct_card_status") or "").strip() == "已用" else "未用"
+    )
 
     if row.get("plan_check_status") in ("queued", "running") or row.get("plan_check_ok") is False:
         out["plan_check_ok"] = row.get("plan_check_ok")
@@ -278,44 +283,182 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     # 已注册账号
     # ----------------------------------------------------------
+    def _account_plan_bucket(row: dict) -> str:
+        plan = str(row.get("current_plan_type") or row.get("plan_type") or "").strip().lower()
+        if not plan:
+            return "(empty)"
+        if "plus" in plan and "free" not in plan:
+            return "plus"
+        if plan == "free" or plan.startswith("free"):
+            return "free"
+        if "pro" in plan:
+            return "pro"
+        if "team" in plan:
+            return "team"
+        if plan in ("go", "chatgpt_go"):
+            return "go"
+        return plan
+
+    def _account_source_key(row: dict) -> str:
+        s = str(row.get("email_source") or "").strip()
+        return s if s else "(empty)"
+
+    def _account_codex_key(row: dict) -> str:
+        s = str(row.get("codex_status") or "").strip().lower()
+        return s if s else "(empty)"
+
+    def _account_live_key(row: dict) -> str:
+        s = str(row.get("live_check_status") or "").strip().lower()
+        return s if s else "(empty)"
+
+    def _account_direct_key(row: dict) -> str:
+        return "已用" if str(row.get("direct_card_status") or "").strip() == "已用" else "未用"
+
+    def _account_totp_key(row: dict) -> str:
+        return "yes" if row.get("totp_secret") or row.get("totp_enabled") else "no"
+
+    def _parse_csv_set(raw: str) -> set[str]:
+        return {x.strip() for x in str(raw or "").split(",") if x.strip()}
+
+    def _filter_account_rows(rows: list, *, plan_csv="", source_csv="", codex_csv="",
+                             live_csv="", direct_csv="", totp_csv="", plan_legacy="") -> list:
+        """Excel 式多选筛选。plan_legacy 兼容旧 plan=plus 开关。"""
+        out = list(rows or [])
+        legacy = str(plan_legacy or "").strip().lower()
+        if legacy and legacy not in ("all", "any", "*"):
+            # 旧逻辑：plan=plus 表示已开通 Plus
+            out = [r for r in out if db._account_matches_plan_filter(r, legacy)]
+
+        plans = _parse_csv_set(plan_csv)
+        if plans:
+            out = [r for r in out if _account_plan_bucket(r) in plans]
+        sources = _parse_csv_set(source_csv)
+        if sources:
+            out = [r for r in out if _account_source_key(r) in sources]
+        codexs = _parse_csv_set(codex_csv)
+        if codexs:
+            out = [r for r in out if _account_codex_key(r) in codexs]
+        lives = _parse_csv_set(live_csv)
+        if lives:
+            out = [r for r in out if _account_live_key(r) in lives]
+        directs = _parse_csv_set(direct_csv)
+        if directs:
+            out = [r for r in out if _account_direct_key(r) in directs]
+        totps = _parse_csv_set(totp_csv)
+        if totps:
+            out = [r for r in out if _account_totp_key(r) in totps]
+        return out
+
+    def _account_facets(rows: list) -> dict:
+        plans = sorted({_account_plan_bucket(r) for r in rows}, key=lambda x: (x == "(empty)", x))
+        sources = sorted({_account_source_key(r) for r in rows}, key=lambda x: (x == "(empty)", x.lower()))
+        codexs = sorted({_account_codex_key(r) for r in rows}, key=lambda x: (x == "(empty)", x))
+        lives = sorted({_account_live_key(r) for r in rows}, key=lambda x: (x == "(empty)", x))
+        return {
+            "plans": plans,
+            "sources": sources,
+            "codex": codexs,
+            "live": lives,
+            "direct_card": ["未用", "已用"],
+            "totp": ["yes", "no"],
+        }
+
+    def _accounts_request_filters() -> dict:
+        return {
+            "plan_csv": str(request.args.get("plans", default="") or request.args.get("plan_multi", default="") or "").strip(),
+            "source_csv": str(request.args.get("source", default="") or "").strip(),
+            "codex_csv": str(request.args.get("codex", default="") or "").strip(),
+            "live_csv": str(request.args.get("live", default="") or "").strip(),
+            "direct_csv": str(request.args.get("direct_card", default="") or "").strip(),
+            "totp_csv": str(request.args.get("totp", default="") or "").strip(),
+            "plan_legacy": str(request.args.get("plan", default="") or "").lower(),
+        }
+
     @app.get("/api/accounts")
     def api_accounts():
+        """账号列表。
+
+        Query 扩展（Excel 式多选，逗号分隔）:
+          plans / source / codex / live / direct_card / totp
+          plan: 兼容旧「已开通Plus」开关（plus）
+        """
         limit = request.args.get("limit", default=500, type=int)
         archived = str(request.args.get("archived", default="0") or "0").lower()
-        plan_filter = str(request.args.get("plan", default="") or "").lower()
         q = str(request.args.get("q", default="") or "").strip()
+        flt = _accounts_request_filters()
         # 新分页接口：传 page/page_size 或 paged=1 时返回 {items,total,page,page_size,...}
         paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
+
+        # 先取归档+搜索全集（不做 legacy plan，便于 facets 完整）
+        base_rows = db.list_accounts(limit=1_000_000, offset=0, archived=archived, plan_filter=None, q=q)
+        facets = _account_facets(base_rows)
+        rows = _filter_account_rows(base_rows, **flt)
+
         if paged or page_arg is not None or page_size_arg is not None:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
-            offset = (page - 1) * page_size
-            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q)
+            result = _paginate_items(rows, page=page, page_size=page_size)
             result["items"] = [_compact_account_for_list(r) for r in (result.get("items") or [])]
-            result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
+            result.update({
+                "ok": True,
+                "page": page,
+                "page_size": page_size,
+                "compact": True,
+                "facets": facets,
+                "filters": flt,
+            })
             return jsonify(result)
-        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, q=q))
+        limited = rows[: max(1, min(5000, int(limit or 500)))]
+        return jsonify({
+            "ok": True,
+            "items": [_compact_account_for_list(r) for r in limited],
+            "total": len(rows),
+            "facets": facets,
+            "filters": flt,
+        })
 
     @app.get("/api/accounts/plan-check-status")
     def api_account_plan_check_status():
         """套餐查询轻量状态，不返回 Token、邮箱密码等敏感字段。"""
         limit = request.args.get("limit", default=5000, type=int)
         archived = str(request.args.get("archived", default="0") or "0").lower()
-        plan_filter = str(request.args.get("plan", default="") or "").lower()
         q = str(request.args.get("q", default="") or "").strip()
+        flt = _accounts_request_filters()
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
+
+        # 与列表同一筛选，避免轮询 total 不一致触发整表重载
+        base_rows = db.list_accounts(limit=1_000_000, offset=0, archived=archived, plan_filter=None, q=q)
+        rows = _filter_account_rows(base_rows, **flt)
+        total = len(rows)
         if page_arg is not None or page_size_arg is not None:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q)
-            snapshot.update({"page": page, "page_size": page_size})
+            page_rows = rows[offset: offset + page_size]
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, q=q)
-        snapshot["queue"] = plan_check_service.queue_settings()
+            page = 1
+            page_size = max(1, min(5000, int(limit or 5000)))
+            page_rows = rows[:page_size]
+
+        items = []
+        for row in page_rows:
+            item = _compact_account_for_list(row)
+            items.append(item)
+        latest = max((str(row.get("updated_at") or "") for row in rows), default="")
+        revision = f"{total}:{latest}"
+        snapshot = {
+            "items": items,
+            "total": total,
+            "offset": (page - 1) * page_size if page_arg is not None else 0,
+            "limit": page_size,
+            "page": page,
+            "page_size": page_size,
+            "revision": revision,
+            "queue": plan_check_service.queue_settings(),
+        }
         return jsonify(snapshot)
 
 
@@ -331,6 +474,87 @@ def create_app(auth_code: str | None = None) -> Flask:
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
         return jsonify({"ok": True, "id": acc_id, "field": field, "value": value})
+
+    @app.post("/api/accounts/<int:acc_id>/copy-direct-card")
+    def api_account_copy_direct_card(acc_id: int):
+        """复制 Token（返回完整 access_token），并把直卡开通属性标为已用。
+
+        无该属性的老账号同样会写成已用；仅读取 Token 的「复制」按钮不会改此字段。
+        """
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        token = str(acc.get("access_token") or "").strip()
+        if not token:
+            return jsonify({"ok": False, "error": "该账号没有 access_token"}), 400
+        updated = db.update_account_direct_card_status(acc_id, "已用")
+        if not updated:
+            return jsonify({"ok": False, "error": "更新直卡状态失败"}), 500
+        return jsonify({
+            "ok": True,
+            "id": acc_id,
+            "email": updated.get("email") or acc.get("email"),
+            "value": token,
+            "field": "access_token",
+            "direct_card_status": updated.get("direct_card_status") or "已用",
+            "direct_card_updated_at": updated.get("direct_card_updated_at") or "",
+        })
+
+    @app.post("/api/accounts/copy-direct-card-bulk")
+    def api_accounts_copy_direct_card_bulk():
+        """批量：返回 access_token 列表，并把对应账号直卡开通标为已用。
+
+        Body: {account_ids:[...]}
+        返回 values:[{id,email,value}]，每个 value 一行 token，便于前端 join('\\n') 复制。
+        """
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 5000:
+            return jsonify({"ok": False, "error": "单次最多 5000 个"}), 400
+
+        values = []
+        marked = []
+        skipped = []
+        seen = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            token = str(acc.get("access_token") or "").strip()
+            if not token:
+                skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "缺少 access_token"})
+                continue
+            updated = db.update_account_direct_card_status(acc_id, "已用")
+            if not updated:
+                skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "更新直卡状态失败"})
+                continue
+            values.append({
+                "id": acc_id,
+                "email": updated.get("email") or acc.get("email"),
+                "value": token,
+                "direct_card_status": "已用",
+            })
+            marked.append(acc_id)
+        return jsonify({
+            "ok": True,
+            "field": "access_token",
+            "values": values,
+            "marked_ids": marked,
+            "marked_count": len(marked),
+            "skipped": skipped,
+            "count": len(values),
+        })
 
     @app.post("/api/accounts/secret-bulk")
     def api_accounts_secret_bulk():
@@ -1548,10 +1772,63 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     @app.get("/api/codex")
     def api_codex_list():
+        """Codex 凭证列表。
+
+        Query:
+          q: 搜索
+          plan: 逗号分隔 plan（plus,free,…；空串用 (empty)）
+          export: exported|pending|all
+          type: codex|sub2|cpa|all  （可逗号多选）
+          paged/page/page_size
+        """
         rows = db.list_codex_accounts()
         q = str(request.args.get("q", default="") or "").strip()
         if q:
             rows = [r for r in rows if _matches_query(r, q)]
+
+        def _codex_type_key(r: dict) -> str:
+            t = str(r.get("type") or "")
+            fn = str(r.get("filename") or "")
+            if "sub2" in t or "sub2-callback" in fn:
+                return "sub2"
+            if "cpa" in t or "cpa-callback" in fn:
+                return "cpa"
+            return "codex"
+
+        def _plan_key(r: dict) -> str:
+            p = str(r.get("plan") or "").strip()
+            return p if p else "(empty)"
+
+        # facets：基于当前搜索 q 之后的全集，供 Excel 式筛选勾选
+        plan_set = sorted({_plan_key(r) for r in rows}, key=lambda x: (x == "(empty)", x.lower()))
+        type_set = sorted({_codex_type_key(r) for r in rows})
+        facets = {
+            "plans": plan_set,
+            "types": type_set,
+            "exports": ["exported", "pending"],
+        }
+
+        # plan 多选
+        plan_raw = str(request.args.get("plan", default="") or "").strip()
+        if plan_raw:
+            want_plans = {x.strip() for x in plan_raw.split(",") if x.strip()}
+            if want_plans:
+                rows = [r for r in rows if _plan_key(r) in want_plans]
+
+        # 导出状态
+        export_raw = str(request.args.get("export", default="") or "all").strip().lower()
+        if export_raw in ("exported", "yes", "1", "true"):
+            rows = [r for r in rows if int(r.get("exported_count") or 0) > 0]
+        elif export_raw in ("pending", "no", "0", "false", "unexported"):
+            rows = [r for r in rows if int(r.get("exported_count") or 0) <= 0]
+
+        # 类型多选
+        type_raw = str(request.args.get("type", default="") or "").strip().lower()
+        if type_raw and type_raw not in ("all", "*"):
+            want_types = {x.strip() for x in type_raw.split(",") if x.strip() and x.strip() != "all"}
+            if want_types:
+                rows = [r for r in rows if _codex_type_key(r) in want_types]
+
         limit = request.args.get("limit", default=500, type=int)
         paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
         page_arg = request.args.get("page", default=None, type=int)
@@ -1562,10 +1839,19 @@ def create_app(auth_code: str | None = None) -> Flask:
             result = _paginate_items(rows, page=page, page_size=page_size)
             result["accounts"] = result.pop("items")
             result["summary"] = db.codex_accounts_summary()
+            result["facets"] = facets
+            result["filters"] = {
+                "q": q,
+                "plan": plan_raw,
+                "export": export_raw,
+                "type": type_raw,
+            }
             return jsonify(result)
         return jsonify({
             "summary": db.codex_accounts_summary(),
             "accounts": rows[:limit],
+            "facets": facets,
+            "filters": {"q": q, "plan": plan_raw, "export": export_raw, "type": type_raw},
         })
 
     @app.get("/api/codex/download/<path:filename>")
@@ -1872,6 +2158,221 @@ def create_app(auth_code: str | None = None) -> Flask:
             logger.exception("推送 sub2api 号池失败")
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
         return jsonify(result)
+
+    @app.get("/api/codex/pool-monitor")
+    def api_codex_pool_monitor_last():
+        """返回最近一次号池扫描结果（不重新请求 sub2api）。"""
+        from core.sub2api_pool_monitor import get_last_scan
+        last = get_last_scan()
+        if not last:
+            return jsonify({"ok": True, "scanned": False, "session": None})
+        return jsonify({"ok": True, "scanned": True, **last})
+
+    @app.post("/api/codex/pool-monitor/scan")
+    def api_codex_pool_monitor_scan():
+        """扫描 sub2api 号池账号状态，匹配本站账号。
+
+        Body 可选: {group_id?, include_ok?: false}
+        """
+        data = request.get_json(silent=True) or {}
+        try:
+            from core.sub2api_pool_monitor import scan_pool
+            result = scan_pool(
+                group_id=data.get("group_id"),
+                include_ok=bool(data.get("include_ok")),
+            )
+        except Exception as exc:
+            logger.exception("号池监控扫描失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+        return jsonify(result)
+
+    @app.get("/api/codex/pool-monitor/repair")
+    def api_codex_pool_monitor_repair_status():
+        """查询后台修复任务进度（轮询用）。"""
+        from core.sub2api_pool_monitor import get_repair_job
+        job = get_repair_job()
+        if not job:
+            return jsonify({"ok": True, "running": False, "job": None})
+        return jsonify({
+            "ok": True,
+            "running": str(job.get("status") or "") == "running",
+            "job": job,
+        })
+
+    @app.post("/api/codex/pool-monitor/repair")
+    def api_codex_pool_monitor_repair():
+        """后台启动修复任务：重授权并重推 / 标记废号。
+
+        Body:
+          {
+            targets: [{email, pool_id?, action?: reauth_repush|mark_dead}],
+            do_reauth?: true,
+            max_workers?: 10,  # 并行线程数，默认 10，上限 20
+            sync?: false   # true 时仍同步阻塞执行（调试用）
+          }
+
+        默认异步：立即返回 job，前端轮询 GET /api/codex/pool-monitor/repair。
+        """
+        data = request.get_json(silent=True) or {}
+        targets = data.get("targets") or data.get("items") or []
+        if not isinstance(targets, list) or not targets:
+            return jsonify({"ok": False, "error": "targets 必须是非空数组"}), 400
+        if len(targets) > 50:
+            return jsonify({"ok": False, "error": "单次最多修复 50 个"}), 400
+        do_reauth = bool(data.get("do_reauth", True))
+        try:
+            max_workers = int(data.get("max_workers") if data.get("max_workers") is not None else 10)
+        except Exception:
+            max_workers = 10
+        max_workers = max(1, min(20, max_workers))
+        try:
+            if data.get("sync"):
+                from core.sub2api_pool_monitor import repair_many
+                result = repair_many(targets, do_reauth=do_reauth, max_workers=max_workers)
+                return jsonify(result)
+            from core.sub2api_pool_monitor import start_repair_job
+            result = start_repair_job(targets, do_reauth=do_reauth, max_workers=max_workers)
+            if result.get("busy"):
+                return jsonify(result), 409
+            if not result.get("ok") and result.get("error"):
+                return jsonify(result), 400
+            return jsonify(result)
+        except Exception as exc:
+            logger.exception("号池监控修复失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/codex/pool-monitor/auto")
+    def api_codex_pool_monitor_auto_status():
+        """号池自动巡检状态：开关、下次/上次、今日统计。"""
+        from core.sub2api_pool_monitor import ensure_auto_monitor_started, get_auto_status
+        ensure_auto_monitor_started()
+        return jsonify(get_auto_status())
+
+    @app.post("/api/codex/pool-monitor/auto")
+    def api_codex_pool_monitor_auto_set():
+        """打开/关闭自动巡检（持久化），或立即跑一轮。
+
+        Body:
+          {
+            enabled?: bool,
+            fire_immediately?: true,  # 打开时默认 true
+            run_now?: bool,           # 立即 force 跑一轮（不改开关）
+            interval_sec?: 900,
+            max_reauth_per_cycle?: 10,
+            max_workers?: 3
+          }
+        """
+        data = request.get_json(silent=True) or {}
+        from core.sub2api_pool_monitor import (
+            ensure_auto_monitor_started,
+            get_auto_status,
+            set_auto_enabled,
+            trigger_auto_run_now,
+        )
+        ensure_auto_monitor_started()
+        try:
+            if data.get("run_now"):
+                return jsonify(trigger_auto_run_now())
+            if "enabled" not in data:
+                return jsonify(get_auto_status())
+            fire = bool(data.get("fire_immediately", True))
+            kwargs = {}
+            if data.get("interval_sec") is not None:
+                kwargs["interval_sec"] = int(data.get("interval_sec"))
+            if data.get("max_reauth_per_cycle") is not None:
+                kwargs["max_reauth_per_cycle"] = int(data.get("max_reauth_per_cycle"))
+            if data.get("max_workers") is not None:
+                kwargs["max_workers"] = int(data.get("max_workers"))
+            return jsonify(set_auto_enabled(bool(data.get("enabled")), fire_immediately=fire, **kwargs))
+        except Exception as exc:
+            logger.exception("号池自动巡检开关失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/codex/pool-monitor/auto/logs")
+    def api_codex_pool_monitor_auto_logs():
+        """最近 run 列表 + 文本日志尾部。"""
+        from core.sub2api_pool_monitor import get_auto_log_tail, list_auto_runs
+        try:
+            limit = int(request.args.get("limit") or 20)
+        except Exception:
+            limit = 20
+        try:
+            lines = int(request.args.get("lines") or 80)
+        except Exception:
+            lines = 80
+        runs = list_auto_runs(limit=limit)
+        log = get_auto_log_tail(lines=lines)
+        return jsonify({
+            "ok": True,
+            "runs": runs.get("items") or [],
+            "log_lines": log.get("lines") or [],
+            "log_text": log.get("text") or "",
+        })
+
+    @app.get("/api/codex/pool-monitor/auto/daily")
+    def api_codex_pool_monitor_auto_daily():
+        """按日统计。?date=YYYY-MM-DD 或 ?days=7。"""
+        from core.sub2api_pool_monitor import get_auto_daily
+        date = (request.args.get("date") or "").strip() or None
+        try:
+            days = int(request.args.get("days") or 7)
+        except Exception:
+            days = 7
+        return jsonify(get_auto_daily(date=date, days=days))
+
+    @app.post("/api/codex/pool-monitor/mark-dead")
+    def api_codex_pool_monitor_mark_dead():
+        """批量本地标废，并默认从号池删除。
+
+        Body 兼容:
+          {emails:[...], reason?, delete_pool?: true}
+          {targets:[{email, pool_id?}], reason?, delete_pool?: true}
+        """
+        data = request.get_json(silent=True) or {}
+        reason = str(data.get("reason") or "号池监控标记废号")
+        delete_pool = bool(data.get("delete_pool", True))
+        from core.sub2api_pool_monitor import mark_local_dead
+
+        targets = data.get("targets") or data.get("items") or []
+        results = []
+        if isinstance(targets, list) and targets:
+            for t in targets:
+                if not isinstance(t, dict):
+                    continue
+                email = str(t.get("email") or "").strip()
+                if not email:
+                    continue
+                pid = t.get("pool_id")
+                try:
+                    pid_i = int(pid) if pid is not None and str(pid).strip() != "" else None
+                except Exception:
+                    pid_i = None
+                results.append(mark_local_dead(
+                    email,
+                    str(t.get("reason") or reason),
+                    pool_id=pid_i,
+                    delete_pool=delete_pool,
+                ))
+        else:
+            emails = data.get("emails") or []
+            if not isinstance(emails, list) or not emails:
+                return jsonify({"ok": False, "error": "emails 或 targets 必须非空"}), 400
+            for e in emails:
+                email = str(e or "").strip()
+                if email:
+                    results.append(mark_local_dead(email, reason, delete_pool=delete_pool))
+
+        ok_n = sum(1 for r in results if r.get("ok"))
+        deleted_n = sum(len(r.get("pool_deleted") or []) for r in results)
+        return jsonify({
+            "ok": ok_n == len(results),
+            "results": results,
+            "count": len(results),
+            "success": ok_n,
+            "failed": len(results) - ok_n,
+            "pool_deleted_count": deleted_n,
+            "delete_pool": delete_pool,
+        })
 
     @app.post("/api/codex/push-sub2-pool-upload")
     def api_codex_push_sub2_pool_upload():
@@ -3036,5 +3537,19 @@ def create_app(auth_code: str | None = None) -> Flask:
         except Exception as exc:
             logger.exception("自动选国失败 provider=%s", provider)
             return jsonify({"ok": False, "provider": provider, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    # 号池自动巡检守护线程（默认关，状态落盘；开启后每 15 分钟一轮）
+    try:
+        from core.sub2api_pool_monitor import ensure_auto_monitor_started
+        ensure_auto_monitor_started()
+    except Exception as exc:
+        logger.warning("号池自动巡检守护线程启动失败: %s", exc)
+
+    # 接码权重：启动时加载落盘的投递统计（按次数窗口，跨重启保留）
+    try:
+        from core import sms_provider
+        sms_provider.ensure_delivery_stats_loaded()
+    except Exception as exc:
+        logger.warning("加载接码投递权重失败: %s", exc)
 
     return app

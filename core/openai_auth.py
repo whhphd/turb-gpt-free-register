@@ -6,6 +6,7 @@ OpenAI Auth 模块
 """
 import json
 import logging
+import re
 import time
 
 from core.session import BrowserSession
@@ -539,16 +540,28 @@ def verify_login_totp(
     code: str,
     *,
     referer: str = "https://auth.openai.com/multi-factor/totp",
+    challenge_url: str | None = None,
 ) -> dict:
     """登录流提交 TOTP/2FA 动态码。
 
-    依次尝试：
-      1) POST /api/accounts/mfa/verify  {"code","factor_type":"totp"}
-      2) POST /api/accounts/totp/validate {"code"}
+    密码校验后常见 page=mfa_challenge，continue_url 形如：
+      https://auth.openai.com/mfa-challenge/<id>
+    官方 mfa/verify 要求字段 type（不是 factor_type）。
+
+    依次尝试多种 payload/端点，避免参数名变更导致整批查活失败。
     """
     code = str(code or "").strip()
     if not code:
         raise ValueError("totp code 不能为空")
+
+    # referer 优先用 challenge 页
+    ref = str(challenge_url or referer or "").strip() or "https://auth.openai.com/mfa-challenge"
+    # 先导航到 challenge 页，建立前端同款 cookie/上下文
+    try:
+        nav_headers = session.get_auth_navigate_headers(referer="https://auth.openai.com/log-in/password")
+        session.get(ref, headers=nav_headers, allow_redirects=True)
+    except Exception as exc:
+        logger.debug("[登录] mfa-challenge 导航失败（继续提交）：%s", str(exc)[:120])
 
     try:
         sentinel_resp = request_sentinel_token(session, "authorize_continue")
@@ -557,29 +570,50 @@ def verify_login_totp(
         logger.warning("[登录] totp sentinel 失败，继续无 sentinel 尝试: %s", str(exc)[:160])
         sentinel_header, so_header = None, None
 
-    headers = session.get_auth_headers(referer=referer)
+    headers = session.get_auth_headers(referer=ref)
     if sentinel_header:
         headers["openai-sentinel-token"] = sentinel_header
     if so_header:
         headers["openai-sentinel-so-token"] = so_header
 
-    attempts = (
-        (
+    # 从 challenge URL 抽 id（若有）
+    challenge_id = ""
+    try:
+        m = re.search(r"/mfa-challenge/([A-Za-z0-9_-]+)", ref)
+        if m:
+            challenge_id = m.group(1)
+    except Exception:
+        challenge_id = ""
+
+    # 实测成功体：{"code","type":"totp","id":"<mfa-challenge-id>"}
+    # 必须把带 id 的放最前，避免先打缺 id 的包造成「看起来重试了一次」的延迟。
+    attempts: list[tuple[str, dict]] = []
+    if challenge_id:
+        attempts.append((
             "https://auth.openai.com/api/accounts/mfa/verify",
-            {"code": code, "factor_type": "totp"},
-        ),
-        (
-            "https://auth.openai.com/api/accounts/totp/validate",
-            {"code": code},
-        ),
-    )
+            {"code": code, "type": "totp", "id": challenge_id},
+        ))
+        attempts.append((
+            "https://auth.openai.com/api/accounts/mfa/verify",
+            {"code": code, "type": "totp", "challenge_id": challenge_id},
+        ))
+    attempts.extend([
+        ("https://auth.openai.com/api/accounts/mfa/verify", {"code": code, "type": "totp"}),
+        ("https://auth.openai.com/api/accounts/mfa/verify", {"code": code, "type": "totp", "factor_type": "totp"}),
+        ("https://auth.openai.com/api/accounts/mfa/verify", {"code": code, "factor_type": "totp"}),
+        ("https://auth.openai.com/api/accounts/totp/validate", {"code": code, "type": "totp"}),
+        ("https://auth.openai.com/api/accounts/totp/validate", {"code": code}),
+    ])
+
     last_status = 0
     last_body = ""
+    schema_errors = 0
     for url, payload in attempts:
-        logger.info("[登录] 提交 TOTP → %s", url.split("/api/accounts/", 1)[-1])
+        path = url.split("/api/accounts/", 1)[-1]
+        logger.info("[登录] 提交 TOTP → %s payload_keys=%s", path, ",".join(payload.keys()))
         resp = session.post(url, headers=headers, data=json.dumps(payload), allow_redirects=False)
         last_status = resp.status_code
-        last_body = (resp.text or "")[:300]
+        last_body = (resp.text or "")[:400]
         if resp.status_code == 404:
             logger.info("[登录] 端点 404，尝试下一个 TOTP 接口")
             continue
@@ -591,8 +625,22 @@ def verify_login_totp(
                     error_code=err_code,
                 )
             low = last_body.lower()
+            # 缺参/schema 错误：换 payload 继续，不要当成验证码错
+            if resp.status_code in (400, 422) and any(
+                k in low for k in (
+                    "missing required parameter",
+                    "missing_required_parameter",
+                    "invalid_request_error",
+                    "unknown parameter",
+                    "unexpected",
+                )
+            ):
+                schema_errors += 1
+                logger.warning("[登录] TOTP 参数不匹配，换 payload 重试：%s", last_body[:180])
+                continue
+            # 真·码错才抛可重试
             if resp.status_code in (400, 401, 422) and any(
-                k in low for k in ("invalid", "incorrect", "expired", "code", "totp", "mfa", "otp")
+                k in low for k in ("invalid", "incorrect", "expired", "wrong", "bad code", "totp", "mfa", "otp")
             ):
                 raise EmailOtpInvalidError(
                     f"TOTP 无效或已过期: status={resp.status_code}, body={last_body[:240]}"
@@ -608,6 +656,10 @@ def verify_login_totp(
             str(data.get("continue_url") or data.get("url") or "")[:160],
         )
         return data
+    if schema_errors:
+        raise RuntimeError(
+            f"TOTP 接口参数均不匹配（缺 type 等）last_status={last_status}: {last_body}"
+        )
     raise RuntimeError(f"TOTP 接口均不可用 last_status={last_status}: {last_body}")
 
 
@@ -651,6 +703,7 @@ def needs_totp_step(page_type: str = "", continue_url: str = "") -> bool:
         "multi-factor",
         "mfa_challenge",
         "mfa-challenge",
+        "mfa/verify",
         "totp",
         "authenticator",
         "two_factor",

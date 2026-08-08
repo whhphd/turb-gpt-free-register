@@ -1311,7 +1311,7 @@ def _do_phone_verification_if_present(page) -> None:
                 raise RuntimeError("无法回到手机号输入页，暂不取新号")
             _t_phone_ready.done()
             logger.info("[Codex][BrowserUse] 需要手机验证，开始取号（%s/%s）", attempt, max_retries)
-            activation_id, phone = sms_provider.acquire_number(http)
+            activation_id, phone = sms_provider.acquire_number(http, attempt_index=attempt)
             logger.info("[Codex][BrowserUse] 已取号：%s activation=%s", phone, activation_id)
             _t_phone_send = _StepTimer(f"填写并提交手机号 attempt={attempt}")
             phone_e164 = _fill_phone(page, phone)
