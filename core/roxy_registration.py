@@ -11,7 +11,7 @@ from pathlib import Path
 
 from config import roxybrowser as _cfg
 from config import twofa as _twofa_cfg
-from core.account_export import save_account_data
+from core.account_export import save_account_data, post_register_dwell
 from core.email_provider import wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
@@ -1872,7 +1872,7 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
     raise RuntimeError(f"找不到可点击的重新发送验证码按钮: last={last}, state={_email_otp_page_state(driver)}")
 
 
-def _wait_after_email_otp_submit(driver, timeout: int = 20) -> str:
+def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
     """提交 OTP 后等待页面离开验证码页。
 
     返回：
@@ -1881,6 +1881,10 @@ def _wait_after_email_otp_submit(driver, timeout: int = 20) -> str:
       - route_error：OpenAI Oops/Route Error 页
       - account_unusable：账号已废
       - rate_limit：Auth 限流
+
+    只有页面明确出现验证码错误（aria-invalid / 错误文案）才判定为无效；
+    网络慢时页面跳转可能超过 10s，超时后只要没有错误标记就按 accepted 处理，
+    避免把已提交成功的验证码误判为失败后误点“重新发送”把流程搞乱。
     """
     end = time.time() + timeout
     last = {}
@@ -1944,12 +1948,21 @@ def _wait_after_email_otp_submit(driver, timeout: int = 20) -> str:
         return "route_error"
     if _otp_flow_already_passed(driver) or not _is_email_verification_page(driver):
         return "accepted"
-    logger.warning(
-        "%s[OTP] 提交后仍停留验证码页，按验证码无效/过期处理 snapshot=%s",
-        _log_prefix(driver),
-        _email_otp_page_state(driver),
-    )
-    return "invalid"
+    if _is_email_verification_page(driver):
+        # 超时仍停留：若无明确错误标记，判定为提交成功、跳转缓慢，按 accepted 放行。
+        last = _email_otp_page_state(driver)
+        has_error_mark = bool(last.get('errors')) or any(
+            str(i.get('ariaInvalid') or '').lower() == 'true' for i in (last.get('inputs') or [])
+        )
+        if has_error_mark:
+            logger.warning("%s[OTP] 提交后仍停留验证码页且存在错误标记，按验证码无效处理 snapshot=%s", _log_prefix(driver), last)
+            return 'invalid'
+        logger.warning(
+            "%s[OTP] 提交后 %ss 仍在验证码页但无错误标记，按跳转缓慢处理（accepted） snapshot=%s",
+            _log_prefix(driver), timeout, last
+        )
+        return 'accepted'
+    return 'accepted'
 
 
 def _click_continue(driver) -> None:
@@ -3286,6 +3299,21 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
                 except Exception as exc:
                     if otp_attempt >= max_otp_attempts:
                         raise
+                    # 兜底：OpenAI 重发验证码时常常是同一封邮件（时间戳不变），
+                    # after_ts 过滤会把它当成旧邮件忽略。先宽松取最新一条验证码，
+                    # 取到就直接用它重试提交，避免误点“重新发送”后死等。
+                    fallback_otp = None
+                    try:
+                        fallback_otp = wait_for_otp(email, after_ts=0.0, max_wait=15, poll_interval=3)
+                    except Exception:
+                        fallback_otp = None
+                    if fallback_otp:
+                        logger.info(
+                            "[Roxy注册][OTP] 取码接口超时但宽松取到最新验证码，直接重试提交：%s (fallback)",
+                            fallback_otp,
+                        )
+                        current_otp = fallback_otp
+                        continue
                     logger.warning(
                         "[Roxy注册][OTP] 一直未收到验证码，点击“重新发送电子邮件”后继续等待（下一轮 %s/%s）：%s: %s",
                         otp_attempt + 1,
@@ -3310,7 +3338,7 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
             except Exception as exc:
                 logger.info("[Roxy注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
-            outcome = _wait_after_email_otp_submit(driver, timeout=20)
+            outcome = _wait_after_email_otp_submit(driver, timeout=30)
             if outcome == "accepted" or _otp_flow_already_passed(driver):
                 if outcome != "accepted":
                     logger.info("[Roxy注册][OTP] 等待结果=%s，但已离开验证码页，按通过处理", outcome)
@@ -3462,6 +3490,7 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
                 "codex": codex_result,
             },
         )
+        post_register_dwell(email, label="Roxy注册")
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
         return {
             "success": bool(codex_ok),

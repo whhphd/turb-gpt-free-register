@@ -21,7 +21,7 @@ from typing import Any
 
 from config import browser_use as _cfg
 from config import twofa as _twofa_cfg
-from core.account_export import save_account_data
+from core.account_export import save_account_data, _post_register_dwell_seconds
 from core.browser_use_client import BrowserUseClient
 from core.email_provider import resolve_email_source, wait_for_otp
 from core.humanize import delay as human_delay
@@ -39,6 +39,25 @@ def _set_log_provider_label(label: str) -> None:
     _LOG_CONTEXT.provider_label = label or "BrowserUse"
 
 
+def _set_cloud_provider(prefix: str) -> None:
+    _LOG_CONTEXT.provider_prefix = prefix or "browser_use"
+
+
+def _cloud_provider_prefix() -> str:
+    return str(getattr(_LOG_CONTEXT, "provider_prefix", "browser_use") or "browser_use")
+
+
+def _skyvern_human_mode() -> bool:
+    if _cloud_provider_prefix() != "skyvern":
+        return False
+    try:
+        from config import skyvern as _skyvern_cfg
+
+        return bool(getattr(_skyvern_cfg, "SKYVERN_HUMAN_MODE", True))
+    except Exception:
+        return True
+
+
 class _CloudProviderLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         label = _log_provider_label()
@@ -51,6 +70,8 @@ logger.addFilter(_CloudProviderLogFilter())
 
 
 def _fast_mode() -> bool:
+    if _skyvern_human_mode():
+        return False
     return bool(getattr(_cfg, "BROWSER_USE_FAST_MODE", True))
 
 
@@ -78,16 +99,91 @@ def _bu_delay(kind: str, seconds: float | None = None) -> None:
     if _fast_mode():
         if seconds is None:
             seconds = {
-                "navigate": 0.2,
-                "form": 0.12,
-                "otp_input": 0.15,
-                "api": 0.15,
-                "post_auth": 0.2,
-            }.get(kind, 0.1)
+                "navigate": random.uniform(0.45, 0.95),
+                "form": random.uniform(0.35, 0.85),
+                "otp_input": random.uniform(0.25, 0.65),
+                "api": random.uniform(0.3, 0.8),
+                "post_auth": random.uniform(0.6, 1.2),
+            }.get(kind, random.uniform(0.15, 0.35))
         if seconds > 0:
             time.sleep(seconds)
         return
     human_delay(kind)
+
+
+def _human_pause(min_s: float = 0.08, max_s: float = 0.28) -> None:
+    """Browser Use / Skyvern 快速模式下也保留微随机停顿，避免毫秒级连贯操作。"""
+    try:
+        time.sleep(random.uniform(float(min_s), float(max_s)))
+    except Exception:
+        time.sleep(0.12)
+
+
+def _human_click_locator(loc, *, timeout: int = 3000) -> None:
+    """Playwright locator 人工化点击：滚动、hover、短暂停顿后点击。"""
+    loc.scroll_into_view_if_needed(timeout=2000)
+    _human_pause(0.08, 0.22)
+    try:
+        loc.hover(timeout=1200)
+        _human_pause(0.05, 0.18)
+    except Exception:
+        pass
+    loc.click(timeout=timeout, delay=random.randint(35, 140))
+
+
+def _human_fill_locator(
+    page,
+    loc,
+    value: str,
+    *,
+    timeout: int = 5000,
+    typing_delay_range: tuple[int, int] | None = None,
+    per_char: bool = False,
+) -> None:
+    """优先模拟键盘输入；失败才回退 fill，避免瞬间整串写入。"""
+    text = str(value)
+    delay_min, delay_max = typing_delay_range or ((18, 55) if _fast_mode() else (45, 120))
+    _human_click_locator(loc, timeout=2000)
+    def _clear_current() -> None:
+        try:
+            page.keyboard.press("Meta+A")
+            _human_pause(0.04, 0.14)
+            page.keyboard.press("Backspace")
+            return
+        except Exception:
+            page.keyboard.press("Control+A")
+            _human_pause(0.04, 0.14)
+            page.keyboard.press("Backspace")
+
+    def _type_slowly() -> None:
+        if not per_char:
+            page.keyboard.type(text, delay=random.randint(delay_min, delay_max))
+            return
+        # 云端 CDP 对 keyboard.type(整串, delay=...) 有时会被压缩得很快；
+        # 邮箱等关键字段改成逐字符发送，并在 Python 侧 sleep，确保肉眼可见是人工节奏。
+        for idx, ch in enumerate(text):
+            page.keyboard.type(ch, delay=random.randint(delay_min, delay_max))
+            if ch in "@._-+":
+                _human_pause(0.18, 0.45)
+            elif idx and idx % random.randint(5, 8) == 0:
+                _human_pause(0.12, 0.35)
+            else:
+                _human_pause(delay_min / 1000.0, delay_max / 1000.0)
+
+    try:
+        _clear_current()
+        _human_pause(0.08, 0.22)
+        _type_slowly()
+        return
+    except Exception:
+        try:
+            _clear_current()
+            _human_pause(0.08, 0.22)
+            _type_slowly()
+            return
+        except Exception:
+            _human_pause(0.08, 0.2)
+            loc.fill(text, timeout=timeout)
 
 
 class _StepTimer:
@@ -149,6 +245,110 @@ def _timeout_ms(seconds: int | None = None) -> int:
     return max(5, value) * 1000
 
 
+def _apply_cloud_browser_automation_mask(context, page, *, label: str, proxy_country_code: str | None = None) -> dict:
+    """给 Browser Use / Skyvern 注入最轻量的自动化特征弱化；避免和云端原生指纹冲突。"""
+    try:
+        try:
+            context.add_init_script(script="""
+(() => {
+  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined }); } catch (_) {}
+  try {
+    if (!window.chrome) Object.defineProperty(window, 'chrome', { value: {}, configurable: true });
+    if (!window.chrome.runtime) window.chrome.runtime = {};
+  } catch (_) {}
+  try {
+    const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+    if (originalQuery) {
+      window.navigator.permissions.query = (parameters) => (
+        parameters && parameters.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery(parameters)
+      );
+    }
+  } catch (_) {}
+})();
+""")
+        except TypeError:
+            context.add_init_script("""
+(() => {
+  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined }); } catch (_) {}
+  try {
+    if (!window.chrome) Object.defineProperty(window, 'chrome', { value: {}, configurable: true });
+    if (!window.chrome.runtime) window.chrome.runtime = {};
+  } catch (_) {}
+  try {
+    const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+    if (originalQuery) {
+      window.navigator.permissions.query = (parameters) => (
+        parameters && parameters.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery(parameters)
+      );
+    }
+  } catch (_) {}
+})();
+""")
+        try:
+            page.add_init_script(script="""
+(() => {
+  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined }); } catch (_) {}
+  try {
+    if (!window.chrome) Object.defineProperty(window, 'chrome', { value: {}, configurable: true });
+    if (!window.chrome.runtime) window.chrome.runtime = {};
+  } catch (_) {}
+})();
+""")
+        except TypeError:
+            page.add_init_script("""
+(() => {
+  try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined }); } catch (_) {}
+  try {
+    if (!window.chrome) Object.defineProperty(window, 'chrome', { value: {}, configurable: true });
+    if (!window.chrome.runtime) window.chrome.runtime = {};
+  } catch (_) {}
+})();
+""")
+        logger.info("[%s] 已注入轻量自动化特征弱化脚本", label)
+    except Exception as exc:
+        logger.debug("[%s] 注入自动化特征弱化脚本失败：%s", label, str(exc)[:180])
+    return {}
+
+
+def _should_apply_cloud_automation_mask(provider_prefix: str) -> bool:
+    if provider_prefix == "skyvern":
+        try:
+            from config import skyvern as _skyvern_cfg
+
+            return bool(getattr(_skyvern_cfg, "SKYVERN_INJECT_AUTOMATION_MASK", False))
+        except Exception:
+            return False
+    return True
+
+
+def _post_register_dwell(page, context, *, provider_prefix: str, email: str) -> None:
+    """注册成功后随机停留再断开，模拟手动注册后短暂观察。"""
+    seconds = _post_register_dwell_seconds()
+    if seconds <= 0:
+        return
+    logger.info("[%s] 注册成功后随机停留 %.1fs 再关闭连接：%s", _log_provider_label(), seconds, email)
+    end = time.time() + seconds
+    last_touch = 0.0
+    while time.time() < end:
+        try:
+            _check_manual_stop()
+        except Exception:
+            break
+        if time.time() - last_touch >= random.uniform(4.0, 8.0):
+            try:
+                page = _pick_live_page(context, page) or page
+                if page is not None:
+                    page.evaluate("() => { try { window.scrollBy(0, Math.floor(Math.random()*80)-40); } catch(e) {} return location.href; }")
+            except Exception:
+                pass
+            last_touch = time.time()
+        time.sleep(random.uniform(0.8, 1.8))
+
+
 def _page_url(page) -> str:
     try:
         return str(page.url or "")
@@ -167,16 +367,28 @@ def _visible_locator(page, selectors: list[str], timeout_ms: int = 1500):
     return None
 
 
-def _fill_first(page, selectors: list[str], value: str, timeout_ms: int | None = None) -> bool:
+def _fill_first(
+    page,
+    selectors: list[str],
+    value: str,
+    timeout_ms: int | None = None,
+    typing_delay_range: tuple[int, int] | None = None,
+    per_char: bool = False,
+) -> bool:
     end = time.time() + ((timeout_ms or _timeout_ms()) / 1000)
     last_err = None
     while time.time() < end:
         loc = _visible_locator(page, selectors, timeout_ms=800)
         if loc is not None:
             try:
-                loc.scroll_into_view_if_needed(timeout=2000)
-                loc.click(timeout=2000)
-                loc.fill(value, timeout=5000)
+                _human_fill_locator(
+                    page,
+                    loc,
+                    value,
+                    timeout=5000,
+                    typing_delay_range=typing_delay_range,
+                    per_char=per_char,
+                )
                 return True
             except Exception as exc:
                 last_err = exc
@@ -209,11 +421,11 @@ def _click_first(page, selectors: list[str], timeout_ms: int | None = None) -> b
         loc = _visible_locator(page, selectors, timeout_ms=800)
         if loc is not None:
             try:
-                loc.scroll_into_view_if_needed(timeout=2000)
-                loc.click(timeout=3000)
+                _human_click_locator(loc, timeout=3000)
                 return True
             except Exception:
                 try:
+                    _human_pause(0.08, 0.2)
                     loc.evaluate("el => el.click()")
                     return True
                 except Exception:
@@ -357,6 +569,8 @@ def _type_email(page, email: str, timeout_ms: int | None = None) -> None:
         ],
         email,
         timeout_ms=fill_timeout_ms,
+        typing_delay_range=(120, 320) if _fast_mode() else (160, 420),
+        per_char=True,
     )
     if not ok:
         raise RuntimeError("找不到邮箱输入框")
@@ -379,6 +593,7 @@ def _type_email(page, email: str, timeout_ms: int | None = None) -> None:
         timeout_ms=8000,
     ):
         # 回车提交
+        _human_pause(0.12, 0.35)
         page.keyboard.press("Enter")
     _bu_delay("form")
 
@@ -660,6 +875,7 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
             ],
             timeout_ms=8000,
         ):
+            _human_pause(0.12, 0.35)
             page.keyboard.press("Enter")
         _bu_delay("form")
         return password
@@ -695,7 +911,15 @@ def _type_otp(page, code: str) -> None:
         count = 0
     if count >= len(code):
         for i, ch in enumerate(code):
-            boxes.nth(i).fill(ch)
+            box = boxes.nth(i)
+            try:
+                _human_click_locator(box, timeout=1200)
+                _human_pause(0.05, 0.14)
+                page.keyboard.type(ch, delay=random.randint(35, 110))
+            except Exception:
+                _human_pause(0.08, 0.2)
+                box.fill(ch)
+            _human_pause(0.04, 0.16)
         return
     raise RuntimeError("找不到 OTP 输入框")
 
@@ -736,6 +960,7 @@ def _click_continue(page) -> None:
         ],
         timeout_ms=5000,
     ):
+        _human_pause(0.12, 0.35)
         page.keyboard.press("Enter")
 
 
@@ -926,14 +1151,19 @@ def _fill_birthday_fields(page, birthday: str) -> None:
         try:
             tag = (loc.evaluate("el => el.tagName") or "").lower()
             if tag == "select":
+                _human_pause(0.12, 0.35)
                 try:
                     loc.select_option(value=value)
                 except Exception:
+                    _human_pause(0.08, 0.2)
                     loc.select_option(label=value)
             else:
-                loc.fill(value)
+                _human_pause(0.08, 0.22)
+                _human_fill_locator(page, loc, value, timeout=5000)
         except Exception:
             try:
+                _human_pause(0.08, 0.22)
+                _human_pause(0.05, 0.16)
                 loc.fill(value)
             except Exception:
                 pass
@@ -995,16 +1225,20 @@ def _fill_spinbutton_birthday(page, birthday: str) -> bool:
             loc = page.locator(selector).first
             if loc.count() <= 0:
                 continue
+            _human_pause(0.08, 0.22)
             loc.scroll_into_view_if_needed(timeout=1500)
             loc.click(timeout=1500)
             page.keyboard.press("Meta+A")
-            page.keyboard.type(str(value), delay=10 if _fast_mode() else 40)
+            _human_pause(0.05, 0.15)
+            page.keyboard.type(str(value), delay=random.randint(20, 70) if _fast_mode() else random.randint(45, 120))
             loc.evaluate("el => { el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); el.blur?.(); }")
             ok = True
         except Exception:
             try:
+                _human_pause(0.08, 0.22)
                 page.keyboard.press("Control+A")
-                page.keyboard.type(str(value), delay=10 if _fast_mode() else 40)
+                _human_pause(0.05, 0.15)
+                page.keyboard.type(str(value), delay=random.randint(20, 70) if _fast_mode() else random.randint(45, 120))
                 ok = True
             except Exception:
                 pass
@@ -1658,6 +1892,7 @@ def run_browser_use_registration(
         client = BrowserUseClient()
 
     _set_log_provider_label(cloud_label)
+    _set_cloud_provider(provider_prefix)
     _t_all = _StepTimer(f"{cloud_label} 注册全流程")
     session_info_open = client.open_session()
     create_acknowledged = False
@@ -1692,6 +1927,15 @@ def run_browser_use_registration(
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(_timeout_ms())
             page.set_default_navigation_timeout(_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
+            if _should_apply_cloud_automation_mask(provider_prefix):
+                _apply_cloud_browser_automation_mask(
+                    context,
+                    page,
+                    label=cloud_label,
+                    proxy_country_code=session_info_open.proxy_country_code,
+                )
+            else:
+                logger.info("[%s] 已跳过额外 JS 指纹补丁，使用云浏览器原生 stealth 环境", cloud_label)
 
             if provider_prefix == "skyvern":
                 try:
@@ -1914,6 +2158,7 @@ def run_browser_use_registration(
                     "codex": codex_result,
                 },
             )
+            _post_register_dwell(page, context, provider_prefix=provider_prefix, email=email)
             _t_all.done("success")
             return {
                 "success": True,
@@ -1942,23 +2187,16 @@ def run_browser_use_registration(
             "error": f"{type(exc).__name__}: {str(exc)[:300]}",
         }
     finally:
-        # CDP 远端会话：关闭 browser 连接；Browser Use 侧通常会随断开回收。
-        keep_open = bool(getattr(_cfg, "BROWSER_USE_KEEP_BROWSER_OPEN", False))
-        if provider_prefix == "skyvern":
+        # 任务结束统一关闭连接，避免云浏览器/CDP 残留占用。
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:
+            pass
+        if provider_prefix == "skyvern" and 'client' in locals() and hasattr(client, "close_browser_session") and getattr(session_info_open, "session_id", ""):
             try:
-                from config import skyvern as _skyvern_cfg
-                keep_open = bool(getattr(_skyvern_cfg, "SKYVERN_KEEP_BROWSER_OPEN", False))
-            except Exception:
-                keep_open = False
-        if not keep_open:
-            try:
-                if browser is not None:
-                    browser.close()
+                client.close_browser_session(session_info_open.session_id)
             except Exception:
                 pass
-            if provider_prefix == "skyvern" and 'client' in locals() and hasattr(client, "close_browser_session") and getattr(session_info_open, "session_id", ""):
-                try:
-                    client.close_browser_session(session_info_open.session_id)
-                except Exception:
-                    pass
         _set_log_provider_label("BrowserUse")
+        _set_cloud_provider("browser_use")
