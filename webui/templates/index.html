@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>GPT 注册控制台</title>
   <style>
     * { box-sizing: border-box; }
@@ -154,10 +154,10 @@
     .status-running { color: var(--amber); background: #fff7e6; }
     .status-success { color: var(--green); background: #e9f7ef; }
     .extract-link-cell {
-      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-      margin-top: 4px; max-width: 100%;
+      display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap;
+      margin-top: 4px; max-width: 280px; min-width: 0;
     }
-    .extract-link-cell .pill { min-width: auto; padding: 4px 10px; }
+    .extract-link-cell .pill { min-width: auto; padding: 4px 10px; flex: 0 0 auto; }
     .extract-link-btn {
       min-height: 26px; border: 1px solid #cfe7dc; border-radius: 999px;
       padding: 0 10px; font-size: 12px; font-weight: 800; line-height: 1;
@@ -172,9 +172,15 @@
       display: inline-flex; align-items: center; gap: 4px;
     }
     .extract-link-error {
-      flex-basis: 100%; color: var(--red); font-size: 12px; line-height: 1.35;
-      max-width: 260px; white-space: normal; overflow-wrap: anywhere;
+      flex: 1 1 100%; min-width: 0; max-width: 100%;
+      color: var(--red); font-size: 12px; line-height: 1.4;
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+      overflow: hidden; text-overflow: ellipsis;
+      word-break: break-word; overflow-wrap: anywhere;
+      cursor: help;
     }
+    .accounts-table-v2 .extract-link-cell { max-width: 260px; }
+    .accounts-table-v2 td .extract-link-error { max-width: 240px; }
     .agent-token-cell { margin-top: 4px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
     .agent-token-cell button { min-height:24px; border:1px solid #b9dfc9; border-radius:999px; background:#f0fbf5; color:#166534; padding:0 9px; font-size:12px; font-weight:800; cursor:pointer; }
     .agent-token-cell .agent-download { border-color:#bdd0ff; background:#f3f7ff; color:#1d4ed8; }
@@ -621,7 +627,7 @@
     .accounts-table-v2-wrap { overflow: auto; padding: 0; }
     .accounts-table-v2 {
       width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px;
-      min-width: 1280px;
+      min-width: 1420px;
     }
     .accounts-table-v2 th, .accounts-table-v2 td {
       padding: 12px 12px; border-bottom: 1px solid #ebeef5;
@@ -642,7 +648,8 @@
     .accounts-table-v2 .col-id { width: 72px; }
     .accounts-table-v2 .col-email { width: 240px; }
     .accounts-table-v2 .col-source { width: 90px; }
-    .accounts-table-v2 .col-token { width: 100px; }
+    .accounts-table-v2 .col-token { width: 180px; }
+    .accounts-table-v2 .col-direct-card { width: 92px; text-align: center; }
     .accounts-table-v2 .col-plan { width: 120px; }
     .accounts-table-v2 .col-note { width: 140px; }
     .accounts-table-v2 .col-small { width: 72px; }
@@ -724,6 +731,31 @@
     .accounts-table-v2 .acc-v2-token-copy:disabled {
       opacity: .55; cursor: not-allowed;
     }
+    .accounts-table-v2 .acc-v2-token-actions {
+      display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    }
+    .accounts-table-v2 .acc-v2-token-copy.acc-v2-direct-card {
+      border-color: #c6e2ff; color: #409eff; background: #ecf5ff;
+    }
+    .accounts-table-v2 .acc-v2-token-copy.acc-v2-direct-card:hover:not(:disabled) {
+      background: #409eff; border-color: #409eff; color: #fff;
+    }
+    .accounts-table-v2 td.col-direct-card {
+      white-space: normal; overflow: visible; text-overflow: clip; text-align: center;
+    }
+    .accounts-table-v2 .pill.status-direct-unused {
+      color: #b88230; background: #fdf6ec; border-color: #f5dab1;
+      font-weight: 700; min-width: 48px;
+    }
+    .accounts-table-v2 .pill.status-direct-used {
+      color: #606266; background: #eef0f3; border-color: #d3d4d6;
+      font-weight: 700; min-width: 48px;
+    }
+    .accounts-table-v2 .acc-v2-direct-inline {
+      margin-top: 4px; font-size: 12px; font-weight: 600; line-height: 1.2;
+    }
+    .accounts-table-v2 .acc-v2-direct-inline.is-unused { color: #e6a23c; }
+    .accounts-table-v2 .acc-v2-direct-inline.is-used { color: #909399; }
     .accounts-table-v2 .acc-v2-codex {
       font-size: 13px; font-weight: 500;
     }
@@ -968,7 +1000,7 @@
       background: #fafbfc;
     }
     .codex-filter-v2 .acc-v2-search-wrap {
-      flex: 0 1 320px; width: 320px; max-width: 100%; min-width: 200px; padding: 4px 8px;
+      flex: 0 1 280px; width: 280px; max-width: 100%; min-width: 180px; padding: 4px 8px;
     }
     .codex-filter-v2 .acc-v2-search-wrap input {
       width: 100%; min-width: 0; min-height: 32px !important; margin: 0;
@@ -989,9 +1021,219 @@
     .codex-filter-v2 .jobs-tb-btn:hover:not(:disabled) {
       color: #409eff; border-color: #c6e2ff; background: #ecf5ff;
     }
+    .codex-filter-v2 .jobs-tb-btn.is-active {
+      color: #409eff; border-color: #409eff; background: #ecf5ff;
+    }
+    /* Excel 式列筛选 */
+    .codex-excel-filters {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      padding: 10px 16px 0;
+    }
+    .codex-col-filter {
+      position: relative; display: inline-flex; align-items: center;
+    }
+    .codex-col-filter-btn {
+      min-height: 30px; border: 1px solid #dcdfe6; border-radius: 6px;
+      background: #fff; color: #606266; padding: 0 10px;
+      font: inherit; font-size: 12px; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .codex-col-filter-btn:hover { color: #409eff; border-color: #c6e2ff; background: #ecf5ff; }
+    .codex-col-filter-btn.has-filter {
+      color: #409eff; border-color: #409eff; background: #ecf5ff; font-weight: 600;
+    }
+    .codex-col-filter-btn .caret { font-size: 10px; opacity: .75; }
+    .codex-col-filter-menu {
+      display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 40;
+      min-width: 200px; max-width: 280px; max-height: 280px;
+      background: #fff; border: 1px solid #e4e7ed; border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.12); padding: 8px 0;
+      overflow: auto;
+    }
+    .codex-col-filter.open .codex-col-filter-menu { display: block; }
+    .codex-col-filter-menu label {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px; font-size: 13px; color: #606266; cursor: pointer;
+      user-select: none;
+    }
+    .codex-col-filter-menu label:hover { background: #f5f7fa; }
+    .codex-col-filter-menu .menu-actions {
+      display: flex; gap: 6px; padding: 6px 10px 4px; border-bottom: 1px solid #ebeef5; margin-bottom: 4px;
+    }
+    .codex-col-filter-menu .menu-actions button {
+      flex: 1; min-height: 26px; border: 1px solid #dcdfe6; border-radius: 4px;
+      background: #fff; font-size: 12px; cursor: pointer; color: #606266;
+    }
+    .codex-col-filter-menu .menu-actions button:hover { color: #409eff; border-color: #c6e2ff; }
+    .codex-filter-hint {
+      color: #909399; font-size: 12px; padding: 0 4px;
+    }
+    .codex-filter-hint strong { color: #409eff; }
     #codexToolbarV2 {
       padding: 12px 16px 16px;
       justify-content: flex-start;
+    }
+    .pool-monitor-panel {
+      margin-top: 14px; border: 1px solid #ebeef5; border-radius: 10px;
+      background: #fff; box-shadow: 0 0 12px rgba(0,0,0,.04); overflow: hidden;
+    }
+    .pool-monitor-head {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 14px 16px; border-bottom: 1px solid #ebeef5; background: #fafbfc;
+    }
+    .pool-monitor-head h2 {
+      margin: 0; font-size: 15px; font-weight: 700; color: #303133; flex: 1 1 auto;
+    }
+    .pool-monitor-head .pool-monitor-meta {
+      color: #909399; font-size: 12px; white-space: nowrap;
+    }
+    .pool-monitor-summary {
+      display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 8px; padding: 12px 16px; border-bottom: 1px solid #ebeef5;
+    }
+    .pool-monitor-summary .pm-chip {
+      min-width: 0; padding: 10px 12px; border-radius: 8px;
+      background: #f5f7fa; border: 1px solid #ebeef5;
+    }
+    .pool-monitor-summary .pm-chip span {
+      display: block; color: #909399; font-size: 12px; line-height: 1.2;
+    }
+    .pool-monitor-summary .pm-chip strong {
+      display: block; margin-top: 4px; color: #303133; font-size: 18px; font-weight: 700;
+    }
+    .pool-monitor-summary .pm-chip.is-bad strong { color: #f56c6c; }
+    .pool-monitor-summary .pm-chip.is-warn strong { color: #e6a23c; }
+    .pool-monitor-summary .pm-chip.is-good strong { color: #67c23a; }
+    .pool-monitor-toolbar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 10px 16px; border-bottom: 1px solid #ebeef5;
+    }
+    .pool-monitor-toolbar label {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: #606266; font-size: 13px; cursor: pointer; user-select: none;
+    }
+    .pool-monitor-table-wrap { overflow: auto; max-height: 420px; }
+    .pool-monitor-table {
+      width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; min-width: 980px;
+    }
+    .pool-monitor-table th, .pool-monitor-table td {
+      padding: 10px 12px; border-bottom: 1px solid #ebeef5;
+      text-align: left; vertical-align: middle; color: #606266;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .pool-monitor-table thead th {
+      position: sticky; top: 0; background: #f5f7fa; color: #808093; font-weight: 600; z-index: 1;
+    }
+    .pool-monitor-table .col-pm-check { width: 44px; }
+    .pool-monitor-table .col-pm-id { width: 72px; }
+    .pool-monitor-table .col-pm-email { width: 220px; }
+    .pool-monitor-table .col-pm-status { width: 90px; }
+    .pool-monitor-table .col-pm-action { width: 110px; }
+    .pool-monitor-table .col-pm-local { width: 100px; }
+    .pool-monitor-empty {
+      padding: 28px 16px; text-align: center; color: #909399; font-size: 13px;
+    }
+    .pool-monitor-progress {
+      margin: 0 16px 12px; padding: 12px 14px; border: 1px solid #d9ecff;
+      border-radius: 8px; background: #ecf5ff;
+    }
+    .pool-monitor-progress.is-done {
+      border-color: #e1f3d8; background: #f0f9eb;
+    }
+    .pool-monitor-progress.is-error {
+      border-color: #fde2e2; background: #fef0f0;
+    }
+    .pool-monitor-progress .pm-progress-title {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      color: #303133; font-size: 13px; font-weight: 600;
+    }
+    .pool-monitor-progress .pm-progress-title span.meta {
+      color: #606266; font-weight: 400; font-size: 12px;
+    }
+    .pool-monitor-progress .pm-progress-bar {
+      margin-top: 8px; height: 8px; border-radius: 999px; background: #dcdfe6; overflow: hidden;
+    }
+    .pool-monitor-progress .pm-progress-bar > i {
+      display: block; height: 100%; width: 0; background: #409eff;
+      transition: width .25s ease;
+    }
+    .pool-monitor-progress.is-done .pm-progress-bar > i { background: #67c23a; }
+    .pool-monitor-progress.is-error .pm-progress-bar > i { background: #f56c6c; }
+    .pool-monitor-progress .pm-progress-msg {
+      margin-top: 8px; color: #606266; font-size: 12px; line-height: 1.45;
+      word-break: break-all;
+    }
+    .pool-monitor-progress .pm-progress-log {
+      margin-top: 8px; max-height: 140px; overflow: auto;
+      padding: 8px 10px; border-radius: 6px; background: rgba(255,255,255,.75);
+      font-size: 12px; color: #606266; line-height: 1.5;
+    }
+    .pool-monitor-progress .pm-progress-log .ok { color: #67c23a; }
+    .pool-monitor-progress .pm-progress-log .bad { color: #f56c6c; }
+    .pool-monitor-progress .pm-progress-log .dead { color: #909399; }
+    .pool-monitor-auto {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+      margin: 8px 0 10px; padding: 10px 12px; border: 1px solid #ebeef5;
+      border-radius: 8px; background: #fafbfc;
+    }
+    .pool-monitor-auto .pm-auto-switch {
+      display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600;
+      color: #303133; cursor: pointer; user-select: none;
+    }
+    .pool-monitor-auto .pm-auto-switch input { width: 16px; height: 16px; }
+    .pool-monitor-auto .pm-auto-hint { font-size: 12px; color: #909399; }
+    .pool-monitor-auto .pm-auto-status { font-size: 12px; color: #606266; flex: 1 1 220px; }
+    .pool-monitor-auto .pm-auto-status strong { color: #303133; }
+    .pool-monitor-auto .pm-auto-status.is-on strong { color: #67c23a; }
+    .pool-monitor-auto .pm-auto-status.is-run strong { color: #e6a23c; }
+    .pool-monitor-auto-stats {
+      display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin: 0 0 10px;
+    }
+    .pool-monitor-auto-stats .pm-chip span { font-size: 11px; }
+    .pool-monitor-auto-log {
+      margin: 0 0 12px; padding: 8px 10px; border: 1px dashed #dcdfe6; border-radius: 8px;
+      background: #fff; max-height: 160px; overflow: auto; font-size: 12px; color: #606266;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap;
+    }
+    .pool-monitor-auto-log:empty::before { content: '暂无巡检日志'; color: #c0c4cc; }
+    .sogou-restock-log-section {
+      margin-top: 14px; padding-top: 14px; border-top: 1px solid #ebeef5;
+    }
+    .sogou-restock-log-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      margin-bottom: 8px;
+    }
+    .sogou-restock-log-head h3 {
+      margin: 0; color: #303133; font-size: 14px; font-weight: 600;
+    }
+    .sogou-restock-log-live {
+      display: inline-flex; align-items: center; gap: 6px; color: #67c23a; font-size: 12px;
+    }
+    .sogou-restock-log-live i {
+      width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: 0 0 auto;
+    }
+    .sogou-restock-log-live.is-paused { color: #909399; }
+    .sogou-restock-log-live.is-error { color: #f56c6c; }
+    .sogou-restock-log {
+      box-sizing: border-box; min-height: 132px; max-height: 280px; margin: 0; padding: 12px 14px;
+      overflow: auto; border: 1px solid #dcdfe6; border-radius: 6px; background: #f7f8fa;
+      color: #4b5563; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    @media (max-width: 900px) {
+      .pool-monitor-auto-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    .pm-badge {
+      display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px;
+      font-size: 12px; font-weight: 600; line-height: 1.4;
+    }
+    .pm-badge--ok { background: #f0f9eb; color: #67c23a; }
+    .pm-badge--rt { background: #fef0f0; color: #f56c6c; }
+    .pm-badge--dead { background: #f4f4f5; color: #909399; }
+    .pm-badge--review { background: #fdf6ec; color: #e6a23c; }
+    .pm-badge--ignore { background: #ecf5ff; color: #409eff; }
+    @media (max-width: 900px) {
+      .pool-monitor-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
     .codex-table-v2-wrap { overflow: auto; padding: 0; }
     .codex-table-v2 {
@@ -1810,10 +2052,371 @@
       .config-overview-v2-title { font-size: 24px; }
     }
 
+    /* =========================================================
+       移动端适配（完整）
+       断点 900px：抽屉侧栏 + 顶栏；表格横滑 + sticky 关键列
+       ========================================================= */
+    :root {
+      --mobile-topbar-h: 52px;
+      --sticky-check-w: 48px;
+      --sticky-email-w: 168px;
+    }
+
+    /* 桌面默认隐藏移动顶栏 / 遮罩 */
+    .mobile-topbar { display: none; }
+    .sidebar-backdrop {
+      display: none;
+      position: fixed; inset: 0; z-index: 250;
+      background: rgba(15, 23, 42, 0.42);
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* ---- 表格 sticky 关键列（连续左列），桌面横滑时也生效 ----
+       codex/outlook: check + email
+       accounts / jobs: check + id */
+    .jobs-table-v2-wrap,
+    .accounts-table-v2-wrap,
+    .codex-table-v2-wrap,
+    .outlook-table-v2-wrap,
+    .table-wrap {
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-x: contain;
+    }
+    .jobs-table-v2 { min-width: 900px; }
+
+    .jobs-table-v2 .col-check,
+    .accounts-table-v2 .col-check,
+    .codex-table-v2 .col-check,
+    .outlook-table-v2 .col-check {
+      position: sticky; left: 0; z-index: 2;
+      background: #fff;
+    }
+    .jobs-table-v2 thead th.col-check,
+    .accounts-table-v2 thead th.col-check,
+    .codex-table-v2 thead th.col-check,
+    .outlook-table-v2 thead th.col-check {
+      z-index: 4; background: #f5f7fa;
+    }
+
+    /* codex / outlook：email 紧跟 check */
+    .codex-table-v2 .col-email,
+    .outlook-table-v2 .col-email {
+      position: sticky; left: var(--sticky-check-w); z-index: 2;
+      background: #fff;
+      box-shadow: 4px 0 8px -4px rgba(15, 23, 42, 0.12);
+    }
+    .codex-table-v2 thead th.col-email,
+    .outlook-table-v2 thead th.col-email {
+      z-index: 4; background: #f5f7fa;
+    }
+
+    /* accounts / jobs：check + id 连续 sticky */
+    .accounts-table-v2 .col-id,
+    .jobs-table-v2 .col-id {
+      position: sticky; left: var(--sticky-check-w); z-index: 2;
+      background: #fff;
+      box-shadow: 4px 0 8px -4px rgba(15, 23, 42, 0.12);
+    }
+    .accounts-table-v2 thead th.col-id,
+    .jobs-table-v2 thead th.col-id {
+      z-index: 4; background: #f5f7fa;
+    }
+
+    .jobs-table-v2 tbody tr:hover td.col-check,
+    .jobs-table-v2 tbody tr:hover td.col-id,
+    .accounts-table-v2 tbody tr:hover td.col-check,
+    .accounts-table-v2 tbody tr:hover td.col-id,
+    .codex-table-v2 tbody tr:hover td.col-check,
+    .codex-table-v2 tbody tr:hover td.col-email,
+    .outlook-table-v2 tbody tr:hover td.col-check,
+    .outlook-table-v2 tbody tr:hover td.col-email {
+      background: #f5f7fa;
+    }
+
+    @media (max-width: 900px) {
+      :root { --page-gutter: 12px; }
+
+      body {
+        padding-left: 0;
+        padding-top: calc(var(--mobile-topbar-h) + env(safe-area-inset-top, 0px));
+      }
+      body.modal-open { padding-top: 0; }
+
+      /* ---- 移动顶栏 ---- */
+      .mobile-topbar {
+        display: flex; align-items: center; gap: 10px;
+        position: fixed; top: 0; left: 0; right: 0; z-index: 220;
+        height: calc(var(--mobile-topbar-h) + env(safe-area-inset-top, 0px));
+        padding: env(safe-area-inset-top, 0px) 12px 0 10px;
+        background: #fff; border-bottom: 1px solid #eef0f4;
+        box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
+      }
+      .mobile-menu-btn {
+        width: 40px; height: 40px; flex-shrink: 0;
+        display: inline-flex; align-items: center; justify-content: center;
+        border: none; border-radius: 10px; background: transparent;
+        color: #0f172a; cursor: pointer; padding: 0;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .mobile-menu-btn:hover,
+      .mobile-menu-btn:active { background: #f1f5f9; }
+      .mobile-menu-btn svg {
+        width: 22px; height: 22px; stroke: currentColor; fill: none;
+        stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+      }
+      .mobile-topbar-title {
+        min-width: 0; flex: 1;
+        font-size: 16px; font-weight: 700; color: #0f172a;
+        letter-spacing: -0.01em;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .mobile-topbar-brand {
+        width: 24px; height: 26px; flex-shrink: 0; opacity: 0.9;
+      }
+
+      /* ---- 侧栏抽屉 ---- */
+      .app-sidebar {
+        width: min(var(--sidebar-width), calc(100vw - 56px));
+        transform: translateX(-105%);
+        transition: transform 0.22s ease;
+        box-shadow: none;
+        z-index: 300;
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+      }
+      body.sidebar-open .app-sidebar {
+        transform: translateX(0);
+        box-shadow: 8px 0 32px rgba(15, 23, 42, 0.18);
+      }
+      body.sidebar-open .sidebar-backdrop {
+        display: block;
+      }
+      body.sidebar-open { overflow: hidden; }
+      .app-sidebar .sidebar-nav button,
+      .app-sidebar .sidebar-nav button.sidebar-item {
+        min-height: 44px; padding: 12px 14px; font-size: 15px;
+      }
+      .sidebar-footer a,
+      .sidebar-logout button {
+        min-height: 44px; padding: 12px 14px;
+      }
+
+      main {
+        width: calc(100% - var(--page-gutter) * 2);
+        margin: 12px var(--page-gutter) 28px;
+        gap: 10px;
+      }
+      main > div:not(.hidden) { gap: 12px; }
+
+      /* ---- 统计卡片 ---- */
+      .stats { gap: 8px; }
+      .stat { padding: 12px; }
+      .register-title { font-size: 20px; margin-bottom: 10px; }
+      .codex-stat-card { padding: 12px 14px; gap: 12px; }
+      .codex-stat-icon { width: 40px; height: 40px; }
+      .codex-stat-meta strong { font-size: 20px; }
+
+      /* ---- 工具栏 / 筛选条 ---- */
+      .jobs-toolbar-v2,
+      .accounts-filter-v2,
+      .codex-filter-v2,
+      .outlook-filter-v2,
+      .toolbar {
+        padding: 12px;
+        gap: 8px;
+      }
+      .jobs-toolbar-v2 .jobs-tb-btn,
+      .accounts-filter-v2 .jobs-tb-btn,
+      .codex-filter-v2 .jobs-tb-btn,
+      .outlook-filter-v2 .jobs-tb-btn,
+      button.btn {
+        min-height: 40px;
+        padding: 0 12px;
+        font-size: 13px;
+      }
+      #accountsToolbarV2 .jobs-tb-btn {
+        min-height: 36px;
+      }
+      .accounts-filter-v2 .acc-v2-search-wrap,
+      .codex-filter-v2 .acc-v2-search-wrap,
+      .outlook-filter-v2 .acc-v2-search-wrap {
+        flex: 1 1 100%;
+        width: 100%;
+        max-width: none;
+        min-width: 0;
+      }
+      .accounts-filter-v2 .acc-v2-btn-group,
+      .codex-filter-v2 .acc-v2-btn-group,
+      .outlook-filter-v2 .acc-v2-btn-group,
+      #accountsToolbarV2 .acc-v2-btn-group {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      .codex-filter-v2 #btnRefreshCodexV2 { margin-left: 0; }
+      .codex-excel-filters {
+        padding: 8px 12px 0;
+        gap: 6px;
+      }
+      .codex-col-filter-menu {
+        position: fixed;
+        left: 12px !important;
+        right: 12px;
+        max-width: none;
+        width: auto;
+        min-width: 0;
+      }
+
+      /* ---- 表单 / 输入（iOS 防缩放：≥16px） ---- */
+      input, textarea, select {
+        font-size: 16px;
+        min-height: 42px;
+      }
+      .accounts-filter-v2 .acc-v2-search-wrap input,
+      .codex-filter-v2 .acc-v2-search-wrap input,
+      .outlook-filter-v2 .acc-v2-search-wrap input {
+        font-size: 16px !important;
+        min-height: 36px !important;
+      }
+      .row { gap: 10px; }
+      .row > * { min-width: min(100%, 160px); }
+      .row .action-cell {
+        flex: 1 1 100%;
+        justify-content: stretch;
+      }
+      .row .action-cell .btn { flex: 1; }
+
+      /* ---- 卡片 / 面板 ---- */
+      section.card .head,
+      section.card .body { padding: 12px; }
+      .jobs-panel-v2,
+      .accounts-panel-v2,
+      .codex-panel-v2,
+      .outlook-panel-v2 {
+        border-radius: 8px;
+      }
+      .config-section-v2 { padding: 16px 14px; }
+      .config-section-v2-body {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+      .config-section-v2-actions {
+        justify-content: stretch;
+      }
+      .config-section-v2-actions .btn,
+      .config-section-v2-actions button {
+        flex: 1;
+      }
+      .config-subtabs-v2 button { min-height: 40px; }
+
+      /* ---- 表格：缩窄 sticky 关键列，保证横滑可看 ---- */
+      .codex-table-v2 .col-email,
+      .outlook-table-v2 .col-email {
+        width: var(--sticky-email-w); min-width: var(--sticky-email-w);
+      }
+      .jobs-table-v2 .col-id { width: 72px; min-width: 72px; padding-left: 6px; }
+      .accounts-table-v2 .col-id { width: 56px; min-width: 56px; }
+      .jobs-table-v2 th, .jobs-table-v2 td,
+      .accounts-table-v2 th, .accounts-table-v2 td,
+      .codex-table-v2 th, .codex-table-v2 td,
+      .outlook-table-v2 th, .outlook-table-v2 td {
+        padding: 10px 8px;
+        font-size: 13px;
+      }
+      .jobs-table-v2 thead th:first-child,
+      .jobs-table-v2 tbody td:first-child,
+      .accounts-table-v2 thead th:first-child,
+      .codex-table-v2 thead th:first-child,
+      .codex-table-v2 tbody td:first-child,
+      .outlook-table-v2 thead th:first-child,
+      .outlook-table-v2 tbody td:first-child {
+        padding-left: 10px;
+      }
+      .jobs-table-v2 .col-check,
+      .accounts-table-v2 .col-check,
+      .codex-table-v2 .col-check,
+      .outlook-table-v2 .col-check {
+        width: var(--sticky-check-w);
+        padding-left: 10px;
+        padding-right: 4px;
+      }
+
+      /* ---- 分页 ---- */
+      .jobs-v2-pager {
+        gap: 6px; padding: 10px 12px 12px; font-size: 13px;
+        justify-content: center;
+      }
+      .jobs-v2-pager .pager-size-btn { width: 96px; min-width: 96px; }
+      .pager-bar { padding: 10px 12px; gap: 6px; }
+
+      /* ---- 弹层 / Toast ---- */
+      #logPanel:not(.hidden),
+      #retryLogPanel:not(.hidden),
+      #liveLogPanel:not(.hidden),
+      #qrPanel:not(.hidden) {
+        width: calc(100vw - 20px);
+        max-height: calc(100vh - 20px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+        top: 50%; left: 50%;
+        padding: 12px;
+        border-radius: 10px;
+      }
+      #logPanel .log, #retryLogPanel .log, #liveLogPanel .log {
+        max-height: calc(min(760px, calc(100vh - 20px)) - 70px);
+        font-size: 12px;
+      }
+      #qrPanel:not(.hidden) { width: calc(100vw - 20px); }
+      #qrPanel img { max-width: min(360px, calc(100vw - 64px)); }
+      #outlookImportModal:not(.hidden) {
+        padding: 12px;
+        align-items: flex-end;
+      }
+      .outlook-import-dialog {
+        width: 100%;
+        max-height: min(92vh, calc(100vh - 16px - env(safe-area-inset-bottom, 0px)));
+        border-radius: 14px 14px 10px 10px;
+      }
+      .outlook-import-head,
+      .outlook-import-body { padding-left: 14px; padding-right: 14px; }
+      #toast {
+        left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+        text-align: center;
+      }
+
+      /* ---- 号池监控等网格 ---- */
+      .pool-monitor-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .pool-monitor-auto-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 480px) {
+      .stats { grid-template-columns: 1fr 1fr; }
+      .stat strong { font-size: 17px; }
+      .jobs-toolbar-v2 .jobs-tb-field { width: 100%; }
+      .jobs-toolbar-v2 .el-input-number,
+      .accounts-filter-v2 .el-input-number { width: 100%; }
+      .mobile-topbar-title { font-size: 15px; }
+      :root { --sticky-email-w: 140px; }
+    }
+
   </style>
 </head>
 <body>
-<aside class="app-sidebar" aria-label="主导航">
+<header class="mobile-topbar" aria-label="移动端顶栏">
+  <button type="button" class="mobile-menu-btn" id="mobileMenuBtn" aria-label="打开菜单" aria-controls="appSidebar" aria-expanded="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+  </button>
+  <span class="mobile-topbar-title" id="mobileTopbarTitle">注册</span>
+  <svg class="mobile-topbar-brand" viewBox="0 0 44 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <defs>
+      <linearGradient id="mobileLogoGrad" x1="10" y1="4" x2="34" y2="44" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#3b66f5"/>
+        <stop offset="1" stop-color="#7c3aed"/>
+      </linearGradient>
+    </defs>
+    <path d="M22 3L38.928 12.75V35.25L22 45L5.072 35.25V12.75L22 3Z" fill="url(#mobileLogoGrad)"/>
+    <path d="M22 13L30.928 18.25V29.75L22 35L13.072 29.75V18.25L22 13Z" fill="white" fill-opacity="0.92"/>
+  </svg>
+</header>
+<div class="sidebar-backdrop" id="sidebarBackdrop" aria-hidden="true"></div>
+<aside class="app-sidebar" id="appSidebar" aria-label="主导航">
   <div class="sidebar-brand">
     <svg class="sidebar-brand-icon" viewBox="0 0 44 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <defs>
@@ -1845,6 +2448,12 @@
         <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
       </svg>
       <span class="sidebar-item-label">Codex 授权</span>
+    </button>
+    <button type="button" data-tab="pool-admin" class="sidebar-item">
+      <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 11v6c0 1.7 4 3 9 3s9-1.3 9-3v-6"/>
+      </svg>
+      <span class="sidebar-item-label">号池管理</span>
     </button>
     <button type="button" data-tab="outlook" class="sidebar-item">
       <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1972,8 +2581,38 @@
           </span>
         </label>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnStartV2">开始注册</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnGcashSessionStartV2" title="Cloak 注册入库后保活浏览器；复制 AT 去第三方提链，再贴支付链接提取 GCash 二维码">注册+gcash提链</button>
       </div>
       <div id="regWarnV2"></div>
+      <section class="gcash-session-panel" id="gcashSessionPanelV2" aria-label="GCash 提链会话" style="display:none;margin:12px 0 16px;padding:14px 16px;border:1px solid #d9ecff;border-radius:10px;background:linear-gradient(180deg,#f5faff 0%,#fff 100%);">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-bottom:10px;">
+          <strong style="font-size:14px;">GCash 提链会话</strong>
+          <span class="pill" id="gcashSessStatusV2" style="background:#ecf5ff;color:#409eff;">idle</span>
+          <span class="muted mono" id="gcashSessEmailV2" style="font-size:12px;"></span>
+          <span class="muted" id="gcashSessMsgV2" style="font-size:12px;flex:1;min-width:180px;"></span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnGcashCopyAtV2" disabled>复制 accessToken</button>
+          <button type="button" class="jobs-tb-btn" id="btnGcashRefreshQrV2" disabled>重抽二维码</button>
+          <button type="button" class="jobs-tb-btn" id="btnGcashDownloadQrV2" disabled>下载二维码</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnGcashCloseV2" disabled>确认关闭浏览器</button>
+        </div>
+        <div id="gcashAtBoxV2" style="display:none;margin-bottom:10px;">
+          <div class="muted" style="font-size:12px;margin-bottom:4px;">accessToken（可点「复制」或手动全选 Ctrl+C）</div>
+          <textarea id="gcashAtTextV2" readonly rows="3" style="width:100%;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;font-size:11px;padding:8px 10px;border:1px solid #dcdfe6;border-radius:6px;resize:vertical;word-break:break-all;"></textarea>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px;">
+          <input id="gcashPayUrlV2" type="url" placeholder="粘贴第三方返回的支付/GCash 链接（https://…）" style="flex:1;min-width:240px;padding:8px 10px;border:1px solid #dcdfe6;border-radius:6px;font-size:13px;" disabled>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnGcashOpenUrlV2" disabled>在浏览器打开并抽码</button>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;">
+          <div id="gcashQrWrapV2" style="display:none;text-align:center;">
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">GCash 二维码（可右键复制图片）</div>
+            <img id="gcashQrImgV2" alt="GCash QR" style="max-width:280px;max-height:280px;border:1px solid #ebeef5;border-radius:8px;background:#fff;padding:8px;">
+          </div>
+          <pre id="gcashSessLogV2" class="log" style="flex:1;min-width:220px;max-height:220px;margin:0;font-size:11px;background:#0f172a0a;border-radius:8px;padding:8px 10px;overflow:auto;"></pre>
+        </div>
+      </section>
       <div class="jobs-table-v2-wrap">
         <table class="jobs-table-v2">
           <colgroup>
@@ -2010,6 +2649,7 @@
 
         <div class="acc-v2-btn-group">
           <span class="acc-v2-selected" id="accountsSelectedHintV2">已选 0</span>
+          <button type="button" class="jobs-tb-btn" id="btnAccountsClearSelectionV2" disabled title="取消当前所有勾选（不删除账号）">取消当前选择</button>
           <label class="acc-v2-inline" title="批量补跑 Codex 的并发线程数">线程
             <span class="el-input-number">
               <input id="codexBulkWorkersV2" type="number" min="1" max="16" value="3" inputmode="numeric">
@@ -2023,10 +2663,38 @@
           </label>
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通 Plus 的账号">已开通Plus</button>
+          <button type="button" class="jobs-tb-btn" id="btnAccountsClearFiltersV2" title="清空来源/套餐/Codex/直卡/查活/2FA 筛选">清空筛选</button>
           <button type="button" class="jobs-tb-btn" id="btnRefreshAccountsV2" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedLiveTopV2" onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
 
         </div>
+      </div>
+      <div class="codex-excel-filters" id="accountsExcelFiltersV2" aria-label="账号列筛选">
+        <div class="codex-col-filter" data-filter-key="source">
+          <button type="button" class="codex-col-filter-btn" id="accFilterSourceBtn" data-acc-filter-toggle="source">来源 <span class="caret">▼</span></button>
+          <div class="codex-col-filter-menu" id="accFilterSourceMenu" role="menu"></div>
+        </div>
+        <div class="codex-col-filter" data-filter-key="plan">
+          <button type="button" class="codex-col-filter-btn" id="accFilterPlanBtn" data-acc-filter-toggle="plan">套餐 <span class="caret">▼</span></button>
+          <div class="codex-col-filter-menu" id="accFilterPlanMenu" role="menu"></div>
+        </div>
+        <div class="codex-col-filter" data-filter-key="codex">
+          <button type="button" class="codex-col-filter-btn" id="accFilterCodexBtn" data-acc-filter-toggle="codex">Codex <span class="caret">▼</span></button>
+          <div class="codex-col-filter-menu" id="accFilterCodexMenu" role="menu"></div>
+        </div>
+        <div class="codex-col-filter" data-filter-key="direct_card">
+          <button type="button" class="codex-col-filter-btn" id="accFilterDirectBtn" data-acc-filter-toggle="direct_card">直卡 <span class="caret">▼</span></button>
+          <div class="codex-col-filter-menu" id="accFilterDirectMenu" role="menu"></div>
+        </div>
+        <div class="codex-col-filter" data-filter-key="live">
+          <button type="button" class="codex-col-filter-btn" id="accFilterLiveBtn" data-acc-filter-toggle="live">查活 <span class="caret">▼</span></button>
+          <div class="codex-col-filter-menu" id="accFilterLiveMenu" role="menu"></div>
+        </div>
+        <div class="codex-col-filter" data-filter-key="totp">
+          <button type="button" class="codex-col-filter-btn" id="accFilterTotpBtn" data-acc-filter-toggle="totp">2FA <span class="caret">▼</span></button>
+          <div class="codex-col-filter-menu" id="accFilterTotpMenu" role="menu"></div>
+        </div>
+        <span class="codex-filter-hint" id="accountsFilterHintV2">筛选：全部</span>
       </div>
       <div class="jobs-toolbar-v2" id="accountsToolbarV2">
         <div class="acc-v2-btn-group">
@@ -2051,6 +2719,7 @@
           <span class="acc-v2-btn-group-title">批量</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnNoteSelectedAccountsV2" disabled title="给选中的账号统一设置备注，留空可清空备注">备注</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLinesV2" disabled title="复制选中账号的完整整行，每个账号一行">复制行</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopySelectedDirectCardV2" disabled title="复制选中账号 Token（每行一个），并把直卡开通标为已用">复制直卡</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载TXT</button>
           <button type="button" class="jobs-tb-btn" id="btnArchiveSelectedAccountsV2" disabled title="归档选中的账号；默认账号列表将不再查询/显示这些账号">归档选中</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedAccountsV2" disabled title="删除选中的本地账号/token记录">删除</button>
@@ -2058,6 +2727,7 @@
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">全部</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopyAllTokensV2" title="复制当前页所有 Token，每个账号一行">复制Token</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopyAllDirectCardV2" title="复制当前页所有 Token，并把本页账号直卡开通全部标为已用">复制本页直卡</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopyAllLinesV2" title="复制当前页所有账号整行，每个账号一行">复制整行</button>
         </div>
       </div>
@@ -2065,7 +2735,7 @@
         <table class="accounts-table-v2">
           <colgroup>
             <col class="col-check"><col class="col-id"><col class="col-email"><col class="col-source">
-            <col class="col-token"><col class="col-plan"><col class="col-note"><col class="col-small">
+            <col class="col-token"><col class="col-direct-card"><col class="col-plan"><col class="col-note"><col class="col-small">
             <col class="col-status"><col class="col-agent"><col class="col-time"><col class="col-actions">
           </colgroup>
           <thead>
@@ -2075,6 +2745,7 @@
               <th class="col-email">邮箱</th>
               <th class="col-source">来源</th>
               <th class="col-token">Token</th>
+              <th class="col-direct-card" title="直卡开通：无属性默认未用；点「复制直卡」后变为已用">直卡</th>
               <th class="col-plan">套餐</th>
               <th class="col-note">备注</th>
               <th class="col-small">2FA</th>
@@ -2140,11 +2811,39 @@
         <div class="acc-v2-btn-group acc-v2-search-wrap">
           <input id="qCodexV2" type="search" placeholder="搜索邮箱、plan、account_id…" autocomplete="off">
         </div>
+        <span class="acc-v2-selected" id="codexSelectedHintV2">已选 0</span>
+        <button type="button" class="jobs-tb-btn" id="btnCodexClearSelectionV2" disabled title="取消当前所有勾选（不删除文件）">取消当前选择</button>
+        <button type="button" class="jobs-tb-btn" id="btnCodexClearFiltersV2" title="清空 Plan/状态/类型 筛选">清空筛选</button>
         <button type="button" class="jobs-tb-btn" id="btnRefreshCodexV2" title="重新加载 Codex 凭证列表">刷新</button>
       </div>
+      <div class="codex-excel-filters" id="codexExcelFiltersV2" aria-label="列筛选">
+        <div class="codex-col-filter" data-filter-key="plan">
+          <button type="button" class="codex-col-filter-btn" id="codexFilterPlanBtn" data-codex-filter-toggle="plan">
+            Plan <span class="caret">▼</span>
+          </button>
+          <div class="codex-col-filter-menu" id="codexFilterPlanMenu" role="menu"></div>
+        </div>
+        <div class="codex-col-filter" data-filter-key="export">
+          <button type="button" class="codex-col-filter-btn" id="codexFilterExportBtn" data-codex-filter-toggle="export">
+            导出状态 <span class="caret">▼</span>
+          </button>
+          <div class="codex-col-filter-menu" id="codexFilterExportMenu" role="menu"></div>
+        </div>
+        <div class="codex-col-filter" data-filter-key="type">
+          <button type="button" class="codex-col-filter-btn" id="codexFilterTypeBtn" data-codex-filter-toggle="type">
+            类型 <span class="caret">▼</span>
+          </button>
+          <div class="codex-col-filter-menu" id="codexFilterTypeMenu" role="menu"></div>
+        </div>
+        <span class="codex-filter-hint" id="codexFilterHintV2">筛选：全部</span>
+      </div>
       <div class="jobs-toolbar-v2" id="codexToolbarV2">
-        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCodexDownloadBulkV2" disabled title="把选中的多个本地凭证打包成一个 JSON 文件下载（备份/迁移用，CPA 不能直接读，需先解包）">下载本地</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCodexDownloadBulkV2" disabled title="下载选中凭证：sub2 回执会自动从 sub2api 导出可导入格式；CPA 凭证则打包本地 JSON">下载本地</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexDownloadBulkSub2V2" disabled title="把选中本地记录离线转换成 sub2api accounts/data JSON（不依赖号池是否还在）">下载sub2</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexDownloadBulkCpaV2" disabled title="从 CPA auth-files 下载选中账号的真实 Codex JSON，并打包成 ZIP（可直接解压放入 CPA auth-dir）">从CPA下载</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexPushPoolV2" disabled title="把勾选的 Codex 授权凭证推送到 sub2api 号池（默认分组8 / 并发50，可在配置改）">推送号池</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexUploadPushPoolV2" title="手动上传 CPA 或 sub2api 格式 JSON，自动识别转换后按保存的号池配置推送（凭据不动，concurrency/分组等用配置覆盖）">上传推送号池</button>
+        <input type="file" id="codexUploadPoolFilesV2" accept=".json,application/json" multiple hidden>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnCodexDeleteBulkV2" disabled title="删除选中的本地 Codex JSON 凭证文件">删除选中</button>
       </div>
       <div class="codex-table-v2-wrap">
@@ -2169,6 +2868,212 @@
         </table>
       </div>
       <div class="jobs-v2-pager" id="pager-codex-v2"></div>
+    </section>
+  </div>
+
+  <!-- ============ 号池管理 ============ -->
+  <div id="tab-pool-admin" class="hidden">
+    <h1 class="register-title">号池管理</h1>
+    <div class="acc-v2-btn-group" style="margin:0 0 14px;display:flex;gap:8px;flex-wrap:wrap">
+      <button type="button" class="jobs-tb-btn is-active" id="btnPoolAdminSubMonitor" data-pool-sub="monitor">号池巡视</button>
+      <button type="button" class="jobs-tb-btn" id="btnPoolAdminSubFinished" data-pool-sub="finished">成品号入池</button>
+      <button type="button" class="jobs-tb-btn" id="btnPoolAdminSubRestock" data-pool-sub="restock">自动补池</button>
+    </div>
+
+    <section id="poolAdminMonitorSection" aria-label="号池巡视">
+      <div class="pool-monitor-panel" id="poolMonitorPanelV2" style="display:block">
+        <div class="pool-monitor-head">
+          <h2>号池状态监控</h2>
+          <span class="pool-monitor-meta" id="poolMonitorMetaV2">尚未扫描</span>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCodexPoolMonitorScanV2" title="扫描 sub2api 号池 openai/oauth 账号，只处理本站匹配号；外渠道忽略">扫描号池状态</button>
+          <button type="button" class="jobs-tb-btn" id="btnPoolMonitorRescanV2" title="重新扫描号池">重新扫描</button>
+        </div>
+        <div class="pool-monitor-auto" id="poolMonitorAutoV2">
+          <label class="pm-auto-switch" title="开启后每 15 分钟：扫描 → 补跑≤10 → 删废；状态持久化">
+            <input type="checkbox" id="pmAutoEnabledV2">
+            <span>自动巡检（15分钟）</span>
+          </label>
+          <span class="pm-auto-hint">扫描→补跑≤10→删废 · 默认关 · 开启后重启仍保持</span>
+          <span class="pm-auto-status" id="pmAutoStatusV2">自动巡检：关闭</span>
+          <button type="button" class="jobs-tb-btn" id="btnPmAutoRunNowV2" title="立即执行一轮（不改开关）">立即巡检</button>
+          <button type="button" class="jobs-tb-btn" id="btnPmAutoRefreshV2" title="刷新巡检状态与日志">刷新日志</button>
+        </div>
+        <div class="pool-monitor-auto-stats" id="poolMonitorAutoStatsV2">
+          <div class="pm-chip"><span>今日轮次</span><strong id="pmAutoDayRuns">0</strong></div>
+          <div class="pm-chip is-good"><span>今日补跑成功</span><strong id="pmAutoDayReauthOk">0</strong></div>
+          <div class="pm-chip is-bad"><span>今日补跑失败</span><strong id="pmAutoDayReauthFail">0</strong></div>
+          <div class="pm-chip is-warn"><span>今日标废</span><strong id="pmAutoDayDead">0</strong></div>
+          <div class="pm-chip"><span>今日号池删除</span><strong id="pmAutoDayDel">0</strong></div>
+          <div class="pm-chip is-warn"><span>今日跳过/错误</span><strong id="pmAutoDaySkipErr">0</strong></div>
+        </div>
+        <div class="pool-monitor-auto-log" id="poolMonitorAutoLogV2"></div>
+        <div class="pool-monitor-summary" id="poolMonitorSummaryV2">
+          <div class="pm-chip"><span>号池总数</span><strong id="pmSumTotal">0</strong></div>
+          <div class="pm-chip"><span>本站匹配</span><strong id="pmSumOurs">0</strong></div>
+          <div class="pm-chip is-good"><span>正常</span><strong id="pmSumOk">0</strong></div>
+          <div class="pm-chip is-bad"><span>掉 RT</span><strong id="pmSumRt">0</strong></div>
+          <div class="pm-chip is-good"><span>可补跑</span><strong id="pmSumRepairable">0</strong></div>
+          <div class="pm-chip is-warn"><span>缺素材</span><strong id="pmSumNeedMat">0</strong></div>
+          <div class="pm-chip is-warn"><span>疑似废号</span><strong id="pmSumDead">0</strong></div>
+          <div class="pm-chip"><span>外渠道忽略</span><strong id="pmSumIgnored">0</strong></div>
+        </div>
+        <div class="pool-monitor-toolbar">
+          <label><input type="checkbox" id="pmIncludeOkV2"> 显示正常账号</label>
+          <label><input type="checkbox" id="pmHideForeignV2" checked> 隐藏外渠道</label>
+          <button type="button" class="jobs-tb-btn" id="btnPmSelectActionableV2" title="只勾选有本地登录素材、真正能补跑的掉 RT 号（跳过缺素材）">勾选可补跑</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnPmRepairSelectedV2" disabled title="对勾选项：掉 RT 走 Codex 补跑后重推；废号仅本地标记">修复选中</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnPmMarkDeadSelectedV2" disabled title="本地标为 deactivated，并同时从 sub2api 号池删除该账号">标废并删号池</button>
+          <span class="pool-monitor-meta" id="pmSelectedHintV2">已选 0</span>
+        </div>
+        <div class="pool-monitor-progress" id="poolMonitorProgressV2" hidden>
+          <div class="pm-progress-title">
+            <span id="pmProgressTitleV2">修复进度</span>
+            <span class="meta" id="pmProgressCountV2">0/0</span>
+          </div>
+          <div class="pm-progress-bar"><i id="pmProgressBarV2"></i></div>
+          <div class="pm-progress-msg" id="pmProgressMsgV2">—</div>
+          <div class="pm-progress-log" id="pmProgressLogV2"></div>
+        </div>
+        <div class="pool-monitor-table-wrap">
+          <table class="pool-monitor-table">
+            <colgroup>
+              <col class="col-pm-check"><col class="col-pm-id"><col class="col-pm-email">
+              <col class="col-pm-status"><col class="col-pm-action"><col class="col-pm-local">
+              <col>
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="col-pm-check"><input type="checkbox" id="pmSelectAllV2" title="全选当前列表可处理项"></th>
+                <th class="col-pm-id">Pool ID</th>
+                <th class="col-pm-email">邮箱</th>
+                <th class="col-pm-status">号池状态</th>
+                <th class="col-pm-action">建议动作</th>
+                <th class="col-pm-local">本地 Codex</th>
+                <th>原因 / 错误</th>
+              </tr>
+            </thead>
+            <tbody id="poolMonitorBodyV2"></tbody>
+          </table>
+          <div class="pool-monitor-empty" id="poolMonitorEmptyV2">点击「扫描号池状态」开始</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="poolAdminRestockSection" class="hidden" aria-label="SogouEdu 自动补池">
+      <div class="pool-monitor-panel" style="display:block">
+        <div class="pool-monitor-head">
+          <h2>SogouEdu 自动补池</h2>
+          <span class="pool-monitor-meta" id="sogouRestockStatusV2">尚未加载</span>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSogouRestockRunV2">立即补池</button>
+          <button type="button" class="jobs-tb-btn" id="btnSogouRestockConnectionV2">测试 SogouEdu 连接</button>
+        </div>
+        <div class="pool-monitor-summary" id="sogouRestockSummaryV2">
+          <div class="pm-chip"><span>健康号数</span><strong id="sogouRestockHealthyV2">-</strong></div>
+          <div class="pm-chip"><span>号池总数</span><strong id="sogouRestockTotalV2">-</strong></div>
+          <div class="pm-chip is-good"><span>补池状态</span><strong id="sogouRestockOrderV2">无未完成订单</strong></div>
+          <div class="pm-chip"><span>SogouEdu 凭据</span><strong id="sogouRestockCredentialV2">未配置</strong></div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0">
+          <label class="fld">启用自动补池<input type="checkbox" id="sogouRestockEnabledV2"></label>
+          <label class="fld">监测分组 ID<input type="number" min="1" id="sogouRestockMonitorGroupV2"></label>
+          <label class="fld">推池分组 ID<input type="number" min="1" id="sogouRestockPushGroupV2"></label>
+          <label class="fld">购买产品<select id="sogouRestockProductV2"><option value="oauth_7d">OAuth 7 天</option><option value="oauth_30d">OAuth 30 天</option></select></label>
+          <label class="fld">最低健康库存<input type="number" min="0" id="sogouRestockMinV2"></label>
+          <label class="fld">目标健康库存<input type="number" min="0" id="sogouRestockTargetV2"></label>
+          <label class="fld">单次最大购买<input type="number" min="1" id="sogouRestockMaxOrderV2"></label>
+          <label class="fld">监测间隔（秒）<input type="number" min="1" id="sogouRestockMonitorIntervalV2"></label>
+          <label class="fld">订单轮询间隔（秒）<input type="number" min="1" id="sogouRestockOrderIntervalV2"></label>
+          <label class="fld">恢复轮询间隔（秒）<input type="number" min="1" id="sogouRestockRecoveryIntervalV2"></label>
+          <label class="fld">推池并发<input type="number" min="1" id="sogouRestockConcurrencyV2"></label>
+          <label class="fld">优先级<input type="number" id="sogouRestockPriorityV2"></label>
+          <label class="fld">负载因子<input type="number" min="1" id="sogouRestockLoadV2"></label>
+          <label class="fld">计费倍率<input type="number" min="0" step="0.1" id="sogouRestockRateV2"></label>
+          <label class="fld">过期自动暂停<input type="checkbox" id="sogouRestockPauseExpiredV2"></label>
+          <label class="fld" style="grid-column:1/-1">账号导入模型白名单（每行一个；留空表示全部模型）<textarea id="sogouRestockModelsV2" rows="3" placeholder="gpt-5.5\ngpt-5.4"></textarea></label>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSogouRestockSaveV2">保存补池配置</button>
+          <span class="pool-monitor-meta">健康统计包含手动补入账号；错误、不可调度和过期账号不计入。</span>
+        </div>
+        <div class="pool-monitor-table-wrap">
+          <table class="pool-monitor-table"><thead><tr><th>订单</th><th>产品</th><th>数量</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody id="sogouRestockOrdersBodyV2"></tbody></table>
+        </div>
+        <section class="sogou-restock-log-section" aria-labelledby="sogouRestockLogTitleV2">
+          <div class="sogou-restock-log-head">
+            <h3 id="sogouRestockLogTitleV2">最近日志</h3>
+            <span class="sogou-restock-log-live is-paused" id="sogouRestockLogStateV2"><i aria-hidden="true"></i><span>等待自动刷新</span></span>
+          </div>
+          <pre class="sogou-restock-log" id="sogouRestockLogsV2" role="log" aria-live="polite">暂无自动补池日志</pre>
+        </section>
+      </div>
+    </section>
+
+    <section id="poolAdminFinishedSection" class="hidden" aria-label="成品号入池">
+      <div class="pool-monitor-panel" style="display:block">
+        <div class="pool-monitor-head">
+          <h2>成品号入池</h2>
+          <span class="pool-monitor-meta">导入已注册素材 → 补跑 Codex → 推送号池（按批管理）</span>
+        </div>
+        <div style="display:grid;gap:10px;margin-bottom:12px">
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <label style="flex:1 1 220px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:#606266">
+              批次名称
+              <input id="fabBatchName" type="text" placeholder="例如：供应商A-0809" style="padding:8px 10px;border:1px solid #dcdfe6;border-radius:8px">
+            </label>
+            <label style="flex:1 1 220px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:#606266">
+              备注（售后用）
+              <input id="fabBatchNote" type="text" placeholder="采购渠道 / 订单号 / 联系人" style="padding:8px 10px;border:1px solid #dcdfe6;border-radius:8px">
+            </label>
+            <label style="width:120px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:#606266">
+              Codex 并发
+              <input id="fabCodexWorkers" type="number" min="1" max="16" value="3" style="padding:8px 10px;border:1px solid #dcdfe6;border-radius:8px">
+            </label>
+          </div>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#606266">
+            账号清单（支持 邮箱----取码 / 邮箱----MFA----取码 / 邮箱----密码----2FA / Outlook 等格式，每行一个）
+            <textarea id="fabBatchText" rows="10" placeholder="email----code_url&#10;email----MFA----code_url&#10;email----password----totp" style="padding:10px;border:1px solid #dcdfe6;border-radius:8px;font-family:ui-monospace,Consolas,monospace;font-size:12px;resize:vertical"></textarea>
+          </label>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#606266;cursor:pointer" title="勾选：Codex 成功后自动推 sub2api 号池；不勾选：只补跑 Codex，稍后在 Codex 授权页自行导出/推送">
+              <input type="checkbox" id="fabAutoPush" checked>
+              自动入池
+            </label>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnFabCreateRun">创建并开始</button>
+            <button type="button" class="jobs-tb-btn" id="btnFabRefresh">刷新批次列表</button>
+            <span class="pool-monitor-meta" id="fabHint">默认：导入 → Codex；勾选「自动入池」时再推号池</span>
+          </div>
+        </div>
+        <div class="pool-monitor-summary" id="fabSummaryBar" hidden>
+          <div class="pm-chip"><span>本批导入</span><strong id="fabSumImported">0</strong></div>
+          <div class="pm-chip is-good"><span>Plus</span><strong id="fabSumPlus">0</strong></div>
+          <div class="pm-chip is-good"><span>Codex 成功</span><strong id="fabSumCodexOk">0</strong></div>
+          <div class="pm-chip is-bad"><span>Codex 失败</span><strong id="fabSumCodexFail">0</strong></div>
+          <div class="pm-chip is-good"><span>入池成功</span><strong id="fabSumPoolOk">0</strong></div>
+          <div class="pm-chip is-bad"><span>入池失败</span><strong id="fabSumPoolFail">0</strong></div>
+        </div>
+        <div id="fabSummaryText" class="pool-monitor-meta" style="margin:8px 0 12px;font-size:13px;color:#303133"></div>
+        <div style="display:grid;grid-template-columns:minmax(240px,320px) 1fr;gap:12px">
+          <div>
+            <div class="pool-monitor-meta" style="margin-bottom:6px">历史批次</div>
+            <div id="fabBatchList" class="pool-monitor-auto-log" style="max-height:420px;min-height:200px"></div>
+          </div>
+          <div>
+            <div class="pool-monitor-meta" style="margin-bottom:6px">当前批次详情 / 日志</div>
+            <div id="fabBatchDetail" class="pool-monitor-auto-log" style="max-height:180px;min-height:100px;margin-bottom:8px"></div>
+            <div id="fabBatchLog" class="pool-monitor-auto-log" style="max-height:240px;min-height:120px"></div>
+            <div class="pool-monitor-table-wrap" style="margin-top:8px;max-height:280px">
+              <table class="pool-monitor-table">
+                <thead>
+                  <tr>
+                    <th>邮箱</th><th>导入</th><th>Codex</th><th>入池</th><th>Plan</th><th>说明</th>
+                  </tr>
+                </thead>
+                <tbody id="fabItemsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 
@@ -2274,8 +3179,13 @@
   <div class="outlook-import-dialog" role="document">
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
-        <h3 id="outlookImportTitle">导入邮箱素材</h3>
-        <p>Outlook：邮箱----密码----clientId----refreshToken；通用 API：邮箱----取码地址（---- 或 ==== 均可）。默认按「已注册成功账号」导入，方便在账号页补跑 Codex。</p>
+        <h3 id="outlookImportTitle">导入账号 / 邮箱素材</h3>
+        <p>支持粘贴已有账号后到「账号」页手动补跑 Codex。常用两种：
+          <br>① <code>邮箱----取码地址</code>
+          <br>② <code>邮箱----MFA密钥----取码地址</code>
+          <br>③ <code>邮箱----密码----2FA密钥</code>
+          <br>也兼容 Outlook 四段：邮箱----密码----clientId----refreshToken（---- / ==== / | 均可）
+        </p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseOutlookImport" aria-label="关闭">×</button>
     </div>
@@ -2284,22 +3194,24 @@
       <label class="outlook-import-field">
         <span>导入类型</span>
         <div class="outlook-v2-select" id="importSourceV2Wrap">
-          <button type="button" class="outlook-v2-select-btn" id="importSourceV2Btn" aria-haspopup="listbox" aria-expanded="false">Outlook 邮箱池</button>
+          <button type="button" class="outlook-v2-select-btn" id="importSourceV2Btn" aria-haspopup="listbox" aria-expanded="false">自动识别格式</button>
           <div class="outlook-v2-select-menu" role="listbox">
-            <button type="button" class="outlook-v2-select-item is-active" data-value="outlook" role="option">Outlook 邮箱池</button>
-            <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">通用 API 取码邮箱</button>
+            <button type="button" class="outlook-v2-select-item is-active" data-value="auto" role="option">自动识别格式</button>
+            <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">邮箱----取码 / MFA----取码</button>
+            <button type="button" class="outlook-v2-select-item" data-value="password_totp" role="option">邮箱----密码----2FA</button>
+            <button type="button" class="outlook-v2-select-item" data-value="outlook" role="option">Outlook 邮箱池</button>
           </div>
-          <input type="hidden" id="importSourceV2" value="outlook">
+          <input type="hidden" id="importSourceV2" value="auto">
         </div>
-        <span class="outlook-import-hint">注册来源可在配置里填多个，例如：outlook,generic_api</span>
+        <span class="outlook-import-hint">默认「自动识别」可混贴多种格式；补跑前请勾选下方「已注册账号」</span>
       </label>
       <label class="outlook-import-check">
         <input id="importAsRegisteredV2" type="checkbox" checked>
-        <span>导入后默认视为「注册成功账号」（邮箱池标记已用，并出现在账号页，可直接批量补跑 Codex）</span>
+        <span>导入为「已注册成功账号」（出现在账号页，可直接批量补跑 Codex）</span>
       </label>
       <label class="outlook-import-field">
-        <span>邮箱素材</span>
-        <textarea id="importTextV2" placeholder="Outlook: email----password----clientId----refreshToken&#10;通用API: email----取码地址"></textarea>
+        <span>账号列表</span>
+        <textarea id="importTextV2" placeholder="邮箱----https://取码接口地址&#10;邮箱----MFA密钥----https://取码接口地址&#10;邮箱----密码----2FA密钥&#10;邮箱----密码----clientId----refreshToken"></textarea>
       </label>
     </div>
     <div class="outlook-import-foot">
@@ -2505,14 +3417,48 @@ function jobsV2OpIcons() {
     del: `<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`,
   };
 }
-function showToast(t) { const el=$('#toast'); el.textContent=t; el.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>el.classList.remove('show'),1400); }
-async function copyText(text) {
-  if (!text) return;
+function showToast(t) { const el=$('#toast'); el.textContent=t; el.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>el.classList.remove('show'),2200); }
+/** 可靠复制：Clipboard API（带超时）→ textarea+execCommand 降级。成功返回 true。 */
+async function copyText(text, { silent = false } = {}) {
+  const value = String(text ?? '');
+  if (!value) {
+    if (!silent) showToast('可复制内容为空');
+    return false;
+  }
+  // 1) Clipboard API（部分环境会挂起，必须超时兜底）
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await Promise.race([
+        navigator.clipboard.writeText(value),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('clipboard_timeout')), 800)),
+      ]);
+      if (!silent) showToast('已复制');
+      return true;
+    } catch (e) {
+      // 继续降级
+    }
+  }
+  // 2) 经典 textarea 方案（不依赖 secure context）
   try {
-    if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
-    else { const a=document.createElement('textarea'); a.value=text; a.style.position='fixed'; a.style.opacity='0'; document.body.appendChild(a); a.select(); document.execCommand('copy'); a.remove(); }
-    showToast('已复制');
-  } catch(e) { showToast('复制失败'); }
+    const a = document.createElement('textarea');
+    a.value = value;
+    a.setAttribute('readonly', '');
+    a.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;outline:none;box-shadow:none;background:transparent;opacity:0;z-index:-1;';
+    document.body.appendChild(a);
+    a.focus();
+    a.select();
+    a.setSelectionRange(0, a.value.length);
+    const ok = document.execCommand('copy');
+    a.remove();
+    if (ok) {
+      if (!silent) showToast('已复制');
+      return true;
+    }
+  } catch (e) {
+    // fallthrough
+  }
+  if (!silent) showToast('复制失败，请手动全选复制');
+  return false;
 }
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -2526,19 +3472,76 @@ function debounce(fn, wait=250) {
 }
 
 // ---------- Tab 切换 ----------
+const TAB_TITLES = {
+  register: '注册',
+  accounts: '账号',
+  codex: 'Codex 授权',
+  outlook: '邮箱池',
+  'pool-admin': '号池管理',
+  config: '配置',
+};
+function setMobileTopbarTitle(tab) {
+  const el = $('#mobileTopbarTitle');
+  if (el) el.textContent = TAB_TITLES[tab] || '控制台';
+}
+function setSidebarOpen(open) {
+  const btn = $('#mobileMenuBtn');
+  document.body.classList.toggle('sidebar-open', !!open);
+  if (btn) {
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.setAttribute('aria-label', open ? '关闭菜单' : '打开菜单');
+  }
+}
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','codex','outlook','config'];
+  const allowed = ['register','accounts','codex','pool-admin','outlook','config'];
   if (!allowed.includes(tab)) tab = 'register';
   $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
-  allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
+  allowed.forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) el.classList.toggle('hidden', t !== tab);
+  });
+  setMobileTopbarTitle(tab);
+  setSidebarOpen(false);
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
   if (tab === 'accounts') loadAccounts();
-  if (tab === 'codex') loadCodex();
+  if (tab === 'codex') {
+    loadCodex();
+  }
+  if (tab === 'pool-admin') {
+    showPoolAdminSub(localStorage.getItem('gpt_pool_admin_sub') || 'monitor');
+    loadPoolMonitorLast();
+    resumePoolMonitorRepairIfAny();
+    loadPoolMonitorAuto({ logs: true });
+    loadFinishedBatches();
+  }
   if (tab === 'outlook') loadOutlook();
   if (tab === 'config') loadConfig();
   if (tab === 'register') refreshJobs();
+  syncSogouRestockLogPolling();
 }
 $$('nav button').forEach(b => b.addEventListener('click', () => activateTab(b.dataset.tab)));
+
+// ---------- 移动端侧栏抽屉 ----------
+(() => {
+  const btn = $('#mobileMenuBtn');
+  const backdrop = $('#sidebarBackdrop');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+    });
+  }
+  if (backdrop) {
+    backdrop.addEventListener('click', () => setSidebarOpen(false));
+  }
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.body.classList.contains('sidebar-open')) {
+      setSidebarOpen(false);
+    }
+  });
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 900) setSidebarOpen(false);
+  });
+})();
 
 // ---------- 概览 ----------
 async function loadSummary() {
@@ -2652,6 +3655,214 @@ function bindJobsBodyEvents(bodyEl) {
 (() => {
   const startV2 = $('#btnStartV2');
   if (startV2) startV2.addEventListener('click', () => startRegistrationFromInputs($('#regCountV2'), $('#regWorkersV2'), startV2));
+  // GCash 提链会话
+  (function bindGcashSession() {
+    let pollTimer = null;
+    let lastSess = null;
+    let cachedAccessToken = ''; // 首次拉取后缓存，避免每次复制都等接口
+    const $id = (id) => document.getElementById(id);
+    function showAtText(token) {
+      const box = $id('gcashAtBoxV2');
+      const ta = $id('gcashAtTextV2');
+      if (!box || !ta) return;
+      if (token) {
+        ta.value = token;
+        box.style.display = '';
+      } else {
+        ta.value = '';
+        box.style.display = 'none';
+      }
+    }
+    function setPanelVisible(on) {
+      const p = $id('gcashSessionPanelV2');
+      if (p) p.style.display = on ? '' : 'none';
+    }
+    function renderSess(s) {
+      lastSess = s || null;
+      if (!s || s.status === 'idle' || s.status === 'closed' || s.status === 'failed') {
+        if (s && (s.status === 'closed' || s.status === 'failed')) {
+          cachedAccessToken = '';
+        }
+        // 无会话时仍可显示面板（用户刚点过启动则保持）
+        if (!$id('gcashSessionPanelV2') || $id('gcashSessionPanelV2').dataset.pinned !== '1') {
+          setPanelVisible(false);
+        }
+      } else {
+        setPanelVisible(true);
+        $id('gcashSessionPanelV2').dataset.pinned = '1';
+      }
+      if (!s) return;
+      if (!s.has_access_token) {
+        // 注册中清空展示，避免旧 token
+        if (s.status === 'registering') {
+          cachedAccessToken = '';
+          showAtText('');
+        }
+      }
+      const st = $id('gcashSessStatusV2');
+      if (st) st.textContent = s.status || 'idle';
+      const em = $id('gcashSessEmailV2');
+      if (em) em.textContent = s.email || '';
+      const msg = $id('gcashSessMsgV2');
+      if (msg) msg.textContent = s.message || s.error || '';
+      const readyAt = s.status === 'ready_at' || s.status === 'qr_ready' || s.status === 'opening_url';
+      const hasQr = !!s.qr_ready && !!s.qr_base64;
+      const copyBtn = $id('btnGcashCopyAtV2');
+      if (copyBtn) copyBtn.disabled = !s.has_access_token;
+      const urlInp = $id('gcashPayUrlV2');
+      if (urlInp) {
+        urlInp.disabled = !(s.status === 'ready_at' || s.status === 'qr_ready');
+        if (s.payment_url && !urlInp.value) urlInp.value = s.payment_url;
+      }
+      const openBtn = $id('btnGcashOpenUrlV2');
+      if (openBtn) openBtn.disabled = !(s.status === 'ready_at' || s.status === 'qr_ready');
+      const refreshBtn = $id('btnGcashRefreshQrV2');
+      if (refreshBtn) refreshBtn.disabled = !(s.status === 'qr_ready' || s.status === 'ready_at') || !s.active;
+      const dlBtn = $id('btnGcashDownloadQrV2');
+      if (dlBtn) dlBtn.disabled = !hasQr;
+      const closeBtn = $id('btnGcashCloseV2');
+      if (closeBtn) closeBtn.disabled = !s.active && s.status !== 'registering';
+      const wrap = $id('gcashQrWrapV2');
+      const img = $id('gcashQrImgV2');
+      if (wrap && img) {
+        if (hasQr) {
+          wrap.style.display = '';
+          img.src = 'data:image/png;base64,' + s.qr_base64;
+        } else {
+          wrap.style.display = 'none';
+          img.removeAttribute('src');
+        }
+      }
+      const logEl = $id('gcashSessLogV2');
+      if (logEl && Array.isArray(s.log_tail)) {
+        logEl.textContent = s.log_tail.join('\n');
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      // 轮询：活跃会话
+      if (s.active || s.status === 'registering') startPoll();
+      else stopPoll();
+    }
+    async function pollOnce() {
+      try {
+        const r = await api('/api/gcash-session');
+        renderSess(r.session || { status: 'idle' });
+      } catch (e) { /* ignore */ }
+    }
+    function startPoll() {
+      if (pollTimer) return;
+      pollTimer = setInterval(pollOnce, 2000);
+    }
+    function stopPoll() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+    const startBtn = $id('btnGcashSessionStartV2');
+    if (startBtn) startBtn.addEventListener('click', async () => {
+      if (!confirm('将启动 1 次 Cloak 注册并保活浏览器（不跑 Codex）。\n注册成功后可复制 AT、粘贴支付链接提取 GCash 二维码。\n继续？')) return;
+      startBtn.disabled = true;
+      setPanelVisible(true);
+      $id('gcashSessionPanelV2').dataset.pinned = '1';
+      cachedAccessToken = '';
+      showAtText('');
+      try {
+        const r = await api('/api/gcash-session/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        renderSess(r.session || {});
+        showToast('GCash 会话已启动，正在注册…');
+        startPoll();
+        loadSummary();
+        if (typeof refreshJobs === 'function') refreshJobs();
+      } catch (err) {
+        showToast('启动失败: ' + err.message);
+      } finally {
+        startBtn.disabled = false;
+      }
+    });
+    const copyBtn = $id('btnGcashCopyAtV2');
+    if (copyBtn) copyBtn.addEventListener('click', async () => {
+      copyBtn.disabled = true;
+      try {
+        let token = cachedAccessToken;
+        if (!token) {
+          const r = await api('/api/gcash-session/access-token');
+          token = r.access_token || '';
+          if (token) cachedAccessToken = token;
+        }
+        if (!token) throw new Error('无 AT（会话可能未就绪或已重启丢失）');
+        showAtText(token);
+        // silent：自己控制 toast，避免 copyText 与这里双 toast
+        const ok = await copyText(token, { silent: true });
+        if (ok) {
+          showToast('已复制 accessToken（' + token.length + ' 字符）');
+        } else {
+          // 剪贴板失败：自动选中文本框，方便手动 Ctrl+C
+          const ta = $id('gcashAtTextV2');
+          if (ta) { ta.focus(); ta.select(); }
+          showToast('自动复制失败：文本框已选中，请按 Ctrl+C');
+        }
+      } catch (err) {
+        showToast('复制失败: ' + err.message);
+      } finally {
+        // ready 时才重新启用
+        if (lastSess && lastSess.has_access_token) copyBtn.disabled = false;
+      }
+    });
+    const openBtn = $id('btnGcashOpenUrlV2');
+    if (openBtn) openBtn.addEventListener('click', async () => {
+      const url = ($id('gcashPayUrlV2')?.value || '').trim();
+      if (!url) { showToast('请先粘贴支付链接'); return; }
+      openBtn.disabled = true;
+      try {
+        showToast('正在浏览器打开并抽码，请稍候…');
+        const r = await api('/api/gcash-session/open-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        renderSess(r.session || {});
+        showToast(r.session?.qr_ready ? '二维码已提取' : '已打开链接');
+      } catch (err) {
+        showToast('打开/抽码失败: ' + err.message);
+        pollOnce();
+      } finally {
+        openBtn.disabled = false;
+      }
+    });
+    const refreshBtn = $id('btnGcashRefreshQrV2');
+    if (refreshBtn) refreshBtn.addEventListener('click', async () => {
+      try {
+        const r = await api('/api/gcash-session/refresh-qr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        renderSess(r.session || {});
+        showToast('二维码已更新');
+      } catch (err) {
+        showToast('重抽失败: ' + err.message);
+      }
+    });
+    const dlBtn = $id('btnGcashDownloadQrV2');
+    if (dlBtn) dlBtn.addEventListener('click', () => {
+      window.open('/api/gcash-session/qr.png?t=' + Date.now(), '_blank');
+    });
+    const closeBtn = $id('btnGcashCloseV2');
+    if (closeBtn) closeBtn.addEventListener('click', async () => {
+      const force = lastSess && lastSess.status === 'registering';
+      const note = force
+        ? '注册仍在进行，强制关闭将中断并尝试关掉浏览器。确定？'
+        : '确认 Plus 已到账并关闭保活浏览器？';
+      if (!confirm(note)) return;
+      try {
+        const r = await api('/api/gcash-session/close', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: !!force }),
+        });
+        renderSess(r.session || { status: 'closed' });
+        showToast('浏览器已关闭');
+        stopPoll();
+      } catch (err) {
+        showToast('关闭失败: ' + err.message);
+      }
+    });
+    // 进入注册页时轻量拉一次状态
+    pollOnce();
+  })();
   const delV2 = $('#btnDeleteSelectedJobsV2');
   if (delV2) delV2.addEventListener('click', deleteSelectedJobs);
   const retryV2 = $('#btnRetrySelectedJobsV2');
@@ -2965,6 +4176,18 @@ async function pollLog() {
 let accountsLoading = false;
 let planStatusLoading = false;
 let planStatusRevision = '';
+let ACCOUNTS_FACETS = {
+  plans: [], sources: [], codex: [], live: [],
+  direct_card: ['未用', '已用'], totp: ['yes', 'no'],
+};
+const ACCOUNTS_FILTERS = {
+  source: new Set(),
+  plan: new Set(),
+  codex: new Set(),
+  direct_card: new Set(),
+  live: new Set(),
+  totp: new Set(),
+};
 function getAccountsQuery() {
   const el = document.getElementById('qAccountsV2');
   return (el ? el.value : '').trim();
@@ -2972,6 +4195,128 @@ function getAccountsQuery() {
 function getCodexBulkWorkers() {
   const el = document.getElementById('codexBulkWorkersV2');
   return Math.max(1, Math.min(16, Number((el && el.value) || 3)));
+}
+function _accountsFilterQueryString() {
+  const parts = [];
+  const map = {
+    source: 'source',
+    plan: 'plans',
+    codex: 'codex',
+    direct_card: 'direct_card',
+    live: 'live',
+    totp: 'totp',
+  };
+  Object.keys(map).forEach(k => {
+    if (ACCOUNTS_FILTERS[k] && ACCOUNTS_FILTERS[k].size) {
+      parts.push(map[k] + '=' + encodeURIComponent(Array.from(ACCOUNTS_FILTERS[k]).join(',')));
+    }
+  });
+  return parts.length ? ('&' + parts.join('&')) : '';
+}
+function _accLabel(key, val) {
+  if (val === '(empty)') return '(空)';
+  if (key === 'totp') return val === 'yes' ? '已启用' : '未启用';
+  if (key === 'codex') {
+    const m = {
+      success: '成功', failed: '失败', retrying: '补跑中', stopped: '已停止',
+      deactivated: '已废', skipped: '跳过',
+    };
+    return m[val] || val;
+  }
+  if (key === 'live') {
+    const m = {
+      live: '正常', failed: '失败', deactivated: '已废',
+      queued: '排队', running: '运行中',
+    };
+    return m[val] || val;
+  }
+  return val || '-';
+}
+function _accountsUpdateFilterHint() {
+  const el = document.getElementById('accountsFilterHintV2');
+  if (!el) return;
+  const bits = [];
+  if (ACCOUNTS_FILTERS.source.size) bits.push('来源×' + ACCOUNTS_FILTERS.source.size);
+  if (ACCOUNTS_FILTERS.plan.size) bits.push('套餐×' + ACCOUNTS_FILTERS.plan.size);
+  if (ACCOUNTS_FILTERS.codex.size) bits.push('Codex×' + ACCOUNTS_FILTERS.codex.size);
+  if (ACCOUNTS_FILTERS.direct_card.size) bits.push('直卡×' + ACCOUNTS_FILTERS.direct_card.size);
+  if (ACCOUNTS_FILTERS.live.size) bits.push('查活×' + ACCOUNTS_FILTERS.live.size);
+  if (ACCOUNTS_FILTERS.totp.size) bits.push('2FA×' + ACCOUNTS_FILTERS.totp.size);
+  el.innerHTML = bits.length
+    ? `筛选：<strong>${esc(bits.join(' · '))}</strong>（命中 ${ACCOUNTS_TOTAL}）`
+    : '筛选：全部';
+  const btnMap = {
+    source: 'accFilterSourceBtn', plan: 'accFilterPlanBtn', codex: 'accFilterCodexBtn',
+    direct_card: 'accFilterDirectBtn', live: 'accFilterLiveBtn', totp: 'accFilterTotpBtn',
+  };
+  Object.keys(btnMap).forEach(k => {
+    const btn = document.getElementById(btnMap[k]);
+    if (btn) btn.classList.toggle('has-filter', ACCOUNTS_FILTERS[k].size > 0);
+  });
+}
+function renderAccountsFilterMenus() {
+  const defs = [
+    { key: 'source', menu: 'accFilterSourceMenu', opts: ACCOUNTS_FACETS.sources || [] },
+    { key: 'plan', menu: 'accFilterPlanMenu', opts: ACCOUNTS_FACETS.plans || [] },
+    { key: 'codex', menu: 'accFilterCodexMenu', opts: ACCOUNTS_FACETS.codex || [] },
+    { key: 'direct_card', menu: 'accFilterDirectMenu', opts: ACCOUNTS_FACETS.direct_card || ['未用', '已用'] },
+    { key: 'live', menu: 'accFilterLiveMenu', opts: ACCOUNTS_FACETS.live || [] },
+    { key: 'totp', menu: 'accFilterTotpMenu', opts: ACCOUNTS_FACETS.totp || ['yes', 'no'] },
+  ];
+  defs.forEach(d => {
+    const menu = document.getElementById(d.menu);
+    if (!menu) return;
+    const mkActions = `
+      <div class="menu-actions">
+        <button type="button" data-acc-filter-all="${d.key}">全选</button>
+        <button type="button" data-acc-filter-none="${d.key}">清空</button>
+      </div>`;
+    menu.innerHTML = mkActions + (d.opts.length
+      ? d.opts.map(v => `
+        <label>
+          <input type="checkbox" data-acc-filter-item="${d.key}" value="${esc(v)}"
+            ${!ACCOUNTS_FILTERS[d.key].size || ACCOUNTS_FILTERS[d.key].has(v) ? 'checked' : ''}>
+          ${esc(_accLabel(d.key, v))}
+        </label>`).join('')
+      : '<div style="padding:8px 12px;color:#909399;font-size:12px;">无选项</div>');
+  });
+  _accountsUpdateFilterHint();
+}
+function closeAccountsFilterMenus(except = null) {
+  document.querySelectorAll('#accountsExcelFiltersV2 .codex-col-filter.open').forEach(el => {
+    if (except && el === except) return;
+    el.classList.remove('open');
+  });
+}
+function applyAccountsFilterFromMenu(key) {
+  const menuMap = {
+    source: 'accFilterSourceMenu', plan: 'accFilterPlanMenu', codex: 'accFilterCodexMenu',
+    direct_card: 'accFilterDirectMenu', live: 'accFilterLiveMenu', totp: 'accFilterTotpMenu',
+  };
+  const menu = document.getElementById(menuMap[key]);
+  if (!menu) return;
+  const boxes = Array.from(menu.querySelectorAll(`input[data-acc-filter-item="${key}"]`));
+  const checked = boxes.filter(b => b.checked).map(b => b.value);
+  const allVals = boxes.map(b => b.value);
+  if (!checked.length || checked.length === allVals.length) {
+    ACCOUNTS_FILTERS[key].clear();
+  } else {
+    ACCOUNTS_FILTERS[key] = new Set(checked);
+  }
+  PAGERS.accounts.page = 1;
+  loadAccounts();
+}
+function clearAccountsFilters() {
+  Object.keys(ACCOUNTS_FILTERS).forEach(k => ACCOUNTS_FILTERS[k].clear());
+  PAGERS.accounts.page = 1;
+  loadAccounts();
+  showToast('已清空账号筛选');
+}
+function clearAccountsSelection() {
+  if (!ACCOUNT_SELECTED.size) return;
+  ACCOUNT_SELECTED.clear();
+  renderAccounts();
+  showToast('已取消当前选择');
 }
 async function loadAccounts() {
   if (accountsLoading) return;
@@ -2981,11 +4326,17 @@ async function loadAccounts() {
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
     const q = getAccountsQuery();
     const p = PAGERS.accounts;
-    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&q=${encodeURIComponent(q)}`);
+    const res = await api(
+      `/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}`
+      + `&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}`
+      + `&q=${encodeURIComponent(q)}${_accountsFilterQueryString()}`
+    );
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
+    if (res.facets) ACCOUNTS_FACETS = res.facets;
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
     if (p.page > totalPages) { p.page = totalPages; accountsLoading = false; return loadAccounts(); }
+    renderAccountsFilterMenus();
     renderAccounts();
   } catch(e) { showToast('加载账号失败: ' + e.message); }
   finally { accountsLoading = false; }
@@ -2998,7 +4349,11 @@ async function pollAccountPlanStatuses() {
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
     const q = getAccountsQuery();
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&q=${encodeURIComponent(q)}`);
+    const snapshot = await api(
+      `/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}`
+      + `&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}`
+      + `&q=${encodeURIComponent(q)}${_accountsFilterQueryString()}`
+    );
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -3168,6 +4523,34 @@ function _planAction(r) {
   }
   return `<button data-plan-check="${esc(r.id)}" title="查询当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>`;
 }
+function _fmtExtractError(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return { short: '未知原因', full: '未知原因' };
+  // 去掉异常类型前缀
+  s = s.replace(/^(RuntimeError|ValueError|Exception|Error):\s*/i, '');
+  // 若仍夹带 last={...} 大 JSON，截断为状态摘要
+  const lastIdx = s.search(/\blast\s*=\s*\{/i);
+  if (lastIdx >= 0) {
+    const head = s.slice(0, lastIdx).trim().replace(/[;，,\s]+$/, '');
+    let tail = s.slice(lastIdx);
+    // 尽量从 JSON 里抠 status / progress
+    const st = (tail.match(/"status"\s*:\s*"([^"]+)"/) || [])[1] || '';
+    const label = (tail.match(/"status_label"\s*:\s*"([^"]+)"/) || [])[1]
+      || (tail.match(/"progress_message"\s*:\s*"([^"]+)"/) || [])[1] || '';
+    const step = (tail.match(/"progress_step"\s*:\s*(\d+)/) || [])[1];
+    const total = (tail.match(/"progress_total"\s*:\s*(\d+)/) || [])[1];
+    const bits = [head || '提链失败'];
+    if (st) bits.push('status=' + st);
+    if (label) bits.push(label);
+    if (step && total) bits.push(step + '/' + total);
+    s = bits.join(' · ');
+  }
+  // 压扁空白
+  s = s.replace(/\s+/g, ' ').trim();
+  const full = s;
+  const short = s.length > 72 ? (s.slice(0, 70) + '…') : s;
+  return { short, full };
+}
 function _fmtExtractExpire(v) {
   if (!v) return '';
   const raw = String(v).trim();
@@ -3197,8 +4580,8 @@ function _extractLinkCell(r) {
     return `<div class="extract-link-cell"><span class="pill status-success" title="${title || esc(link)}">提链成功${typ ? '(' + esc(typ) + ')' : ''}</span>${copy}${qrBtn}${expireHtml}</div>`;
   }
   if (s === 'failed') {
-    const reason = err || msg || '未知原因';
-    return `<div class="extract-link-cell"><span class="pill status-failed" title="${esc(reason)}">提链失败</span><div class="extract-link-error" title="${esc(reason)}">${esc(reason)}</div></div>`;
+    const fmt = _fmtExtractError(err || msg || '未知原因');
+    return `<div class="extract-link-cell"><span class="pill status-failed" title="${esc(fmt.full)}">提链失败</span><div class="extract-link-error" title="${esc(fmt.full)}">${esc(fmt.short)}</div></div>`;
   }
   return '';
 }
@@ -3208,8 +4591,8 @@ function _extractLinkAction(r) {
   const plan = (r.current_plan_type || r.plan_type || '').toString().toLowerCase();
   const eligible = plan === 'free' && !!r.plus_trial_eligible;
   if (!eligible) return '';
-  const failedReason = s === 'failed' ? (r.extract_link_error || r.extract_link_message || '') : '';
-  return `<button class="good" data-extract-link="${esc(r.id)}" title="${esc(failedReason ? '重新提链；上次失败原因：' + failedReason : '为该 free(可Plus试用) 账号创建 PIX/UPI/KAKAO_PAY/IDEAL 提链任务')}">提链</button>`;
+  const failedReason = s === 'failed' ? _fmtExtractError(r.extract_link_error || r.extract_link_message || '').full : '';
+  return `<button class="good" data-extract-link="${esc(r.id)}" title="${esc(failedReason ? '重新提链；上次失败：' + failedReason : '为该 free(可Plus试用) 账号创建提链任务')}">提链</button>`;
 }
 function _codexAction(r) {
   const s = r.codex_status || '';
@@ -3220,10 +4603,24 @@ function _codexAction(r) {
   const label = s === 'success' ? '重新补跑 Codex' : '补跑 Codex';
   return `<button data-codex-retry="${esc(r.email)}" title="重新跑一次 Codex 授权（会消耗 1 封邮箱 OTP + 1 个接码短信）">${label}</button>`;
 }
+function _directCardStatus(r) {
+  return String(r && r.direct_card_status || '').trim() === '已用' ? '已用' : '未用';
+}
+function _directCardCellV2(r) {
+  const st = _directCardStatus(r);
+  if (st === '已用') {
+    return `<span class="pill status-direct-used" title="直卡开通：已用">已用</span>`;
+  }
+  return `<span class="pill status-direct-unused" title="直卡开通：未用（无属性默认未用）">未用</span>`;
+}
 function _tokenCellV2(r) {
   const live = r.live_check_status || '';
   const liveErr = r.live_check_error || '';
   const liveAt = r.live_checked_at || '';
+  const st = _directCardStatus(r);
+  const stHtml = st === '已用'
+    ? `<div class="acc-v2-direct-inline is-used" title="直卡开通：已用">直卡:已用</div>`
+    : `<div class="acc-v2-direct-inline is-unused" title="直卡开通：未用">直卡:未用</div>`;
   let liveHtml = '';
   if (live === 'live') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}">查活: 正常</div>`;
   else if (live === 'queued') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}" style="color:#e6a23c">查活: 排队</div>`;
@@ -3231,9 +4628,12 @@ function _tokenCellV2(r) {
   else if (live === 'deactivated') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#f56c6c">查活: 已废</div>`;
   else if (live === 'failed') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#e6a23c">查活: 失败</div>`;
   if (r.has_access_token) {
-    return `<button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制</button>${liveHtml}`;
+    return `<div class="acc-v2-token-actions">
+      <button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token（不改直卡状态）">复制</button>
+      <button type="button" class="acc-v2-token-copy acc-v2-direct-card" data-account-copy-direct-card="${esc(r.id)}" title="复制 Token，并把直卡开通标为已用">复制直卡</button>
+    </div>${stHtml}${liveHtml}`;
   }
-  return `<span class="pill status-failed">无Token</span>${liveHtml}`;
+  return `<span class="pill status-failed">无Token</span>${stHtml}${liveHtml}`;
 }
 function _accountsV2MoreMenu(r) {
   const parts = [
@@ -3284,6 +4684,7 @@ function renderAccounts() {
       </td>
       <td class="col-source">${esc(r.email_source || '-')}</td>
       <td class="col-token">${_tokenCellV2(r)}</td>
+      <td class="col-direct-card">${_directCardCellV2(r)}</td>
       <td class="col-plan">${_planCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div></td>
       <td class="col-note" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
       <td class="col-small">${r.totp_enabled ? '已启用' : '<span class="acc-v2-muted">未启用</span>'}</td>
@@ -3303,7 +4704,7 @@ function renderAccounts() {
 
   const bodyV2 = $('#accountsBodyV2');
   if (bodyV2) {
-    bodyV2.innerHTML = rows.map(rowHtmlV2).join('') || '<tr><td colspan="12" style="text-align:center;color:#909399;padding:28px;">暂无账号</td></tr>';
+    bodyV2.innerHTML = rows.map(rowHtmlV2).join('') || '<tr><td colspan="13" style="text-align:center;color:#909399;padding:28px;">暂无账号</td></tr>';
   }
   updateAccountSelectionUi(rows);
   _renderPager('accounts', total);
@@ -3313,6 +4714,8 @@ function updateAccountSelectionUi(pageRows = null) {
   const none = ACCOUNT_SELECTED.size === 0;
   const hintV2 = $('#accountsSelectedHintV2');
   if (hintV2) hintV2.textContent = `已选 ${ACCOUNT_SELECTED.size}`;
+  const clearSel = document.getElementById('btnAccountsClearSelectionV2');
+  if (clearSel) clearSel.disabled = none;
 
   const archiveLabel = SHOW_ARCHIVED_ACCOUNTS ? '恢复选中' : '归档选中';
   const archiveTitle = SHOW_ARCHIVED_ACCOUNTS ? '把选中的归档账号恢复到默认账号列表' : '归档选中的账号；默认账号列表将不再查询/显示这些账号';
@@ -3320,7 +4723,7 @@ function updateAccountSelectionUi(pageRows = null) {
     'btnCheckSelectedPlansV2', 'btnExtractSelectedLinksV2',
     'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
-    'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2',
+    'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedDirectCardV2',
     'btnDownloadSelectedTxtV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
   ];
   v2Ids.forEach(id => {
@@ -3438,6 +4841,32 @@ async function onAccountsBodyClick(e) {
       showToast('复制失败: ' + err.message);
     } finally {
       copySecretBtn.disabled = false;
+    }
+    return;
+  }
+
+  const copyDirectCardBtn = e.target.closest('[data-account-copy-direct-card]');
+  if (copyDirectCardBtn) {
+    const id = Number(copyDirectCardBtn.dataset.accountCopyDirectCard);
+    copyDirectCardBtn.disabled = true;
+    try {
+      const r = await api(`/api/accounts/${encodeURIComponent(id)}/copy-direct-card`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      const value = r.value || '';
+      if (!value) { showToast('可复制内容为空'); return; }
+      const ok = await copyText(value, { silent: true });
+      // 本地列表立刻改状态，避免整表刷新
+      const row = (ACCOUNTS || []).find(x => Number(x.id) === id);
+      if (row) row.direct_card_status = r.direct_card_status || '已用';
+      renderAccounts();
+      showToast(ok ? '已复制 Token，直卡标为已用' : '直卡已标已用，但复制失败请手动再点复制');
+    } catch (err) {
+      showToast('复制直卡失败: ' + err.message);
+    } finally {
+      copyDirectCardBtn.disabled = false;
     }
     return;
   }
@@ -3659,6 +5088,54 @@ async function refreshAccountsList(btn) {
   });
   const refreshV2 = $('#btnRefreshAccountsV2');
   if (refreshV2) refreshV2.addEventListener('click', () => refreshAccountsList(refreshV2));
+  const clearSel = document.getElementById('btnAccountsClearSelectionV2');
+  if (clearSel) clearSel.addEventListener('click', clearAccountsSelection);
+  const clearFlt = document.getElementById('btnAccountsClearFiltersV2');
+  if (clearFlt) clearFlt.addEventListener('click', clearAccountsFilters);
+
+  const excel = document.getElementById('accountsExcelFiltersV2');
+  if (excel) {
+    excel.addEventListener('click', (e) => {
+      const toggle = e.target.closest('[data-acc-filter-toggle]');
+      if (toggle) {
+        e.stopPropagation();
+        const wrap = toggle.closest('.codex-col-filter');
+        if (!wrap) return;
+        const willOpen = !wrap.classList.contains('open');
+        closeAccountsFilterMenus();
+        if (willOpen) wrap.classList.add('open');
+        return;
+      }
+      const allBtn = e.target.closest('[data-acc-filter-all]');
+      if (allBtn) {
+        e.stopPropagation();
+        const key = allBtn.getAttribute('data-acc-filter-all');
+        const menu = allBtn.closest('.codex-col-filter-menu');
+        if (menu) menu.querySelectorAll(`input[data-acc-filter-item="${key}"]`).forEach(b => { b.checked = true; });
+        applyAccountsFilterFromMenu(key);
+        return;
+      }
+      const noneBtn = e.target.closest('[data-acc-filter-none]');
+      if (noneBtn) {
+        e.stopPropagation();
+        const key = noneBtn.getAttribute('data-acc-filter-none');
+        const menu = noneBtn.closest('.codex-col-filter-menu');
+        if (menu) menu.querySelectorAll(`input[data-acc-filter-item="${key}"]`).forEach(b => { b.checked = false; });
+        ACCOUNTS_FILTERS[key].clear();
+        PAGERS.accounts.page = 1;
+        loadAccounts();
+      }
+    });
+    excel.addEventListener('change', (e) => {
+      const item = e.target.closest('[data-acc-filter-item]');
+      if (!item) return;
+      applyAccountsFilterFromMenu(item.getAttribute('data-acc-filter-item'));
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('#accountsExcelFiltersV2 .codex-col-filter')) return;
+    closeAccountsFilterMenus();
+  });
 })();
 
 
@@ -4273,6 +5750,51 @@ async function copySelectedAccountTokens() {
     showToast(`已复制 ${lines.length} 个 Token`);
   } catch(e) { showToast('复制失败: ' + e.message); }
 }
+
+async function copyDirectCardForIds(ids, btn) {
+  const list = (ids || []).map(Number).filter(Boolean);
+  if (!list.length) { showToast('请先选择账号'); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/accounts/copy-direct-card-bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_ids: list }),
+    });
+    const lines = (r.values || []).map(x => x.value).filter(Boolean);
+    if (!lines.length) {
+      showToast('没有可复制的 Token（可能都缺 access_token）');
+      return;
+    }
+    const ok = await copyText(lines.join('\n'), { silent: true });
+    const marked = new Set((r.marked_ids || []).map(Number));
+    (ACCOUNTS || []).forEach(a => {
+      if (marked.has(Number(a.id))) a.direct_card_status = '已用';
+    });
+    renderAccounts();
+    const skip = (r.skipped || []).length;
+    showToast(
+      (ok ? `已复制 ${lines.length} 个直卡 Token` : `直卡已标已用 ${lines.length} 个，但复制失败`)
+      + (skip ? `，跳过 ${skip}` : '')
+    );
+  } catch (err) {
+    showToast('批量复制直卡失败: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+    updateAccountSelectionUi();
+  }
+}
+async function copySelectedDirectCards() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先勾选账号'); return; }
+  await copyDirectCardForIds(ids, $('#btnCopySelectedDirectCardV2'));
+}
+async function copyCurrentPageDirectCards() {
+  const ids = (ACCOUNTS || []).map(a => Number(a.id)).filter(Boolean);
+  if (!ids.length) { showToast('当前页没有账号'); return; }
+  if (!confirm(`确定复制当前页 ${ids.length} 个 Token，并把本页直卡全部标为已用吗？`)) return;
+  await copyDirectCardForIds(ids, $('#btnCopyAllDirectCardV2'));
+}
 (function bindAccountsToolbarV2() {
   const bind = (id, fn) => {
     const el = document.getElementById(id);
@@ -4288,7 +5810,9 @@ async function copySelectedAccountTokens() {
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
   bind('btnNoteSelectedAccountsV2', noteSelectedAccounts);
   bind('btnCopySelectedLinesV2', copySelectedAccountLines);
+  bind('btnCopySelectedDirectCardV2', copySelectedDirectCards);
   bind('btnCopyAllTokensV2', copyCurrentPageTokens);
+  bind('btnCopyAllDirectCardV2', copyCurrentPageDirectCards);
   bind('btnCopyAllLinesV2', copyCurrentPageLines);
   bind('btnDownloadSelectedTxtV2', downloadSelectedAccountTxt);
   bind('btnArchiveSelectedAccountsV2', archiveSelectedAccounts);
@@ -4639,15 +6163,19 @@ async function doImportOutlook() {
   if (!text.trim()) { showToast('请粘贴邮箱素材'); return; }
   if (submitBtn) submitBtn.disabled = true;
   try {
-    const source = sourceEl ? sourceEl.value : 'outlook';
+    const source = sourceEl ? sourceEl.value : 'auto';
     const as_registered = registeredEl ? !!registeredEl.checked : true;
     const r = await api('/api/outlook/import', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text, source, as_registered}) });
     const mode = r.as_registered ? '已注册账号' : '邮箱池素材';
-    const msg = `按 ${mode} 导入：解析 ${r.parsed} 行，新增 ${r.inserted}，跳过 ${r.skipped}${r.as_registered ? '；可到“账号”页选择后批量补跑 Codex' : ''}`;
+    const kinds = Array.isArray(r.kinds) && r.kinds.length ? `，类型=${r.kinds.join('+')}` : '';
+    const msg = `按 ${mode} 导入：解析 ${r.parsed} 行，新增 ${r.inserted}，跳过 ${r.skipped}${kinds}${r.as_registered ? '；可到“账号”页选择后批量补跑 Codex' : ''}`;
     if (resultEl) resultEl.innerHTML = `<div class="banner info">${esc(msg)}</div>`;
     if (textEl) textEl.value = '';
-    setPoolSourceV2(source);
-    setImportSourceV2(source);
+    // 邮箱池筛选：有 outlook/generic 时切过去；纯 password_totp 只刷新账号页
+    if (Array.isArray(r.kinds)) {
+      if (r.kinds.includes('outlook')) setPoolSourceV2('outlook');
+      else if (r.kinds.includes('generic_api')) setPoolSourceV2('generic_api');
+    }
     loadOutlook(); loadAccounts(); loadSummary();
     showToast(`导入完成：新增 ${r.inserted}，跳过 ${r.skipped}`);
     setTimeout(closeOutlookImportModal, 600);
@@ -4716,30 +6244,184 @@ async function deleteSelectedOutlook() {
 // ---------- Codex 授权 ----------
 let CODEX = [];
 let CODEX_TOTAL = 0;
+let CODEX_FACETS = { plans: [], types: [], exports: ['exported', 'pending'] };
+// Excel 式筛选：null/空 = 不限制；Set 为勾选值
+const CODEX_FILTERS = {
+  plan: new Set(),   // plan 值，空 plan 用 (empty)
+  export: new Set(), // exported | pending
+  type: new Set(),   // codex | sub2 | cpa
+};
 function getCodexQuery() {
   const el = document.getElementById('qCodexV2');
   return (el ? el.value : '').trim();
+}
+function _codexFilterQueryString() {
+  const parts = [];
+  if (CODEX_FILTERS.plan.size) {
+    parts.push('plan=' + encodeURIComponent(Array.from(CODEX_FILTERS.plan).join(',')));
+  }
+  if (CODEX_FILTERS.export.size === 1) {
+    parts.push('export=' + encodeURIComponent(Array.from(CODEX_FILTERS.export)[0]));
+  } else if (CODEX_FILTERS.export.size > 1) {
+    // 全选等同不限
+  }
+  if (CODEX_FILTERS.type.size) {
+    parts.push('type=' + encodeURIComponent(Array.from(CODEX_FILTERS.type).join(',')));
+  }
+  return parts.length ? ('&' + parts.join('&')) : '';
+}
+function _codexFilterActiveCount() {
+  let n = 0;
+  if (CODEX_FILTERS.plan.size) n++;
+  if (CODEX_FILTERS.export.size === 1) n++;
+  if (CODEX_FILTERS.type.size) n++;
+  return n;
+}
+function _codexUpdateFilterHint() {
+  const el = document.getElementById('codexFilterHintV2');
+  if (!el) return;
+  const bits = [];
+  if (CODEX_FILTERS.plan.size) bits.push('Plan×' + CODEX_FILTERS.plan.size);
+  if (CODEX_FILTERS.export.size === 1) {
+    bits.push(Array.from(CODEX_FILTERS.export)[0] === 'exported' ? '已导出' : '未导出');
+  }
+  if (CODEX_FILTERS.type.size) bits.push('类型×' + CODEX_FILTERS.type.size);
+  el.innerHTML = bits.length
+    ? `筛选：<strong>${esc(bits.join(' · '))}</strong>（命中 ${CODEX_TOTAL}）`
+    : '筛选：全部';
+  ['codexFilterPlanBtn', 'codexFilterExportBtn', 'codexFilterTypeBtn'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    const key = id.includes('Plan') ? 'plan' : id.includes('Export') ? 'export' : 'type';
+    const active = key === 'export'
+      ? CODEX_FILTERS.export.size === 1
+      : CODEX_FILTERS[key].size > 0;
+    btn.classList.toggle('has-filter', active);
+  });
+}
+function _codexTypeLabel(t) {
+  if (t === 'sub2') return 'sub2 回执';
+  if (t === 'cpa') return 'CPA 回执';
+  if (t === 'codex') return 'Codex 凭证';
+  return t || '-';
+}
+function _codexExportLabel(t) {
+  if (t === 'exported') return '已导出';
+  if (t === 'pending') return '未导出';
+  return t;
+}
+function _codexPlanLabel(t) {
+  return t === '(empty)' ? '(空)' : (t || '-');
+}
+function renderCodexFilterMenus() {
+  const planMenu = document.getElementById('codexFilterPlanMenu');
+  const exportMenu = document.getElementById('codexFilterExportMenu');
+  const typeMenu = document.getElementById('codexFilterTypeMenu');
+  const plans = CODEX_FACETS.plans || [];
+  const types = CODEX_FACETS.types || [];
+  const mkActions = (key) => `
+    <div class="menu-actions">
+      <button type="button" data-codex-filter-all="${key}">全选</button>
+      <button type="button" data-codex-filter-none="${key}">清空</button>
+    </div>`;
+  if (planMenu) {
+    planMenu.innerHTML = mkActions('plan') + (plans.length
+      ? plans.map(p => `
+        <label>
+          <input type="checkbox" data-codex-filter-item="plan" value="${esc(p)}"
+            ${!CODEX_FILTERS.plan.size || CODEX_FILTERS.plan.has(p) ? 'checked' : ''}>
+          ${_codexPlanLabel(p)}
+        </label>`).join('')
+      : '<div style="padding:8px 12px;color:#909399;font-size:12px;">无选项</div>');
+  }
+  if (exportMenu) {
+    const opts = ['exported', 'pending'];
+    exportMenu.innerHTML = mkActions('export') + opts.map(p => `
+      <label>
+        <input type="checkbox" data-codex-filter-item="export" value="${esc(p)}"
+          ${!CODEX_FILTERS.export.size || CODEX_FILTERS.export.has(p) ? 'checked' : ''}>
+        ${_codexExportLabel(p)}
+      </label>`).join('');
+  }
+  if (typeMenu) {
+    typeMenu.innerHTML = mkActions('type') + (types.length
+      ? types.map(p => `
+        <label>
+          <input type="checkbox" data-codex-filter-item="type" value="${esc(p)}"
+            ${!CODEX_FILTERS.type.size || CODEX_FILTERS.type.has(p) ? 'checked' : ''}>
+          ${_codexTypeLabel(p)}
+        </label>`).join('')
+      : '<div style="padding:8px 12px;color:#909399;font-size:12px;">无选项</div>');
+  }
+  _codexUpdateFilterHint();
+}
+function closeCodexFilterMenus(except = null) {
+  document.querySelectorAll('.codex-col-filter.open').forEach(el => {
+    if (except && el === except) return;
+    el.classList.remove('open');
+  });
+}
+function applyCodexFilterFromMenu(key) {
+  const menuId = key === 'plan' ? 'codexFilterPlanMenu'
+    : key === 'export' ? 'codexFilterExportMenu' : 'codexFilterTypeMenu';
+  const menu = document.getElementById(menuId);
+  if (!menu) return;
+  const boxes = Array.from(menu.querySelectorAll(`input[data-codex-filter-item="${key}"]`));
+  const checked = boxes.filter(b => b.checked).map(b => b.value);
+  const allVals = boxes.map(b => b.value);
+  // 全勾 = 不限制；全不勾也当不限制（避免空结果）
+  if (!checked.length || checked.length === allVals.length) {
+    CODEX_FILTERS[key].clear();
+  } else {
+    CODEX_FILTERS[key] = new Set(checked);
+  }
+  PAGERS.codex.page = 1;
+  loadCodex();
+}
+function clearCodexFilters() {
+  CODEX_FILTERS.plan.clear();
+  CODEX_FILTERS.export.clear();
+  CODEX_FILTERS.type.clear();
+  PAGERS.codex.page = 1;
+  loadCodex();
+  showToast('已清空筛选');
+}
+function clearCodexSelection() {
+  if (!CODEX_SELECTED.size) return;
+  CODEX_SELECTED.clear();
+  renderCodex();
+  showToast('已取消当前选择');
 }
 async function loadCodex() {
   try {
     const p = PAGERS.codex;
     const q = getCodexQuery();
-    const r = await api(`/api/codex?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&q=${encodeURIComponent(q)}`);
+    const r = await api(
+      `/api/codex?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}`
+      + `&q=${encodeURIComponent(q)}${_codexFilterQueryString()}`
+    );
     CODEX = r.accounts || [];
     CODEX_TOTAL = Number(r.total || CODEX.length || 0);
+    if (r.facets) CODEX_FACETS = r.facets;
     const totalPages = Math.max(1, Math.ceil(CODEX_TOTAL / p.size));
     if (p.page > totalPages) { p.page = totalPages; return loadCodex(); }
     const st = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
     st('codexStatTotalV2', r.summary?.total ?? 0);
     st('codexStatExportedV2', r.summary?.exported ?? 0);
     st('codexStatPendingV2', r.summary?.pending ?? 0);
+    renderCodexFilterMenus();
     renderCodex();
   } catch(e) { showToast('加载 Codex 列表失败: ' + e.message); }
 }
 const CODEX_SELECTED = new Set();
 function _codexUpdateSelectedHint() {
   const none = CODEX_SELECTED.size === 0;
-  ['btnCodexDownloadBulkV2', 'btnCodexDownloadBulkCpaV2', 'btnCodexDeleteBulkV2'].forEach(id => {
+  const n = CODEX_SELECTED.size;
+  const hint = document.getElementById('codexSelectedHintV2');
+  if (hint) hint.textContent = `已选 ${n}`;
+  const clearBtn = document.getElementById('btnCodexClearSelectionV2');
+  if (clearBtn) clearBtn.disabled = none;
+  ['btnCodexDownloadBulkV2', 'btnCodexDownloadBulkSub2V2', 'btnCodexDownloadBulkCpaV2', 'btnCodexPushPoolV2', 'btnCodexDeleteBulkV2'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = none;
   });
@@ -4788,8 +6470,11 @@ function renderCodex() {
   body.innerHTML = rows.map(r => {
     const checked = CODEX_SELECTED.has(r.filename) ? 'checked' : '';
     const exported = (r.exported_count || 0) > 0;
+    const isSub2 = String(r.type || '').includes('sub2') || String(r.filename || '').includes('sub2-callback');
     const moreItems = [
+      `<button type="button" class="good" data-codex-download-sub2="${esc(r.filename)}" title="从 sub2api 导出可导入 JSON（含完整 token）">从sub2下载</button>`,
       `<button type="button" class="good" data-codex-download-cpa="${esc(r.filename)}" title="按邮箱从 CPA auth-files 下载真实 Codex JSON">从CPA下载</button>`,
+      isSub2 ? `<button type="button" data-codex-download-raw="${esc(r.filename)}" title="下载本地原始 sub2 回执（不含 token）">原始回执</button>` : '',
       exported ? `<button type="button" data-codex-reset="${esc(r.filename)}" title="重新标记为未导出">重置标记</button>` : '',
     ].filter(Boolean).join('');
     return `
@@ -4797,7 +6482,7 @@ function renderCodex() {
       <td class="col-check"><input type="checkbox" class="codex-row-check" data-fname="${esc(r.filename)}" ${checked}></td>
       <td class="col-email" title="${esc(r.email || '')}">
         <div class="acc-v2-email">${esc(r.email || '-')}</div>
-        <div class="acc-v2-sub" title="${esc(r.filename)}">${esc(r.filename)}</div>
+        <div class="acc-v2-sub" title="${esc(r.filename)}">${esc(r.filename)}${isSub2 ? ' · sub2' : ''}</div>
       </td>
       <td class="col-plan">${esc(r.plan || '-')}</td>
       <td class="col-status">${_codexStatusBadge(r)}</td>
@@ -4806,7 +6491,7 @@ function renderCodex() {
       <td class="col-time" title="${esc(r.expired || '-')}">${esc(r.expired || '-')}</td>
       <td class="col-actions">
         <div class="acc-v2-actions">
-          <button type="button" class="primary" data-codex-download="${esc(r.filename)}" title="下载本地 codex_accounts/ 中的 JSON/回执">本地下载</button>
+          <button type="button" class="primary" data-codex-download="${esc(r.filename)}" title="${isSub2 ? '从 sub2api 导出可导入格式（含 token）' : '下载本地 codex_accounts/ 中的 JSON'}">${isSub2 ? '下载sub2' : '本地下载'}</button>
           <button type="button" class="danger" data-codex-delete="${esc(r.filename)}" title="删除本地 Codex JSON 凭证文件">删除</button>
           <div class="acc-v2-more">
             <button type="button" class="acc-v2-more-btn" data-codex-more-toggle aria-haspopup="true">更多</button>
@@ -4851,6 +6536,41 @@ async function onCodexBodyClick(e) {
   }
   if (e.target.closest('.acc-v2-more-menu')) closeCodexV2MoreMenus();
 
+  const dlSub2 = e.target.closest('[data-codex-download-sub2]');
+  if (dlSub2) {
+    const fname = dlSub2.dataset.codexDownloadSub2;
+    dlSub2.disabled = true;
+    try {
+      const resp = await fetch(`/api/codex/download-from-sub2/${encodeURIComponent(fname)}`);
+      if (!resp.ok) {
+        const errBody = await resp.json().catch(() => ({}));
+        throw new Error(errBody.error || ('HTTP ' + resp.status));
+      }
+      const cd = resp.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename="([^"]+)"/);
+      const dlname = m ? m[1] : fname.replace(/-sub2-callback\.json$/i, '-sub2api.json');
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = dlname;
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+      showToast('已从 sub2api 导出');
+      setTimeout(loadCodex, 600);
+    } catch (err) {
+      showToast('从 sub2 下载失败: ' + err.message);
+    } finally {
+      dlSub2.disabled = false;
+    }
+    return;
+  }
+  const dlRaw = e.target.closest('[data-codex-download-raw]');
+  if (dlRaw) {
+    const fname = dlRaw.dataset.codexDownloadRaw;
+    window.location.href = `/api/codex/download/${encodeURIComponent(fname)}?format=raw`;
+    showToast('开始下载原始回执');
+    return;
+  }
   const dlCpa = e.target.closest('[data-codex-download-cpa]');
   if (dlCpa) {
     const fname = dlCpa.dataset.codexDownloadCpa;
@@ -4915,9 +6635,10 @@ async function onCodexBodyClick(e) {
 async function codexDownloadBulkLocal() {
   if (CODEX_SELECTED.size === 0) return;
   const filenames = Array.from(CODEX_SELECTED);
-  const note = `选中 ${filenames.length} 个凭证，打包到一个 JSON 文件下载。\n\n` +
-               `⚠ 这个聚合格式 CPA 不能直接读，主要用于备份/迁移。\n` +
-               `要给 CPA 用请用每行的"下载 JSON"单个下载。\n\n继续？`;
+  const note = `选中 ${filenames.length} 个凭证下载。\n\n` +
+               `• 若主要是 sub2 回执：自动从 sub2api 导出可导入 JSON（含 token）\n` +
+               `• 若是 CPA/本地凭证：打包原始 JSON（备份用）\n\n` +
+               `需要强制 sub2 格式请点「下载sub2」。\n\n继续？`;
   if (!confirm(note)) return;
   const btn = $('#btnCodexDownloadBulkV2');
   if (btn) btn.disabled = true;
@@ -4925,7 +6646,7 @@ async function codexDownloadBulkLocal() {
     const resp = await fetch('/api/codex/download-bulk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filenames }),
+      body: JSON.stringify({ filenames, format: 'auto' }),
     });
     if (!resp.ok) {
       const e = await resp.json().catch(() => ({}));
@@ -4945,6 +6666,47 @@ async function codexDownloadBulkLocal() {
     setTimeout(loadCodex, 600);
   } catch(err) {
     showToast('批量下载失败: ' + err.message);
+  } finally {
+    _codexUpdateSelectedHint();
+  }
+}
+async function codexDownloadBulkSub2() {
+  if (CODEX_SELECTED.size === 0) return;
+  const filenames = Array.from(CODEX_SELECTED);
+  const note = `选中 ${filenames.length} 个本地记录，将离线转换为 sub2api 账号 JSON。\n\n` +
+               `• 不依赖 sub2api 号池里账号是否还在\n` +
+               `• 输出 accounts/data 格式，便于迁移/备份/再导入\n` +
+               `• 若本地回执本身不含 token，导出文件里也可能没有 RT/AT\n\n继续？`;
+  if (!confirm(note)) return;
+  const btn = $('#btnCodexDownloadBulkSub2V2');
+  if (btn) btn.disabled = true;
+  try {
+    const resp = await fetch('/api/codex/download-bulk-from-sub2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filenames, include_proxies: false }),
+    });
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      const detail = Array.isArray(e.errors) && e.errors.length
+        ? ('；' + e.errors.slice(0, 3).map(x => `${x.filename}: ${x.error}`).join('；'))
+        : '';
+      throw new Error((e.error || ('HTTP ' + resp.status)) + detail);
+    }
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const dlname = m ? m[1] : `sub2api-accounts-bulk-${Date.now()}.json`;
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = dlname;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+    showToast(`已从 sub2api 导出 ${filenames.length} 个`);
+    CODEX_SELECTED.clear();
+    setTimeout(loadCodex, 600);
+  } catch (err) {
+    showToast('从 sub2 批量下载失败: ' + err.message);
   } finally {
     _codexUpdateSelectedHint();
   }
@@ -5008,6 +6770,656 @@ async function codexDeleteBulk() {
     _codexUpdateSelectedHint();
   }
 }
+function _codexPoolCfgVal(key, def) {
+  try {
+    const f = (CONFIG || []).find(x => x.key === key);
+    if (f && f.value !== undefined && f.value !== null && String(f.value) !== '') return f.value;
+  } catch (e) {}
+  return def;
+}
+function _codexPoolPushParams() {
+  return {
+    groupId: Number(_codexPoolCfgVal('SUB2API_POOL_GROUP_ID', 8)),
+    concurrency: Number(_codexPoolCfgVal('SUB2API_POOL_CONCURRENCY', 50)),
+    priority: Number(_codexPoolCfgVal('SUB2API_POOL_PRIORITY', 1)),
+    loadFactor: Number(_codexPoolCfgVal('SUB2API_POOL_LOAD_FACTOR', 10)),
+    rateMultiplier: Number(_codexPoolCfgVal('SUB2API_POOL_RATE_MULTIPLIER', 1)),
+  };
+}
+function _formatPoolPushResult(r, prefix) {
+  const ok = Number(r.success || 0);
+  const fail = Number(r.failed || 0);
+  const skip = Number(r.skipped || 0);
+  const cfg = r.config || {};
+  let msg = `${prefix || '号池推送完成'}：成功 ${ok}，失败 ${fail}，跳过 ${skip}`;
+  if (r.account_count != null) msg += `，解析账号 ${r.account_count}`;
+  if (cfg.group_id != null) msg += `（group=${cfg.group_id}, concurrency=${cfg.concurrency}）`;
+  const fails = (r.results || []).filter(x => !x.ok).slice(0, 3);
+  if (fails.length) {
+    msg += '；示例: ' + fails.map(x => `${x.email || x.filename}: ${x.error || 'fail'}`).join('；');
+  }
+  const fmts = r.formats || {};
+  const fmtKeys = Object.keys(fmts);
+  if (fmtKeys.length) {
+    const sample = fmtKeys.slice(0, 3).map(k => `${k}→${fmts[k]}`).join('，');
+    msg += `；格式: ${sample}`;
+  }
+  return msg;
+}
+async function codexPushPoolBulk() {
+  if (CODEX_SELECTED.size === 0) return;
+  const filenames = Array.from(CODEX_SELECTED);
+  const p = _codexPoolPushParams();
+  const note =
+    `确定把选中的 ${filenames.length} 个 Codex 授权推送到 sub2api 号池吗？\n\n` +
+    `• 接口：POST /api/v1/admin/accounts/batch\n` +
+    `• 分组 ID：${p.groupId}\n` +
+    `• 并发 concurrency：${p.concurrency}\n` +
+    `• 平台/类型：openai / oauth\n` +
+    `• 仅推送含 access_token 的 codex-*.json（sub2-callback 回执会跳过）\n` +
+    `• 号池参数用「配置 → Codex」保存值，不读 JSON 里的 concurrency/分组\n\n继续？`;
+  if (!confirm(note)) return;
+  const btn = $('#btnCodexPushPoolV2');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/codex/push-sub2-pool', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filenames,
+        group_id: p.groupId,
+        concurrency: p.concurrency,
+        priority: p.priority,
+        load_factor: p.loadFactor,
+        rate_multiplier: p.rateMultiplier,
+      }),
+    });
+    showToast(_formatPoolPushResult(r));
+    CODEX_SELECTED.clear();
+    loadCodex();
+  } catch (err) {
+    showToast('推送号池失败: ' + err.message);
+    _codexUpdateSelectedHint();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+// ---------- 号池状态监控 ----------
+let POOL_MONITOR_LAST = null;
+const POOL_MONITOR_SELECTED = new Set(); // key = `${pool_id}|${email}`
+
+function _pmKey(it) {
+  return `${it.pool_id ?? ''}|${String(it.email || '').toLowerCase()}`;
+}
+function _pmActionable(it) {
+  // 缺素材的 need_material 不自动勾选（修了也会秒失败）
+  return ['reauth_repush', 'mark_dead'].includes(String(it.action || ''));
+}
+function _pmBadge(action, classification) {
+  const a = String(action || classification || '');
+  if (a === 'reauth_repush') return '<span class="pm-badge pm-badge--rt">可补跑重推</span>';
+  if (a === 'need_material' || classification === 'rt_bad') {
+    if (a === 'need_material') return '<span class="pm-badge pm-badge--review">掉RT·缺素材</span>';
+    return '<span class="pm-badge pm-badge--rt">掉 RT</span>';
+  }
+  if (a === 'mark_dead' || a === 'skip_dead' || classification === 'dead' || classification === 'dead_hint') {
+    return `<span class="pm-badge pm-badge--dead">${a === 'skip_dead' ? '已标废跳过' : '本地标废'}</span>`;
+  }
+  if (a === 'ignore' || classification === 'foreign') return '<span class="pm-badge pm-badge--ignore">外渠道</span>';
+  if (a === 'review' || classification === 'unknown') return '<span class="pm-badge pm-badge--review">待人工</span>';
+  if (a === 'none' || classification === 'ok') return '<span class="pm-badge pm-badge--ok">正常</span>';
+  return `<span class="pm-badge">${esc(a || '-')}</span>`;
+}
+function _pmVisibleItems(scan) {
+  const items = (scan && scan.items) || [];
+  const includeOk = !!($('#pmIncludeOkV2') && $('#pmIncludeOkV2').checked);
+  const hideForeign = !($('#pmHideForeignV2') && !$('#pmHideForeignV2').checked);
+  return items.filter(it => {
+    if (hideForeign && it.action === 'ignore') return false;
+    if (!includeOk && it.action === 'none') return false;
+    return true;
+  });
+}
+function _pmUpdateSelectedHint() {
+  const n = POOL_MONITOR_SELECTED.size;
+  const hint = $('#pmSelectedHintV2');
+  if (hint) hint.textContent = `已选 ${n}`;
+  const repairBtn = $('#btnPmRepairSelectedV2');
+  const deadBtn = $('#btnPmMarkDeadSelectedV2');
+  const busy = !!(repairBtn && repairBtn.dataset.busy === '1');
+  if (repairBtn) repairBtn.disabled = busy || n === 0;
+  if (deadBtn) deadBtn.disabled = busy || n === 0;
+}
+function renderPoolMonitor(scan) {
+  POOL_MONITOR_LAST = scan || null;
+  const panel = $('#poolMonitorPanelV2');
+  if (!panel) return;
+  panel.hidden = false;
+  const meta = $('#poolMonitorMetaV2');
+  const s = (scan && scan.summary) || {};
+  if (meta) {
+    const at = (scan && scan.scanned_at) || '-';
+    const gid = (scan && scan.group_id) != null ? scan.group_id : '-';
+    meta.textContent = `扫描时间 ${at} · group=${gid} · base=${(scan && scan.api_base) || '-'}`;
+  }
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = String(v ?? 0); };
+  set('pmSumTotal', s.total_pool);
+  set('pmSumOurs', s.ours);
+  set('pmSumOk', s.ok);
+  set('pmSumRt', s.rt_bad);
+  set('pmSumRepairable', s.repairable);
+  set('pmSumNeedMat', s.need_material);
+  set('pmSumDead', s.dead);
+  set('pmSumIgnored', s.ignored);
+
+  const body = $('#poolMonitorBodyV2');
+  const empty = $('#poolMonitorEmptyV2');
+  const visible = _pmVisibleItems(scan);
+  // 清理不可见选中
+  const visKeys = new Set(visible.map(_pmKey));
+  Array.from(POOL_MONITOR_SELECTED).forEach(k => { if (!visKeys.has(k)) POOL_MONITOR_SELECTED.delete(k); });
+
+  if (!body) return;
+  if (!visible.length) {
+    body.innerHTML = '';
+    if (empty) {
+      empty.hidden = false;
+      empty.textContent = scan ? '当前过滤条件下无条目（正常账号默认隐藏）' : '点击「扫描号池状态」开始';
+    }
+    _pmUpdateSelectedHint();
+    return;
+  }
+  if (empty) empty.hidden = true;
+  body.innerHTML = visible.map(it => {
+    const key = _pmKey(it);
+    const can = _pmActionable(it) || it.action === 'skip_dead';
+    const checked = POOL_MONITOR_SELECTED.has(key) ? 'checked' : '';
+    const mode = it.login_mode || '';
+    const local = [
+      mode ? `登录:${mode}` : '',
+      it.local_codex_status || '',
+      it.exported ? 'exported' : '',
+      (it.local_filenames && it.local_filenames.length) ? '有凭证' : '',
+    ].filter(Boolean).join(' / ') || '-';
+    const reason = [it.reason, it.material_reason, it.error_message].filter(Boolean).join(' · ');
+    const canCheck = can || it.action === 'need_material'; // 缺素材可勾选做标废，但不进自动「可补跑」
+    return `<tr data-pm-key="${esc(key)}">
+      <td class="col-pm-check"><input type="checkbox" class="pm-row-check" data-key="${esc(key)}" ${canCheck ? '' : 'disabled'} ${checked}></td>
+      <td class="col-pm-id" title="${esc(it.pool_id ?? '')}">${esc(it.pool_id ?? '-')}</td>
+      <td class="col-pm-email" title="${esc(it.email || '')}">${esc(it.email || '-')}</td>
+      <td class="col-pm-status">${esc(it.pool_status || '-')}</td>
+      <td class="col-pm-action">${_pmBadge(it.action, it.classification)}</td>
+      <td class="col-pm-local" title="${esc(local)}">${esc(local)}</td>
+      <td title="${esc(reason)}">${esc(reason || '-')}</td>
+    </tr>`;
+  }).join('');
+  _pmUpdateSelectedHint();
+}
+async function loadPoolMonitorLast() {
+  try {
+    const r = await api('/api/codex/pool-monitor');
+    if (r && r.scanned) renderPoolMonitor(r);
+  } catch (e) { /* 忽略 */ }
+}
+async function scanPoolMonitor(forceIncludeOk) {
+  const btn = $('#btnCodexPoolMonitorScanV2');
+  const btn2 = $('#btnPoolMonitorRescanV2');
+  if (btn) btn.disabled = true;
+  if (btn2) btn2.disabled = true;
+  try {
+    const includeOk = forceIncludeOk != null
+      ? !!forceIncludeOk
+      : !!($('#pmIncludeOkV2') && $('#pmIncludeOkV2').checked);
+    const p = _codexPoolPushParams();
+    showToast('正在扫描号池…');
+    const r = await api('/api/codex/pool-monitor/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id: p.groupId, include_ok: includeOk }),
+    });
+    POOL_MONITOR_SELECTED.clear();
+    renderPoolMonitor(r);
+    // 面板展开时带上自动巡检状态
+    loadPoolMonitorAuto({ logs: true });
+    const s = r.summary || {};
+    showToast(`扫描完成：本站 ${s.ours || 0}，掉RT ${s.rt_bad || 0}，废号 ${s.dead || 0}，忽略外渠道 ${s.ignored || 0}`);
+  } catch (err) {
+    showToast('扫描号池失败: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (btn2) btn2.disabled = false;
+  }
+}
+function _pmSelectedTargets() {
+  const items = (POOL_MONITOR_LAST && POOL_MONITOR_LAST.items) || [];
+  const byKey = new Map(items.map(it => [_pmKey(it), it]));
+  const targets = [];
+  POOL_MONITOR_SELECTED.forEach(k => {
+    const it = byKey.get(k);
+    if (!it || !it.email) return;
+    let action = 'reauth_repush';
+    if (it.action === 'mark_dead' || it.action === 'skip_dead') action = 'mark_dead';
+    else if (it.action === 'need_material') action = 'need_material';
+    targets.push({
+      email: it.email,
+      pool_id: it.pool_id,
+      action,
+      reason: it.reason || '',
+    });
+  });
+  return targets;
+}
+let POOL_MONITOR_REPAIR_TIMER = null;
+let POOL_MONITOR_REPAIR_JOB_ID = null;
+
+function _pmSetRepairBusy(busy) {
+  const btn = $('#btnPmRepairSelectedV2');
+  if (btn) {
+    if (busy) {
+      btn.disabled = true;
+      btn.dataset.busy = '1';
+    } else {
+      delete btn.dataset.busy;
+      _pmUpdateSelectedHint();
+    }
+  }
+  const scanBtn = $('#btnCodexPoolMonitorScanV2');
+  const rescanBtn = $('#btnPoolMonitorRescanV2');
+  if (scanBtn) scanBtn.disabled = !!busy;
+  if (rescanBtn) rescanBtn.disabled = !!busy;
+}
+
+function renderPoolMonitorRepairProgress(job) {
+  const box = $('#poolMonitorProgressV2');
+  if (!box) return;
+  if (!job) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  box.classList.remove('is-done', 'is-error');
+  const status = String(job.status || '');
+  if (status === 'done') box.classList.add('is-done');
+  if (status === 'error') box.classList.add('is-error');
+
+  const total = Number(job.total || 0);
+  const done = Number(job.done || 0);
+  const cur = Number(job.current_index || 0);
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : (status === 'done' ? 100 : 0);
+  const title = $('#pmProgressTitleV2');
+  const count = $('#pmProgressCountV2');
+  const bar = $('#pmProgressBarV2');
+  const msg = $('#pmProgressMsgV2');
+  const log = $('#pmProgressLogV2');
+  if (title) {
+    const w = job.max_workers || 10;
+    title.textContent = status === 'running'
+      ? `修复进行中（${w} 线程并行）`
+      : (status === 'done' ? '修复已完成' : (status === 'error' ? '修复异常结束' : '修复进度'));
+  }
+  if (count) {
+    count.textContent = `${done}/${total}` +
+      (job.success != null ? ` · 成功${job.success || 0}` : '') +
+      (job.failed != null ? ` 失败${job.failed || 0}` : '') +
+      (job.dead != null ? ` 废号${job.dead || 0}` : '');
+  }
+  if (bar) bar.style.width = `${pct}%`;
+  if (msg) {
+    const curEmail = job.current_email || '';
+    msg.textContent = job.message ||
+      (status === 'running' && curEmail ? `[${cur}/${total}] 正在处理 ${curEmail}` : '—');
+  }
+  if (log) {
+    const rows = (job.results || []).slice().reverse().slice(0, 30);
+    if (!rows.length) {
+      log.innerHTML = status === 'running'
+        ? '<div>已启动，等待第一个结果…（Codex 补跑期间这里会暂时空白）</div>'
+        : '';
+    } else {
+      log.innerHTML = rows.map(r => {
+        const email = esc(r.email || '-');
+        if (r.ok) return `<div class="ok">✓ ${email} · ${esc(r.status || 'repaired')} · ${esc(r.message || '成功')}</div>`;
+        if (r.status === 'dead') return `<div class="dead">⊘ ${email} · 废号 · ${esc(r.message || r.reason || '')}</div>`;
+        return `<div class="bad">✗ ${email} · ${esc(r.status || r.error || 'failed')} · ${esc(r.message || r.error || '')}</div>`;
+      }).join('');
+    }
+  }
+}
+
+function stopPoolMonitorRepairPoll() {
+  if (POOL_MONITOR_REPAIR_TIMER) {
+    clearInterval(POOL_MONITOR_REPAIR_TIMER);
+    POOL_MONITOR_REPAIR_TIMER = null;
+  }
+}
+
+async function pollPoolMonitorRepairOnce() {
+  try {
+    const r = await api('/api/codex/pool-monitor/repair');
+    const job = r && r.job;
+    if (!job) return false;
+    renderPoolMonitorRepairProgress(job);
+    const running = !!r.running || String(job.status || '') === 'running';
+    if (!running) {
+      stopPoolMonitorRepairPoll();
+      _pmSetRepairBusy(false);
+      const ok = Number(job.success || 0);
+      const fail = Number(job.failed || 0);
+      const dead = Number(job.dead || 0);
+      showToast(`修复结束：成功 ${ok}，废号 ${dead}，失败 ${fail}`);
+      // 完成后自动重扫，刷新掉 RT 列表
+      try { await scanPoolMonitor(); } catch (e) {}
+      return false;
+    }
+    _pmSetRepairBusy(true);
+    return true;
+  } catch (err) {
+    // 轮询失败不立刻停，避免网络抖动中断显示
+    const msg = $('#pmProgressMsgV2');
+    if (msg) msg.textContent = '进度查询失败: ' + (err.message || err) + '（将继续重试）';
+    return true;
+  }
+}
+
+function startPoolMonitorRepairPoll() {
+  stopPoolMonitorRepairPoll();
+  pollPoolMonitorRepairOnce();
+  POOL_MONITOR_REPAIR_TIMER = setInterval(pollPoolMonitorRepairOnce, 2000);
+}
+
+async function repairPoolMonitorSelected() {
+  const targets = _pmSelectedTargets().filter(t => t.action !== 'mark_dead' || true);
+  if (!targets.length) return;
+  const reauthN = targets.filter(t => t.action === 'reauth_repush').length;
+  const deadN = targets.filter(t => t.action === 'mark_dead').length;
+  const needMatN = targets.filter(t => t.action === 'need_material').length;
+  const workers = 10;
+  const note =
+    `将对选中 ${targets.length} 个本站账号执行：\n` +
+    `• 可补跑并重推：${reauthN}\n` +
+    `• 缺素材（会跳过，请先导入密码+2FA 或接码地址）：${needMatN}\n` +
+    `• 标废并删号池：${deadN}\n\n` +
+    `补跑支持：①邮箱----密码----2FA  ②邮箱----接码地址/Outlook\n` +
+    `${workers} 线程并行；进度见下方蓝色条。继续？`;
+  if (!confirm(note)) return;
+  _pmSetRepairBusy(true);
+  try {
+    const r = await api('/api/codex/pool-monitor/repair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets, do_reauth: true, max_workers: workers }),
+    });
+    POOL_MONITOR_REPAIR_JOB_ID = r.job_id || (r.job && r.job.job_id) || null;
+    renderPoolMonitorRepairProgress(r.job || r);
+    showToast(`已启动后台修复 ${targets.length} 个，请看下方进度`);
+    startPoolMonitorRepairPoll();
+  } catch (err) {
+    _pmSetRepairBusy(false);
+    // 409 已有任务：接上进度
+    if (String(err.message || '').includes('已有修复') || String(err.message || '').includes('409')) {
+      showToast('已有修复任务在跑，接上进度显示');
+      startPoolMonitorRepairPoll();
+      return;
+    }
+    showToast('启动修复失败: ' + err.message);
+    renderPoolMonitorRepairProgress({
+      status: 'error',
+      total: targets.length,
+      done: 0,
+      message: err.message || '启动失败',
+      results: [],
+    });
+  }
+}
+
+async function resumePoolMonitorRepairIfAny() {
+  try {
+    const r = await api('/api/codex/pool-monitor/repair');
+    if (r && r.job) {
+      renderPoolMonitorRepairProgress(r.job);
+      if (r.running) startPoolMonitorRepairPoll();
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// ---------- 号池自动巡检 ----------
+let POOL_MONITOR_AUTO_TIMER = null;
+let POOL_MONITOR_AUTO_BUSY = false;
+
+function _pmFmtTime(ts) {
+  if (!ts) return '-';
+  const s = String(ts);
+  // 2026-08-07T20:15:00 → 08-07 20:15
+  const m = s.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+  if (m) return `${m[2]}-${m[3]} ${m[4]}:${m[5]}`;
+  return s;
+}
+function renderPoolMonitorAuto(status, logs) {
+  const enabled = !!(status && status.enabled);
+  const running = !!(status && status.running);
+  const cb = $('#pmAutoEnabledV2');
+  if (cb && !POOL_MONITOR_AUTO_BUSY) cb.checked = enabled;
+  const st = $('#pmAutoStatusV2');
+  if (st) {
+    st.classList.toggle('is-on', enabled && !running);
+    st.classList.toggle('is-run', running);
+    const last = (status && status.last_run) || {};
+    const sum = last.summary || {};
+    let lastTxt = '尚无记录';
+    if (last.finished_at || last.started_at) {
+      if (last.status === 'skipped') {
+        lastTxt = `跳过 ${_pmFmtTime(last.finished_at || last.started_at)} · ${last.message || last.reason || ''}`;
+      } else if (last.status === 'error') {
+        lastTxt = `失败 ${_pmFmtTime(last.finished_at)} · ${last.error || last.message || ''}`;
+      } else {
+        lastTxt =
+          `${_pmFmtTime(last.finished_at || last.started_at)} · ` +
+          `补跑成功 ${sum.reauth_success ?? 0} / 失败 ${sum.reauth_failed ?? 0} / 标废 ${sum.dead_marked ?? 0}`;
+      }
+    }
+    const nextTxt = enabled
+      ? (running ? '进行中…' : `下次 ${_pmFmtTime(status.next_run_at)}`)
+      : '已关闭';
+    st.innerHTML = `自动巡检：<strong>${enabled ? (running ? '运行中' : '开启') : '关闭'}</strong>` +
+      ` · 上次：${esc(lastTxt)} · ${esc(nextTxt)}` +
+      ` · 每轮补跑≤${status && status.max_reauth_per_cycle != null ? status.max_reauth_per_cycle : 10}`;
+  }
+  const today = (status && status.today) || {};
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = String(v ?? 0); };
+  set('pmAutoDayRuns', today.runs);
+  set('pmAutoDayReauthOk', today.reauth_success);
+  set('pmAutoDayReauthFail', today.reauth_failed);
+  set('pmAutoDayDead', today.dead_marked);
+  set('pmAutoDayDel', today.pool_deleted);
+  set('pmAutoDaySkipErr', (Number(today.skipped || 0) + Number(today.errors || 0)));
+
+  const logEl = $('#poolMonitorAutoLogV2');
+  if (logEl) {
+    const runs = (logs && logs.runs) || [];
+    const lines = (logs && logs.log_lines) || [];
+    const runLines = runs.slice(0, 8).map(r => {
+      const s = r.summary || {};
+      return `${_pmFmtTime(r.finished_at || r.started_at)} [${r.status || '-'}] ` +
+        `补跑${s.reauth_success ?? 0}/${s.reauth_attempted ?? 0} 废${s.dead_marked ?? 0} 删${s.pool_deleted ?? 0}` +
+        (r.message ? ` · ${r.message}` : '');
+    });
+    const text = [
+      runLines.length ? '—— 最近巡检 ——' : '',
+      ...runLines,
+      lines.length ? '—— 文本日志 ——' : '',
+      ...lines.slice(-40),
+    ].filter(Boolean).join('\n');
+    logEl.textContent = text;
+  }
+}
+async function loadPoolMonitorAuto(opts) {
+  const withLogs = !opts || opts.logs !== false;
+  try {
+    const status = await api('/api/codex/pool-monitor/auto');
+    let logs = null;
+    if (withLogs) {
+      try {
+        logs = await api('/api/codex/pool-monitor/auto/logs?limit=12&lines=40');
+      } catch (e) { logs = null; }
+    }
+    renderPoolMonitorAuto(status, logs);
+    // 已开启/有记录时展开号池面板，方便看开关与日统计
+    if (status && (status.enabled || status.running || status.last_run)) {
+      const panel = $('#poolMonitorPanelV2');
+      if (panel) panel.hidden = false;
+    }
+    // 开启或运行中时轻量轮询状态
+    if (status && (status.enabled || status.running)) startPoolMonitorAutoPoll();
+    else stopPoolMonitorAutoPoll();
+    return status;
+  } catch (err) {
+    const st = $('#pmAutoStatusV2');
+    if (st) st.textContent = '自动巡检状态读取失败: ' + (err.message || err);
+    return null;
+  }
+}
+function startPoolMonitorAutoPoll() {
+  if (POOL_MONITOR_AUTO_TIMER) return;
+  POOL_MONITOR_AUTO_TIMER = setInterval(() => {
+    const panel = $('#poolMonitorPanelV2');
+    if (panel && panel.hidden) return;
+    loadPoolMonitorAuto({ logs: true });
+  }, 30000);
+}
+function stopPoolMonitorAutoPoll() {
+  if (POOL_MONITOR_AUTO_TIMER) {
+    clearInterval(POOL_MONITOR_AUTO_TIMER);
+    POOL_MONITOR_AUTO_TIMER = null;
+  }
+}
+async function setPoolMonitorAutoEnabled(enabled) {
+  POOL_MONITOR_AUTO_BUSY = true;
+  try {
+    const r = await api('/api/codex/pool-monitor/auto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!enabled, fire_immediately: true }),
+    });
+    showToast(enabled ? '已开启自动巡检（先跑一轮，之后每15分钟）' : '已关闭自动巡检');
+    // 稍等 kick 线程
+    setTimeout(() => loadPoolMonitorAuto({ logs: true }), 800);
+    renderPoolMonitorAuto(r, null);
+  } catch (err) {
+    showToast('切换自动巡检失败: ' + err.message);
+    await loadPoolMonitorAuto({ logs: false });
+  } finally {
+    POOL_MONITOR_AUTO_BUSY = false;
+  }
+}
+async function runPoolMonitorAutoNow() {
+  try {
+    await api('/api/codex/pool-monitor/auto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run_now: true }),
+    });
+    showToast('已触发立即巡检');
+    startPoolMonitorAutoPoll();
+    setTimeout(() => loadPoolMonitorAuto({ logs: true }), 1000);
+  } catch (err) {
+    showToast('立即巡检失败: ' + err.message);
+  }
+}
+async function markDeadPoolMonitorSelected() {
+  const targets = _pmSelectedTargets().map(t => ({
+    email: t.email,
+    pool_id: t.pool_id,
+    action: 'mark_dead',
+    reason: t.reason || '号池监控手动标废',
+  }));
+  if (!targets.length) return;
+  if (!confirm(
+    `把选中的 ${targets.length} 个账号：\n` +
+    `1) 本地标记为废号（deactivated）\n` +
+    `2) 从 sub2api 号池删除对应账号\n\n继续？`
+  )) return;
+  try {
+    const r = await api('/api/codex/pool-monitor/mark-dead', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        targets,
+        reason: '号池监控手动标废',
+        delete_pool: true,
+      }),
+    });
+    const delN = Number(r.pool_deleted_count || 0);
+    showToast(`已标废 ${r.count || targets.length} 个，号池删除 ${delN} 条`);
+    await scanPoolMonitor();
+  } catch (err) {
+    showToast('标废失败: ' + err.message);
+  }
+}
+function selectActionablePoolMonitor() {
+  const visible = _pmVisibleItems(POOL_MONITOR_LAST);
+  POOL_MONITOR_SELECTED.clear();
+  visible.forEach(it => {
+    if (_pmActionable(it)) POOL_MONITOR_SELECTED.add(_pmKey(it));
+  });
+  renderPoolMonitor(POOL_MONITOR_LAST);
+}
+function onPoolMonitorBodyChange(e) {
+  const t = e.target;
+  if (!t || !t.classList || !t.classList.contains('pm-row-check')) return;
+  const key = t.getAttribute('data-key');
+  if (!key) return;
+  if (t.checked) POOL_MONITOR_SELECTED.add(key);
+  else POOL_MONITOR_SELECTED.delete(key);
+  _pmUpdateSelectedHint();
+}
+
+function codexUploadPushPoolPick() {
+  const input = $('#codexUploadPoolFilesV2');
+  if (!input) return;
+  input.value = '';
+  input.click();
+}
+async function codexUploadPushPoolOnFiles(ev) {
+  const input = ev && ev.target ? ev.target : $('#codexUploadPoolFilesV2');
+  const fileList = input && input.files ? Array.from(input.files) : [];
+  if (!fileList.length) return;
+  const p = _codexPoolPushParams();
+  const names = fileList.map(f => f.name).slice(0, 8).join('\n  ');
+  const more = fileList.length > 8 ? `\n  …共 ${fileList.length} 个` : '';
+  const note =
+    `确定上传并推送以下 ${fileList.length} 个 JSON 到 sub2api 号池吗？\n\n` +
+    `  ${names}${more}\n\n` +
+    `• 自动识别 CPA codex / sub2api 单账号 / sub2api export(accounts)\n` +
+    `• 核心凭据（token 等）原样使用，不改写\n` +
+    `• 号池参数覆盖为：group=${p.groupId}, concurrency=${p.concurrency}, priority=${p.priority}\n` +
+    `• JSON 内自带的 concurrency/group_ids 等一律忽略\n\n继续？`;
+  if (!confirm(note)) {
+    if (input) input.value = '';
+    return;
+  }
+  const btn = $('#btnCodexUploadPushPoolV2');
+  if (btn) btn.disabled = true;
+  try {
+    const fd = new FormData();
+    fileList.forEach(f => fd.append('files', f, f.name));
+    fd.append('group_id', String(p.groupId));
+    fd.append('concurrency', String(p.concurrency));
+    fd.append('priority', String(p.priority));
+    fd.append('load_factor', String(p.loadFactor));
+    fd.append('rate_multiplier', String(p.rateMultiplier));
+    // 不要设 Content-Type，让浏览器带 multipart boundary
+    const r = await api('/api/codex/push-sub2-pool-upload', {
+      method: 'POST',
+      body: fd,
+    });
+    showToast(_formatPoolPushResult(r, '上传推送完成'));
+  } catch (err) {
+    showToast('上传推送号池失败: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (input) input.value = '';
+  }
+}
 (function bindCodexV2() {
   const qV2 = $('#qCodexV2');
   if (qV2) qV2.addEventListener('input', debounce(() => {
@@ -5024,8 +7436,438 @@ async function codexDeleteBulk() {
   if (refreshV2) refreshV2.addEventListener('click', loadCodex);
   const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
   bind('btnCodexDownloadBulkV2', codexDownloadBulkLocal);
+  bind('btnCodexDownloadBulkSub2V2', codexDownloadBulkSub2);
   bind('btnCodexDownloadBulkCpaV2', codexDownloadBulkCpa);
+  bind('btnCodexPushPoolV2', codexPushPoolBulk);
+  bind('btnCodexUploadPushPoolV2', codexUploadPushPoolPick);
+  bind('btnCodexClearSelectionV2', clearCodexSelection);
+  bind('btnCodexClearFiltersV2', clearCodexFilters);
+  const uploadInput = $('#codexUploadPoolFilesV2');
+  if (uploadInput) uploadInput.addEventListener('change', codexUploadPushPoolOnFiles);
   bind('btnCodexDeleteBulkV2', codexDeleteBulk);
+  bind('btnCodexPoolMonitorScanV2', () => scanPoolMonitor());
+  bind('btnPoolMonitorRescanV2', () => scanPoolMonitor());
+  // 号池巡视已迁到「号池管理」，面板常显
+  bind('btnPmSelectActionableV2', selectActionablePoolMonitor);
+  bind('btnPmRepairSelectedV2', repairPoolMonitorSelected);
+  bind('btnPmMarkDeadSelectedV2', markDeadPoolMonitorSelected);
+  bind('btnPmAutoRunNowV2', runPoolMonitorAutoNow);
+  bind('btnPmAutoRefreshV2', () => loadPoolMonitorAuto({ logs: true }));
+  const pmAutoCb = $('#pmAutoEnabledV2');
+  if (pmAutoCb) {
+    pmAutoCb.addEventListener('change', () => setPoolMonitorAutoEnabled(!!pmAutoCb.checked));
+  }
+
+  // ---- 号池管理子页 + 成品号入池 ----
+  let FAB_SELECTED_ID = '';
+  let FAB_POLL_TIMER = null;
+  function showPoolAdminSub(sub) {
+    const s = (sub === 'finished' || sub === 'restock') ? sub : 'monitor';
+    localStorage.setItem('gpt_pool_admin_sub', s);
+    const mon = $('#poolAdminMonitorSection');
+    const fin = $('#poolAdminFinishedSection');
+    const rst = $('#poolAdminRestockSection');
+    if (mon) mon.classList.toggle('hidden', s !== 'monitor');
+    if (fin) fin.classList.toggle('hidden', s !== 'finished');
+    if (rst) rst.classList.toggle('hidden', s !== 'restock');
+    const b1 = $('#btnPoolAdminSubMonitor');
+    const b2 = $('#btnPoolAdminSubFinished');
+    const b3 = $('#btnPoolAdminSubRestock');
+    if (b1) b1.classList.toggle('is-active', s === 'monitor');
+    if (b2) b2.classList.toggle('is-active', s === 'finished');
+    if (b3) b3.classList.toggle('is-active', s === 'restock');
+    if (s === 'finished') loadFinishedBatches();
+    if (s === 'restock') loadSogouRestock();
+    syncSogouRestockLogPolling();
+  }
+  bind('btnPoolAdminSubMonitor', () => showPoolAdminSub('monitor'));
+  bind('btnPoolAdminSubFinished', () => showPoolAdminSub('finished'));
+  bind('btnPoolAdminSubRestock', () => showPoolAdminSub('restock'));
+
+  function _sogouInput(id, value) {
+    const el = $(id);
+    if (el) el.value = value == null ? '' : String(value);
+  }
+  function renderSogouRestockStatus(status) {
+    const cfg = status && status.config || {};
+    const set = (id, value) => { const el = $(id); if (el) el.textContent = value == null ? '-' : String(value); };
+    const toggle = (id, value) => { const el = $(id); if (el) el.checked = !!value; };
+    toggle('#sogouRestockEnabledV2', cfg.enabled);
+    _sogouInput('#sogouRestockMonitorGroupV2', cfg.monitor_group_id);
+    _sogouInput('#sogouRestockPushGroupV2', cfg.push_group_id);
+    _sogouInput('#sogouRestockProductV2', cfg.product || 'oauth_7d');
+    _sogouInput('#sogouRestockMinV2', cfg.min_healthy);
+    _sogouInput('#sogouRestockTargetV2', cfg.target_healthy);
+    _sogouInput('#sogouRestockMaxOrderV2', cfg.max_purchase_per_order);
+    _sogouInput('#sogouRestockMonitorIntervalV2', cfg.monitor_interval_sec);
+    _sogouInput('#sogouRestockOrderIntervalV2', cfg.order_poll_interval_sec);
+    _sogouInput('#sogouRestockRecoveryIntervalV2', cfg.recovery_poll_interval_sec);
+    _sogouInput('#sogouRestockConcurrencyV2', cfg.concurrency);
+    _sogouInput('#sogouRestockPriorityV2', cfg.priority);
+    _sogouInput('#sogouRestockLoadV2', cfg.load_factor);
+    _sogouInput('#sogouRestockRateV2', cfg.rate_multiplier);
+    toggle('#sogouRestockPauseExpiredV2', cfg.auto_pause_on_expired);
+    _sogouInput('#sogouRestockModelsV2', (cfg.model_whitelist || []).join('\n'));
+    set('#sogouRestockStatusV2', cfg.enabled ? (status.running ? '自动补池运行中' : '自动补池已开启') : '自动补池关闭');
+    set('#sogouRestockCredentialV2', status.credentials_configured ? '已配置' : '未配置');
+    const order = status.current_order;
+    set('#sogouRestockOrderV2', order ? `${order.order_id || '创建中'} · ${order.status || 'pending'}` : '无未完成订单');
+    const last = status.last_run || {};
+    const inventory = status.inventory || {};
+    set('#sogouRestockHealthyV2', inventory.healthy ?? last.healthy);
+    set('#sogouRestockTotalV2', inventory.total ?? last.total);
+  }
+  function renderSogouRestockOrders(items) {
+    const body = $('#sogouRestockOrdersBodyV2');
+    if (!body) return;
+    body.innerHTML = (items || []).slice().reverse().map(row => `<tr>
+      <td>${esc(row.order_id || row.idempotency_key || '-')}</td><td>${esc(row.product || '-')}</td>
+      <td>${esc(row.quantity == null ? '-' : row.quantity)}</td><td>${esc(row.status || '-')}</td>
+      <td>${esc(row.updated_at || row.created_at || '-')}</td><td>${esc(row.last_error || '')}</td>
+    </tr>`).join('') || '<tr><td colspan="6" style="color:#c0c4cc">暂无订单记录</td></tr>';
+  }
+  const SOGOU_RESTOCK_LOG_INTERVAL_MS = 2000;
+  let SOGOU_RESTOCK_LOG_TIMER = null;
+  let SOGOU_RESTOCK_LOG_LOADING = false;
+  let SOGOU_RESTOCK_LOG_SIGNATURE = '';
+
+  function isSogouRestockLogVisible() {
+    const tab = $('#tab-pool-admin');
+    const section = $('#poolAdminRestockSection');
+    return document.visibilityState === 'visible' && !!tab && !tab.classList.contains('hidden') &&
+      !!section && !section.classList.contains('hidden');
+  }
+  function setSogouRestockLogState(text, state = '') {
+    const el = $('#sogouRestockLogStateV2');
+    if (!el) return;
+    el.classList.toggle('is-paused', state === 'paused');
+    el.classList.toggle('is-error', state === 'error');
+    const label = el.querySelector('span');
+    if (label) label.textContent = text;
+  }
+  function formatSogouRestockLogTime(value) {
+    if (!value) return '-';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return String(value);
+    return parsed.toLocaleString('zh-CN', { hour12: false });
+  }
+  function formatSogouRestockLog(row) {
+    const actionLabels = {
+      inventory_ok: '库存充足', ordered: '订单已创建', waiting: '等待订单', taken: '取货完成',
+      pushed: '推池完成', push_retry: '推池待重试', push_waiting: '等待有效账号', order_failed: '订单失败',
+    };
+    const parts = [`[${formatSogouRestockLogTime(row.finished_at || row.started_at)}]`];
+    parts.push(row.ok === false ? '失败' : (row.skipped ? '跳过' : '成功'));
+    const action = actionLabels[row.action] || row.action;
+    if (action) parts.push(action);
+    if (row.reason) parts.push(`原因 ${row.reason}`);
+    if (row.healthy != null || row.total != null) parts.push(`健康 ${row.healthy ?? '-'} / 总数 ${row.total ?? '-'}`);
+    if (row.quantity != null) parts.push(`计划补入 ${row.quantity}`);
+    if (row.order_id) parts.push(`订单 ${row.order_id}`);
+    if (row.status) parts.push(`状态 ${row.status}`);
+    const recovery = row.recovery || {};
+    if (recovery.repaired || recovery.recreated) parts.push(`修复 ${recovery.repaired || 0} / 重建 ${recovery.recreated || 0}`);
+    if (row.error) parts.push(`错误 ${row.error}`);
+    return parts.join(' · ');
+  }
+  function renderSogouRestockLogs(items) {
+    const logEl = $('#sogouRestockLogsV2');
+    if (!logEl) return;
+    const rows = Array.isArray(items) ? items : [];
+    const signature = JSON.stringify(rows);
+    if (signature === SOGOU_RESTOCK_LOG_SIGNATURE) return;
+    const nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 28;
+    SOGOU_RESTOCK_LOG_SIGNATURE = signature;
+    logEl.textContent = rows.length ? rows.map(formatSogouRestockLog).join('\n') : '暂无自动补池日志';
+    if (nearBottom || rows.length <= 1) requestAnimationFrame(() => { logEl.scrollTop = logEl.scrollHeight; });
+  }
+  async function loadSogouRestockLogs({ notify = false } = {}) {
+    if (SOGOU_RESTOCK_LOG_LOADING) return;
+    SOGOU_RESTOCK_LOG_LOADING = true;
+    try {
+      const logs = await api('/api/pool-admin/sogou-restock/logs?lines=100');
+      renderSogouRestockLogs(logs.items || []);
+      setSogouRestockLogState(`实时更新 · ${new Date().toLocaleTimeString('zh-CN', {hour12:false})}`);
+    } catch (err) {
+      setSogouRestockLogState(`刷新失败 · ${err.message}`, 'error');
+      if (notify) showToast('加载自动补池日志失败: ' + err.message);
+    } finally {
+      SOGOU_RESTOCK_LOG_LOADING = false;
+    }
+  }
+  function stopSogouRestockLogPolling() {
+    if (SOGOU_RESTOCK_LOG_TIMER) clearInterval(SOGOU_RESTOCK_LOG_TIMER);
+    SOGOU_RESTOCK_LOG_TIMER = null;
+    setSogouRestockLogState('自动刷新已暂停', 'paused');
+  }
+  function syncSogouRestockLogPolling() {
+    if (!isSogouRestockLogVisible()) {
+      stopSogouRestockLogPolling();
+      return;
+    }
+    if (!SOGOU_RESTOCK_LOG_TIMER) {
+      loadSogouRestockLogs();
+      SOGOU_RESTOCK_LOG_TIMER = setInterval(loadSogouRestockLogs, SOGOU_RESTOCK_LOG_INTERVAL_MS);
+    }
+  }
+  async function loadSogouRestock() {
+    try {
+      const [status, orders] = await Promise.all([
+        api('/api/pool-admin/sogou-restock'),
+        api('/api/pool-admin/sogou-restock/orders?limit=30'),
+      ]);
+      renderSogouRestockStatus(status);
+      renderSogouRestockOrders(orders.items || []);
+    } catch (err) {
+      showToast('加载自动补池失败: ' + err.message);
+    }
+  }
+  function sogouRestockConfigPayload() {
+    const value = id => ($(id) && $(id).value) || '';
+    const num = id => Number(value(id));
+    return {
+      enabled: !!($('#sogouRestockEnabledV2') && $('#sogouRestockEnabledV2').checked),
+      monitor_group_id: num('#sogouRestockMonitorGroupV2'), push_group_id: num('#sogouRestockPushGroupV2'),
+      product: value('#sogouRestockProductV2'), min_healthy: num('#sogouRestockMinV2'), target_healthy: num('#sogouRestockTargetV2'),
+      max_purchase_per_order: num('#sogouRestockMaxOrderV2'), monitor_interval_sec: num('#sogouRestockMonitorIntervalV2'),
+      order_poll_interval_sec: num('#sogouRestockOrderIntervalV2'), recovery_poll_interval_sec: num('#sogouRestockRecoveryIntervalV2'),
+      concurrency: num('#sogouRestockConcurrencyV2'), priority: num('#sogouRestockPriorityV2'), load_factor: num('#sogouRestockLoadV2'),
+      rate_multiplier: num('#sogouRestockRateV2'), auto_pause_on_expired: !!($('#sogouRestockPauseExpiredV2') && $('#sogouRestockPauseExpiredV2').checked),
+      model_whitelist: value('#sogouRestockModelsV2').split(/\r?\n|,/).map(x => x.trim()).filter(Boolean),
+    };
+  }
+  async function saveSogouRestock() {
+    const btn = $('#btnSogouRestockSaveV2');
+    if (btn) btn.disabled = true;
+    try {
+      await api('/api/pool-admin/sogou-restock/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(sogouRestockConfigPayload()) });
+      showToast('自动补池配置已保存');
+      await loadSogouRestock();
+    } catch (err) { showToast('保存自动补池配置失败: ' + err.message); }
+    finally { if (btn) btn.disabled = false; }
+  }
+  async function runSogouRestock() {
+    const btn = $('#btnSogouRestockRunV2');
+    if (btn) btn.disabled = true;
+    try { const r = await api('/api/pool-admin/sogou-restock/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); showToast(r.error || '自动补池执行完成'); await loadSogouRestock(); await loadSogouRestockLogs(); }
+    catch (err) { showToast('自动补池执行失败: ' + err.message); }
+    finally { if (btn) btn.disabled = false; }
+  }
+  async function testSogouRestockConnection() {
+    try { const r = await api('/api/pool-admin/sogou-restock/test-connection', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); showToast(r.message || '连接成功'); }
+    catch (err) { showToast('SogouEdu 连接失败: ' + err.message); }
+  }
+  bind('btnSogouRestockSaveV2', saveSogouRestock);
+  bind('btnSogouRestockRunV2', runSogouRestock);
+  bind('btnSogouRestockConnectionV2', testSogouRestockConnection);
+  document.addEventListener('visibilitychange', syncSogouRestockLogPolling);
+  window.addEventListener('pagehide', stopSogouRestockLogPolling);
+
+  function _fabStatusLabel(st) {
+    const m = { pending:'待运行', running:'运行中', done:'完成', partial:'部分成功', failed:'失败' };
+    return m[st] || st || '-';
+  }
+  function renderFabBatchList(items) {
+    const box = $('#fabBatchList');
+    if (!box) return;
+    if (!items || !items.length) {
+      box.innerHTML = '<div style="color:#c0c4cc">暂无批次</div>';
+      return;
+    }
+    box.innerHTML = items.map(b => {
+      const active = b.id === FAB_SELECTED_ID ? 'background:#eef2ff;' : '';
+      const sum = b.summary || {};
+      return `<div data-fab-id="${esc(b.id)}" style="cursor:pointer;padding:8px;border-bottom:1px solid #ebeef5;${active}">
+        <div style="font-weight:600;color:#303133">${esc(b.name || b.id)}</div>
+        <div style="font-size:12px;color:#909399">${esc(_fabStatusLabel(b.status))} · ${esc(b.created_at || '')}</div>
+        <div style="font-size:12px;color:#606266">导入${sum.imported||0} Codex${sum.codex_success||0} 入池${sum.pool_pushed||0}</div>
+      </div>`;
+    }).join('');
+    box.querySelectorAll('[data-fab-id]').forEach(el => {
+      el.addEventListener('click', () => {
+        FAB_SELECTED_ID = el.getAttribute('data-fab-id') || '';
+        loadFinishedBatchDetail(FAB_SELECTED_ID);
+        renderFabBatchList(items);
+      });
+    });
+  }
+  function renderFabDetail(batch) {
+    const detail = $('#fabBatchDetail');
+    const logBox = $('#fabBatchLog');
+    const body = $('#fabItemsBody');
+    const bar = $('#fabSummaryBar');
+    const sumText = $('#fabSummaryText');
+    if (!batch) {
+      if (detail) detail.textContent = '选择左侧批次查看详情';
+      if (logBox) logBox.textContent = '';
+      if (body) body.innerHTML = '';
+      if (bar) bar.hidden = true;
+      if (sumText) sumText.textContent = '';
+      return;
+    }
+    const s = batch.summary || {};
+    if (bar) {
+      bar.hidden = false;
+      const set = (id, v) => { const el = $(id); if (el) el.textContent = String(v ?? 0); };
+      set('#fabSumImported', s.imported);
+      set('#fabSumPlus', s.plus);
+      set('#fabSumCodexOk', s.codex_success);
+      set('#fabSumCodexFail', s.codex_failed);
+      set('#fabSumPoolOk', s.pool_pushed);
+      set('#fabSumPoolFail', s.pool_failed);
+    }
+    if (sumText) sumText.textContent = batch.summary_text || '';
+    if (detail) {
+      const pushLabel = (batch.auto_push === false) ? '否（仅 Codex）' : '是';
+      detail.innerHTML = [
+        `<div><b>${esc(batch.name || '')}</b> <span class="mono">${esc(batch.id || '')}</span></div>`,
+        `<div>状态：${esc(_fabStatusLabel(batch.status))} / 阶段：${esc(batch.phase || '-')}</div>`,
+        `<div>自动入池：${esc(pushLabel)}</div>`,
+        `<div>备注：${esc(batch.note || '-')}</div>`,
+        batch.error ? `<div style="color:#f56c6c">错误：${esc(batch.error)}</div>` : '',
+      ].join('');
+    }
+    if (logBox) {
+      const logs = batch.logs || batch.log_tail || [];
+      logBox.innerHTML = logs.length
+        ? logs.map(l => `<div>${esc(l)}</div>`).join('')
+        : '<div style="color:#c0c4cc">暂无日志</div>';
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+    if (body) {
+      const items = batch.items || [];
+      body.innerHTML = items.map(it => `<tr>
+        <td>${esc(it.email || '')}</td>
+        <td>${esc(it.import_status || '')}</td>
+        <td>${esc(it.codex_status || '')}</td>
+        <td>${esc(it.pool_status || '')}</td>
+        <td>${esc(it.plan || (it.is_plus ? 'plus?' : ''))}</td>
+        <td>${esc([it.codex_message, it.pool_message, it.import_reason].filter(Boolean).join(' | ').slice(0,120))}</td>
+      </tr>`).join('') || '<tr><td colspan="6" style="color:#c0c4cc">暂无明细</td></tr>';
+    }
+    // 运行中自动刷新
+    if (batch.status === 'running' || batch.status === 'pending') {
+      if (FAB_POLL_TIMER) clearTimeout(FAB_POLL_TIMER);
+      FAB_POLL_TIMER = setTimeout(() => loadFinishedBatchDetail(batch.id), 3000);
+    }
+  }
+  async function loadFinishedBatches() {
+    try {
+      const r = await api('/api/pool-admin/batches?limit=50');
+      const items = r.items || [];
+      if (!FAB_SELECTED_ID && items[0]) FAB_SELECTED_ID = items[0].id;
+      renderFabBatchList(items);
+      if (FAB_SELECTED_ID) await loadFinishedBatchDetail(FAB_SELECTED_ID);
+    } catch (err) {
+      showToast('加载批次失败: ' + err.message);
+    }
+  }
+  async function loadFinishedBatchDetail(id) {
+    if (!id) return;
+    try {
+      const r = await api('/api/pool-admin/batches/' + encodeURIComponent(id));
+      renderFabDetail(r.batch || null);
+    } catch (err) {
+      showToast('加载批次详情失败: ' + err.message);
+    }
+  }
+  async function createFinishedBatchAndRun() {
+    const name = ($('#fabBatchName') && $('#fabBatchName').value || '').trim();
+    const note = ($('#fabBatchNote') && $('#fabBatchNote').value || '').trim();
+    const text = ($('#fabBatchText') && $('#fabBatchText').value || '');
+    const workers = Number(($('#fabCodexWorkers') && $('#fabCodexWorkers').value) || 3);
+    const autoPush = !($('#fabAutoPush') && !$('#fabAutoPush').checked);
+    if (!text.trim()) { showToast('请粘贴账号清单'); return; }
+    const btn = $('#btnFabCreateRun');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api('/api/pool-admin/batches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, note, text, auto_run: true, auto_push: autoPush, codex_workers: workers }),
+      });
+      FAB_SELECTED_ID = (r.batch && r.batch.id) || '';
+      if ($('#fabBatchText')) $('#fabBatchText').value = '';
+      showToast(autoPush ? '批次已创建并开始（含自动入池）' : '批次已创建并开始（仅 Codex，不入池）');
+      await loadFinishedBatches();
+    } catch (err) {
+      showToast('创建失败: ' + err.message);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+  bind('btnFabCreateRun', createFinishedBatchAndRun);
+  bind('btnFabRefresh', loadFinishedBatches);
+
+  // Excel 式列筛选：展开/勾选
+  const excelFilters = document.getElementById('codexExcelFiltersV2');
+  if (excelFilters) {
+    excelFilters.addEventListener('click', (e) => {
+      const toggle = e.target.closest('[data-codex-filter-toggle]');
+      if (toggle) {
+        e.stopPropagation();
+        const key = toggle.getAttribute('data-codex-filter-toggle');
+        const wrap = toggle.closest('.codex-col-filter');
+        if (!wrap) return;
+        const willOpen = !wrap.classList.contains('open');
+        closeCodexFilterMenus();
+        if (willOpen) wrap.classList.add('open');
+        return;
+      }
+      const allBtn = e.target.closest('[data-codex-filter-all]');
+      if (allBtn) {
+        e.stopPropagation();
+        const key = allBtn.getAttribute('data-codex-filter-all');
+        const menu = allBtn.closest('.codex-col-filter-menu');
+        if (menu) menu.querySelectorAll(`input[data-codex-filter-item="${key}"]`).forEach(b => { b.checked = true; });
+        applyCodexFilterFromMenu(key);
+        return;
+      }
+      const noneBtn = e.target.closest('[data-codex-filter-none]');
+      if (noneBtn) {
+        e.stopPropagation();
+        const key = noneBtn.getAttribute('data-codex-filter-none');
+        const menu = noneBtn.closest('.codex-col-filter-menu');
+        if (menu) menu.querySelectorAll(`input[data-codex-filter-item="${key}"]`).forEach(b => { b.checked = false; });
+        // 清空 = 不限制
+        CODEX_FILTERS[key].clear();
+        PAGERS.codex.page = 1;
+        loadCodex();
+        return;
+      }
+    });
+    excelFilters.addEventListener('change', (e) => {
+      const item = e.target.closest('[data-codex-filter-item]');
+      if (!item) return;
+      const key = item.getAttribute('data-codex-filter-item');
+      applyCodexFilterFromMenu(key);
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('.codex-col-filter')) return;
+    closeCodexFilterMenus();
+  });
+  const pmInclude = $('#pmIncludeOkV2');
+  if (pmInclude) pmInclude.addEventListener('change', () => {
+    if (POOL_MONITOR_LAST) renderPoolMonitor(POOL_MONITOR_LAST);
+  });
+  const pmHideForeign = $('#pmHideForeignV2');
+  if (pmHideForeign) pmHideForeign.addEventListener('change', () => {
+    if (POOL_MONITOR_LAST) renderPoolMonitor(POOL_MONITOR_LAST);
+  });
+  const pmBody = $('#poolMonitorBodyV2');
+  if (pmBody) pmBody.addEventListener('change', onPoolMonitorBodyChange);
+  const pmSelectAll = $('#pmSelectAllV2');
+  if (pmSelectAll) pmSelectAll.addEventListener('change', (e) => {
+    const on = !!e.target.checked;
+    const visible = _pmVisibleItems(POOL_MONITOR_LAST);
+    if (on) {
+      visible.forEach(it => { if (_pmActionable(it)) POOL_MONITOR_SELECTED.add(_pmKey(it)); });
+    } else {
+      POOL_MONITOR_SELECTED.clear();
+    }
+    renderPoolMonitor(POOL_MONITOR_LAST);
+  });
   document.addEventListener('click', (e) => {
     if (e.target.closest('.codex-table-v2 .acc-v2-more')) return;
     closeCodexV2MoreMenus();
@@ -5060,16 +7902,21 @@ function emailConfigSectionForKey(key) {
 }
 
 function smsConfigSectionForKey(key) {
-  if (['SMS_PROVIDER','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_RETRIES','SMS_CODE_WAIT'].includes(key)) {
-    return ['通用接码', '接码通道选择、国家/服务代码、等待和重试参数；H 通道可复用 SMS_SERVICE/SMS_COUNTRY 作为 projectId/country'];
+  if (['SMS_PROVIDER','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_PRICE','SMS_MIN_PRICE','SMS_PREFERRED_COUNTRIES','SMS_AUTO_COUNTRY','SMS_PROVIDER_MIN_STOCK','SMS_PRICE_FLOOR_RATIO','SMS_ACQUIRE_MAX_SLOTS','SMS_AUTO_COUNTRY_MIN_STOCK','SMS_AUTO_COUNTRY_MAX_PRICE','SMS_MAX_RETRIES','SMS_CODE_WAIT'].includes(key)) {
+    return ['通用接码', '通道/服务码、价格上下限、优先国家、供应商库存与价位策略、跨国家轮换与重试；HeroSMS/SMSBower 按国家×供应商×价位在上限内省钱选号'];
   }
   if (key === 'SMS_API_KEY') return ['GrizzlySMS', 'GrizzlySMS 平台 API Key 配置'];
+  if (key.startsWith('HEROSMS_')) return ['HeroSMS', 'HeroSMS 独立 API Key；OpenAI 服务码 dr；可查询余额/价格/最优国家'];
+  if (key.startsWith('SMSBOWER_')) return ['SMSBower', 'SMSBower 独立 API Key；OpenAI 服务码 dr；可查询余额/价格/最优国家'];
   if (key.startsWith('H_')) return ['H 接码', 'H_API.md 本地 H 取号服务配置；项目ID/国家留空时复用通用字段'];
   if (key.startsWith('L_')) return ['L 接码', 'L_API.md 本地 L 取号服务配置'];
   return ['其他接码配置', ''];
 }
 
 function codexConfigSectionForKey(key) {
+  if (key.startsWith('SOGOUEDU_') || key === 'SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED') {
+    return ['SogouEdu 补池', 'SogouEdu 购号 API 连接参数；自动补池业务参数在「号池管理 → 自动补池」单独配置'];
+  }
   if (['CODEX_OAUTH_DRIVER','CODEX_AUTH_URL_SOURCE'].includes(key)) {
     return ['基础配置', 'Codex 授权驱动和授权地址来源配置'];
   }
@@ -5253,6 +8100,7 @@ function setRegistrationDriverValue(value) {
   if (sectionMount) renderRegistrationEpSelect(sectionMount, 'configRegistrationSelectV2');
   bindRoxyWorkspaceToolsV2();
   bindCloudMailToolsV2();
+  bindSmsQueryToolsV2();
 }
 function renderRegistrationEpSelect(mount, wrapId) {
   if (!mount) return;
@@ -5422,6 +8270,9 @@ function renderSectionedConfigSectionV2(name, fields, sectionForKey, preferred, 
   if (name === '邮箱 / OTP' && active === 'CloudMail') {
     extra = renderCloudMailTokenToolsV2();
   }
+  if (name === '接码平台' && (active === 'HeroSMS' || active === 'SMSBower' || active === 'GrizzlySMS')) {
+    extra = renderSmsQueryToolsV2(active);
+  }
   return `
     <section class="config-section-v2" id="${esc(slug)}" data-config-section="${esc(name)}">
       ${renderConfigSectionHead(name, '')}
@@ -5469,6 +8320,160 @@ function bindCloudMailToolsV2() {
   if (domainBtn && !domainBtn.dataset.bound) {
     domainBtn.dataset.bound = '1';
     domainBtn.addEventListener('click', () => loadCloudMailDomainsV2());
+  }
+}
+
+function _smsProviderIdForSection(section) {
+  if (section === 'HeroSMS') return 'herosms';
+  if (section === 'SMSBower') return 'smsbower';
+  if (section === 'GrizzlySMS') return 'grizzly';
+  return String(_configValueV2('SMS_PROVIDER') || 'grizzly').trim().toLowerCase();
+}
+function _smsApiKeyKeyForProvider(provider) {
+  if (provider === 'herosms') return 'HEROSMS_API_KEY';
+  if (provider === 'smsbower') return 'SMSBOWER_API_KEY';
+  return 'SMS_API_KEY';
+}
+function renderSmsQueryToolsV2(section) {
+  const provider = _smsProviderIdForSection(section);
+  return `
+    <div class="roxy-workspace-box" style="margin-top:18px;">
+      <div>
+        <b>${esc(section)} 查询</b>
+        <div class="hint">用当前表单中的 API Key / 服务码 / 国家查询余额、价格和国家排名。OpenAI 服务码一般为 <span class="mono">dr</span>。查询不会扣费。</div>
+      </div>
+      <div class="action-cell">
+        <button class="btn primary" type="button" id="btnSmsBalanceV2" data-sms-provider="${esc(provider)}">查余额</button>
+        <button class="btn" type="button" id="btnSmsPricesV2" data-sms-provider="${esc(provider)}">查价格</button>
+        <button class="btn" type="button" id="btnSmsTopCountriesV2" data-sms-provider="${esc(provider)}">国家排名</button>
+        <button class="btn" type="button" id="btnSmsBestCountryV2" data-sms-provider="${esc(provider)}">最优国家</button>
+      </div>
+      <div id="smsQueryStatusV2" class="muted" style="font-size:12px;white-space:pre-wrap;">未查询</div>
+    </div>
+  `;
+}
+function bindSmsQueryToolsV2() {
+  const balanceBtn = $('#btnSmsBalanceV2');
+  const pricesBtn = $('#btnSmsPricesV2');
+  const topBtn = $('#btnSmsTopCountriesV2');
+  const bestBtn = $('#btnSmsBestCountryV2');
+  if (balanceBtn && !balanceBtn.dataset.bound) {
+    balanceBtn.dataset.bound = '1';
+    balanceBtn.addEventListener('click', () => querySmsBalanceV2(balanceBtn.dataset.smsProvider));
+  }
+  if (pricesBtn && !pricesBtn.dataset.bound) {
+    pricesBtn.dataset.bound = '1';
+    pricesBtn.addEventListener('click', () => querySmsPricesV2(pricesBtn.dataset.smsProvider));
+  }
+  if (topBtn && !topBtn.dataset.bound) {
+    topBtn.dataset.bound = '1';
+    topBtn.addEventListener('click', () => querySmsTopCountriesV2(topBtn.dataset.smsProvider));
+  }
+  if (bestBtn && !bestBtn.dataset.bound) {
+    bestBtn.dataset.bound = '1';
+    bestBtn.addEventListener('click', () => querySmsBestCountryV2(bestBtn.dataset.smsProvider));
+  }
+}
+function _smsQueryPayload(provider) {
+  const keyName = _smsApiKeyKeyForProvider(provider);
+  return {
+    provider,
+    api_key: _configValueV2(keyName).trim(),
+    service: _configValueV2('SMS_SERVICE').trim() || 'dr',
+    country: _configValueV2('SMS_COUNTRY').trim(),
+  };
+}
+async function querySmsBalanceV2(provider) {
+  const status = $('#smsQueryStatusV2');
+  if (status) status.textContent = `正在查询 ${provider} 余额...`;
+  try {
+    const r = await api('/api/sms/balance', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(_smsQueryPayload(provider)),
+    });
+    if (status) status.innerHTML = `✅ ${esc(provider)} 余额：<b class="mono">${esc(String(r.balance))}</b>`;
+    showToast(`${provider} 余额 ${r.balance}`);
+  } catch (e) {
+    if (status) status.innerHTML = `<span style="color:var(--red);">查余额失败：${esc(e.message)}</span>`;
+  }
+}
+async function querySmsPricesV2(provider) {
+  const status = $('#smsQueryStatusV2');
+  if (status) status.textContent = `正在查询 ${provider} 价格...`;
+  try {
+    const payload = _smsQueryPayload(provider);
+    const r = await api('/api/sms/prices', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const prices = r.prices || {};
+    let line = '';
+    // 常见格式: {country: {service: {cost, count}}}
+    const cty = payload.country || Object.keys(prices)[0] || '';
+    const byCountry = prices[cty] || prices;
+    const svc = payload.service || 'dr';
+    const item = (byCountry && byCountry[svc]) || byCountry || {};
+    if (item && (item.cost != null || item.price != null || item.count != null)) {
+      line = `国家 ${cty || '-'} / 服务 ${svc}：价格 ${item.cost ?? item.price ?? '-'}，库存 ${item.count ?? '-'}`;
+    } else {
+      const text = JSON.stringify(prices);
+      line = text.length > 500 ? text.slice(0, 500) + '…' : text;
+    }
+    if (status) status.innerHTML = `✅ ${esc(provider)} 价格：${esc(line)}`;
+    showToast(`${provider} 价格已查询`);
+  } catch (e) {
+    if (status) status.innerHTML = `<span style="color:var(--red);">查价格失败：${esc(e.message)}</span>`;
+  }
+}
+async function querySmsTopCountriesV2(provider) {
+  const status = $('#smsQueryStatusV2');
+  if (status) status.textContent = `正在查询 ${provider} 国家排名...`;
+  try {
+    const r = await api('/api/sms/top-countries', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({..._smsQueryPayload(provider), top_n: 12}),
+    });
+    const rows = Array.isArray(r.countries) ? r.countries : [];
+    if (!rows.length) {
+      if (status) status.textContent = `⚠️ ${provider} 暂无可用国家/库存`;
+      return;
+    }
+    const lines = rows.map((row, i) =>
+      `${i + 1}. 国家 ${row.country}${row.name ? '(' + row.name + ')' : ''}  价 ${row.price}  库存 ${row.count}`
+    );
+    if (status) status.textContent = `✅ ${provider} 服务 ${r.service || 'dr'} 国家排名：\n` + lines.join('\n');
+    showToast(`${provider} 已返回 ${rows.length} 个国家`);
+  } catch (e) {
+    if (status) status.innerHTML = `<span style="color:var(--red);">国家排名失败：${esc(e.message)}</span>`;
+  }
+}
+async function querySmsBestCountryV2(provider) {
+  const status = $('#smsQueryStatusV2');
+  if (status) status.textContent = `正在计算 ${provider} 最优国家...`;
+  try {
+    const r = await api('/api/sms/best-country', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(_smsQueryPayload(provider)),
+    });
+    if (!r.country) {
+      if (status) status.textContent = `⚠️ ${provider} 未找到满足条件的国家（检查库存/白名单/最高价）`;
+      return;
+    }
+    const d = r.detail || {};
+    if (status) {
+      status.innerHTML =
+        `✅ ${esc(provider)} 最优国家：<b class="mono">${esc(String(r.country))}</b>` +
+        (d.price != null ? `，价格 ${esc(String(d.price))}` : '') +
+        (d.count != null ? `，库存 ${esc(String(d.count))}` : '') +
+        `（可填到 SMS_COUNTRY）`;
+    }
+    showToast(`${provider} 最优国家 ${r.country}`);
+  } catch (e) {
+    if (status) status.innerHTML = `<span style="color:var(--red);">最优国家失败：${esc(e.message)}</span>`;
   }
 }
 function _configValueV2(key) {
@@ -5642,7 +8647,7 @@ function renderConfigSectionV2(name, fields) {
       name,
       fields,
       smsConfigSectionForKey,
-      ['通用接码', 'GrizzlySMS', 'H 接码', 'L 接码', '其他接码配置'],
+      ['通用接码', 'GrizzlySMS', 'HeroSMS', 'SMSBower', 'H 接码', 'L 接码', '其他接码配置'],
       { get: () => CONFIG_SMS_ACTIVE_SECTION_V2, set: v => { CONFIG_SMS_ACTIVE_SECTION_V2 = v; } },
       'sms-section-v2'
     );
@@ -5672,6 +8677,7 @@ function renderConfigLayoutV2() {
   if (sectionMount) renderRegistrationEpSelect(sectionMount, 'configRegistrationSelectV2');
   bindRoxyWorkspaceToolsV2();
   bindCloudMailToolsV2();
+  bindSmsQueryToolsV2();
 }
 function scrollToConfigSection(slug) {
   const el = document.getElementById(slug);

@@ -57,6 +57,8 @@ _FLOW_PAGE_URL = {
     "username_password_create": "https://auth.openai.com/create-account/password",
     "authorize_continue": "https://auth.openai.com/email-verification",
     "oauth_create_account": "https://auth.openai.com/about-you",
+    # 已注册账号密码登录（查活 password_totp / 密码+2FA）
+    "password_verify": "https://auth.openai.com/log-in/password",
 }
 
 # Node 子进程超时（秒）。sdk.js 内部可能要做 PoW，留充裕一点

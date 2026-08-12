@@ -6,6 +6,7 @@ OpenAI Auth 模块
 """
 import json
 import logging
+import re
 import time
 
 from core.session import BrowserSession
@@ -37,6 +38,18 @@ class AccountUnusableError(Exception):
         self.error_code = error_code
 
 
+class RateLimitError(RuntimeError):
+    """
+    OpenAI Auth 限流（rate_limit_exceeded）。
+
+    邮箱素材本身未必坏；应换出口/退避后重试，不要降并发配置。
+    """
+
+    def __init__(self, message: str, error_code: str = "rate_limit_exceeded"):
+        super().__init__(message)
+        self.error_code = error_code or "rate_limit_exceeded"
+
+
 # 远端返回这些 error code 时，判定邮箱素材已废，不再重试。
 _ACCOUNT_DEAD_CODES = frozenset({
     "account_deactivated",   # 账号已删除/停用
@@ -59,28 +72,181 @@ _ACCOUNT_DEAD_TEXT_MARKERS = (
     "your account has been deleted",
     "your account was deactivated",
     "your account was deleted",
+    "you do not have an account because it has been deleted or deactivated",
+    "authentication error",
     "账号已停用",
     "账号已禁用",
     "账号已删除",
     "账户已停用",
     "账户已禁用",
     "账户已删除",
+    # 日文废号页
+    "削除または無効化",
+    "無効化されている",
+    "ご利用いただけません",
+    "アカウントは削除",
+    "アカウントは無効",
 )
+
+# 仅 “Authentication Error” 标题不足以判废（可能是其它 auth 错误），需配合死号文案。
+_ACCOUNT_DEAD_STRONG_MARKERS = (
+    "account_deactivated",
+    "account_deleted",
+    "account_banned",
+    "account deactivated",
+    "account deleted",
+    "account banned",
+    "has been deleted or deactivated",
+    "has been deactivated",
+    "has been deleted",
+    "was deactivated",
+    "was deleted",
+    "you do not have an account because it has been deleted or deactivated",
+    "账号已停用",
+    "账号已禁用",
+    "账号已删除",
+    "账户已停用",
+    "账户已禁用",
+    "账户已删除",
+    "削除または無効化",
+    "無効化されている",
+    "アカウントは削除",
+    "アカウントは無効",
+)
+
+_RATE_LIMIT_CODES = frozenset({
+    "rate_limit_exceeded",
+    "too_many_requests",
+})
 
 
 def detect_account_unusable_text(text: str) -> str:
     """从浏览器页面/异常文本里识别账号已废，返回规范 error_code；未命中返回空串。"""
-    low = str(text or "").lower()
+    raw = str(text or "")
+    low = raw.lower()
     for code in _ACCOUNT_DEAD_CODES:
         if code in low:
             return code
-    if any(marker in low for marker in _ACCOUNT_DEAD_TEXT_MARKERS):
-        if "delete" in low or "删除" in low:
+    # error_code: account_deactivated 常见于页面 body
+    m = re.search(r"error_code\s*[:=]\s*([a-z0-9_]+)", low)
+    if m and m.group(1) in _ACCOUNT_DEAD_CODES:
+        return m.group(1)
+    if any(marker in low for marker in _ACCOUNT_DEAD_STRONG_MARKERS):
+        if "delete" in low or "删除" in low or "削除" in low:
             return "account_deleted"
         if "ban" in low or "封" in low:
             return "account_banned"
         return "account_deactivated"
+    # 弱信号：Authentication Error 标题 + 删除/停用相关词
+    if "authentication error" in low and any(
+        k in low for k in ("deactivat", "deleted", "停用", "删除", "無効", "削除")
+    ):
+        return "account_deactivated"
     return ""
+
+
+def _detect_rate_limit_plain(text: str) -> str:
+    """仅明文匹配限流（不解码 payload，避免递归）。"""
+    raw = str(text or "")
+    if not raw:
+        return ""
+    low = raw.lower()
+    for code in _RATE_LIMIT_CODES:
+        if code in low:
+            return code if code != "too_many_requests" else "rate_limit_exceeded"
+    if "rate limit exceeded" in low or "rate-limit-exceeded" in low:
+        return "rate_limit_exceeded"
+    compact = low.replace(" ", "")
+    if "errorcode" in compact and "rate_limit" in low:
+        return "rate_limit_exceeded"
+    if '"errorcode":"rate_limit' in compact or "'errorcode':'rate_limit" in compact:
+        return "rate_limit_exceeded"
+    return ""
+
+
+def detect_rate_limit_text(text: str) -> str:
+    """从 URL/页面/异常文本识别 Auth 限流，返回规范 error_code；未命中返回空串。"""
+    raw = str(text or "")
+    hit = _detect_rate_limit_plain(raw)
+    if hit:
+        return hit
+    # URL 里 error?payload= 常为 base64，明文搜不到 rate_limit，需要解码
+    if "payload=" in raw.lower() or "auth.openai.com/error" in raw.lower():
+        payload = decode_auth_error_payload(raw)
+        if payload:
+            err_code = str(
+                payload.get("errorCode")
+                or payload.get("error_code")
+                or payload.get("code")
+                or ""
+            ).strip()
+            if err_code in _RATE_LIMIT_CODES or _detect_rate_limit_plain(json.dumps(payload, ensure_ascii=False)):
+                return err_code if err_code in _RATE_LIMIT_CODES else "rate_limit_exceeded"
+            if err_code == "rate_limit_exceeded" or "rate_limit" in err_code.lower():
+                return "rate_limit_exceeded"
+    return ""
+
+
+def decode_auth_error_payload(url_or_text: str) -> dict:
+    """从 auth.openai.com/error?payload=... 解出 JSON（失败返回空 dict）。"""
+    raw = str(url_or_text or "")
+    if not raw:
+        return {}
+    m = re.search(r"(?:[?&]payload=|/error\?payload=)([A-Za-z0-9_\-%=]+)", raw)
+    if not m:
+        # 允许直接传入 base64 payload
+        if re.fullmatch(r"[A-Za-z0-9_\-%]+={0,2}", raw.strip()):
+            token = raw.strip()
+        else:
+            return {}
+    else:
+        token = m.group(1)
+    try:
+        from urllib.parse import unquote
+
+        token = unquote(token)
+    except Exception:
+        pass
+    pad = "=" * (-len(token) % 4)
+    try:
+        decoded = __import__("base64").urlsafe_b64decode(token + pad)
+        payload = json.loads(decoded.decode("utf-8", errors="ignore"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def detect_auth_failure_from_url(url: str) -> tuple[str, str]:
+    """
+    从 auth 错误 URL 识别失败类型。
+
+    返回 (kind, error_code)：
+      kind: rate_limit / account_unusable / ""
+    """
+    payload = decode_auth_error_payload(url)
+    if not payload:
+        # 有时 error_code 直接出现在 query（明文）
+        code = _detect_rate_limit_plain(url) or detect_account_unusable_text(url)
+        if code in _RATE_LIMIT_CODES or code == "rate_limit_exceeded":
+            return "rate_limit", "rate_limit_exceeded"
+        if code:
+            return "account_unusable", code
+        return "", ""
+    err_code = str(
+        payload.get("errorCode")
+        or payload.get("error_code")
+        or payload.get("code")
+        or ""
+    ).strip()
+    kind = str(payload.get("kind") or "")
+    blob = json.dumps(payload, ensure_ascii=False)
+    if err_code in _RATE_LIMIT_CODES or _detect_rate_limit_plain(blob):
+        return "rate_limit", (err_code if err_code in _RATE_LIMIT_CODES else "rate_limit_exceeded")
+    if err_code in _ACCOUNT_DEAD_CODES or detect_account_unusable_text(blob):
+        return "account_unusable", err_code or detect_account_unusable_text(blob) or "account_deactivated"
+    if kind == "AuthApiFailure" and "rate" in err_code.lower():
+        return "rate_limit", err_code or "rate_limit_exceeded"
+    return "", err_code
 
 
 def detect_account_unusable_response_body(body: str) -> str:
@@ -101,6 +267,34 @@ def detect_account_unusable_response_body(body: str) -> str:
     elif isinstance(payload, dict):
         code = str(payload.get("code") or payload.get("error_code") or "")
     return code if code in _ACCOUNT_DEAD_CODES else ""
+
+
+def should_disable_registration_email_for_error(error: object) -> bool:
+    """注册失败后是否应永久停用该邮箱（废号/已注册等）。"""
+    text = str(error or "")
+    if not text:
+        return False
+    if isinstance(error, AccountUnusableError):
+        return True
+    if detect_account_unusable_text(text):
+        return True
+    low = text.lower()
+    markers = (
+        "accountunusableerror",
+        "邮箱提交后进入登录密码页",
+        "auth.openai.com/log-in/password",
+        "/log-in/password",
+        "按已注册/不可用邮箱处理",
+        "账号已废",
+        "authentication error",
+    )
+    if any(m in text or m in low for m in markers):
+        # authentication error 单独出现时仍要求强标记，避免误伤
+        if "authentication error" in low and not detect_account_unusable_text(text):
+            if "deactivat" not in low and "deleted" not in low and "停用" not in text and "删除" not in text:
+                return False
+        return True
+    return False
 
 
 def _extract_error_code(resp) -> str:
@@ -437,6 +631,279 @@ def send_email_otp(session: BrowserSession, referer: str = "https://auth.openai.
         logger.warning("[OTP] 重新发送验证码失败 status=%s: %s", resp.status_code, (resp.text or '')[:300])
         resp.raise_for_status()
     logger.info("[OTP] 重新发送验证码请求完成，status=%s", resp.status_code)
+
+
+def submit_login_email(session: BrowserSession, email: str, *, referer: str = "https://auth.openai.com/log-in") -> dict:
+    """登录流提交邮箱：POST /api/accounts/authorize/continue。
+
+    已注册账号常见落点：log-in/password / email-verification / factor-totp。
+    """
+    email = str(email or "").strip()
+    if not email:
+        raise ValueError("email 不能为空")
+    sentinel_resp = request_sentinel_token(session, "authorize_continue")
+    sentinel_header, so_header = build_sentinel_header(session, sentinel_resp, "authorize_continue")
+    headers = session.get_auth_headers(referer=referer)
+    if sentinel_header:
+        headers["openai-sentinel-token"] = sentinel_header
+    if so_header:
+        headers["openai-sentinel-so-token"] = so_header
+    payload = {"username": {"kind": "email", "value": email}}
+    url = "https://auth.openai.com/api/accounts/authorize/continue"
+    logger.info("[登录] 提交邮箱: %s", email)
+    resp = session.post(url, headers=headers, data=json.dumps(payload), allow_redirects=False)
+    if resp.status_code not in (200, 204):
+        err_code = _extract_error_code(resp)
+        if err_code in _ACCOUNT_DEAD_CODES:
+            raise AccountUnusableError(
+                f"账号已废弃（{err_code}），邮箱不可再用",
+                error_code=err_code,
+            )
+        raise RuntimeError(f"提交登录邮箱失败 status={resp.status_code}: {(resp.text or '')[:300]}")
+    try:
+        data = resp.json() if resp.content else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    page_type = (data.get("page") or {}).get("type") if isinstance(data.get("page"), dict) else None
+    logger.info(
+        "[登录] 提交邮箱完成 page=%s continue=%s",
+        page_type or "-",
+        str(data.get("continue_url") or data.get("url") or "")[:160],
+    )
+    return data
+
+
+def verify_login_password(session: BrowserSession, password: str, *, referer: str = "https://auth.openai.com/log-in/password") -> dict:
+    """登录流提交密码：POST /api/accounts/password/verify。
+
+    成功响应常见字段：continue_url / page.type
+    （email_otp_verification / mfa / totp / authorize 等）。
+    """
+    password = str(password or "")
+    if not password:
+        raise ValueError("password 不能为空")
+    # 与公开逆向脚本一致：password_verify flow
+    try:
+        sentinel_resp = request_sentinel_token(session, "password_verify")
+        sentinel_header, so_header = build_sentinel_header(session, sentinel_resp, "password_verify")
+    except Exception as exc:
+        logger.warning("[登录] password_verify sentinel 失败，回退 authorize_continue: %s", str(exc)[:160])
+        sentinel_resp = request_sentinel_token(session, "authorize_continue")
+        sentinel_header, so_header = build_sentinel_header(session, sentinel_resp, "authorize_continue")
+
+    headers = session.get_auth_headers(referer=referer)
+    if sentinel_header:
+        headers["openai-sentinel-token"] = sentinel_header
+    if so_header:
+        headers["openai-sentinel-so-token"] = so_header
+
+    url = "https://auth.openai.com/api/accounts/password/verify"
+    logger.info("[登录] 提交密码校验…")
+    resp = session.post(url, headers=headers, data=json.dumps({"password": password}), allow_redirects=False)
+    if resp.status_code != 200:
+        err_code = _extract_error_code(resp)
+        if err_code in _ACCOUNT_DEAD_CODES:
+            raise AccountUnusableError(
+                f"账号已废弃（{err_code}）",
+                error_code=err_code,
+            )
+        low = (resp.text or "").lower()
+        if resp.status_code in (400, 401, 403, 422) and any(
+            k in low for k in ("password", "credential", "invalid", "incorrect", "wrong")
+        ):
+            raise RuntimeError(f"密码校验失败 status={resp.status_code}: {(resp.text or '')[:240]}")
+        raise RuntimeError(f"password/verify 失败 status={resp.status_code}: {(resp.text or '')[:300]}")
+
+    data = resp.json() if resp.content else {}
+    if not isinstance(data, dict):
+        data = {}
+    page_type = (data.get("page") or {}).get("type") if isinstance(data.get("page"), dict) else None
+    logger.info(
+        "[登录] 密码校验通过 page=%s continue=%s",
+        page_type or "-",
+        str(data.get("continue_url") or data.get("url") or "")[:160],
+    )
+    return data
+
+
+def verify_login_totp(
+    session: BrowserSession,
+    code: str,
+    *,
+    referer: str = "https://auth.openai.com/multi-factor/totp",
+    challenge_url: str | None = None,
+) -> dict:
+    """登录流提交 TOTP/2FA 动态码。
+
+    密码校验后常见 page=mfa_challenge，continue_url 形如：
+      https://auth.openai.com/mfa-challenge/<id>
+    官方 mfa/verify 要求字段 type（不是 factor_type）。
+
+    依次尝试多种 payload/端点，避免参数名变更导致整批查活失败。
+    """
+    code = str(code or "").strip()
+    if not code:
+        raise ValueError("totp code 不能为空")
+
+    # referer 优先用 challenge 页
+    ref = str(challenge_url or referer or "").strip() or "https://auth.openai.com/mfa-challenge"
+    # 先导航到 challenge 页，建立前端同款 cookie/上下文
+    try:
+        nav_headers = session.get_auth_navigate_headers(referer="https://auth.openai.com/log-in/password")
+        session.get(ref, headers=nav_headers, allow_redirects=True)
+    except Exception as exc:
+        logger.debug("[登录] mfa-challenge 导航失败（继续提交）：%s", str(exc)[:120])
+
+    try:
+        sentinel_resp = request_sentinel_token(session, "authorize_continue")
+        sentinel_header, so_header = build_sentinel_header(session, sentinel_resp, "authorize_continue")
+    except Exception as exc:
+        logger.warning("[登录] totp sentinel 失败，继续无 sentinel 尝试: %s", str(exc)[:160])
+        sentinel_header, so_header = None, None
+
+    headers = session.get_auth_headers(referer=ref)
+    if sentinel_header:
+        headers["openai-sentinel-token"] = sentinel_header
+    if so_header:
+        headers["openai-sentinel-so-token"] = so_header
+
+    # 从 challenge URL 抽 id（若有）
+    challenge_id = ""
+    try:
+        m = re.search(r"/mfa-challenge/([A-Za-z0-9_-]+)", ref)
+        if m:
+            challenge_id = m.group(1)
+    except Exception:
+        challenge_id = ""
+
+    # 实测成功体：{"code","type":"totp","id":"<mfa-challenge-id>"}
+    # 必须把带 id 的放最前，避免先打缺 id 的包造成「看起来重试了一次」的延迟。
+    attempts: list[tuple[str, dict]] = []
+    if challenge_id:
+        attempts.append((
+            "https://auth.openai.com/api/accounts/mfa/verify",
+            {"code": code, "type": "totp", "id": challenge_id},
+        ))
+        attempts.append((
+            "https://auth.openai.com/api/accounts/mfa/verify",
+            {"code": code, "type": "totp", "challenge_id": challenge_id},
+        ))
+    attempts.extend([
+        ("https://auth.openai.com/api/accounts/mfa/verify", {"code": code, "type": "totp"}),
+        ("https://auth.openai.com/api/accounts/mfa/verify", {"code": code, "type": "totp", "factor_type": "totp"}),
+        ("https://auth.openai.com/api/accounts/mfa/verify", {"code": code, "factor_type": "totp"}),
+        ("https://auth.openai.com/api/accounts/totp/validate", {"code": code, "type": "totp"}),
+        ("https://auth.openai.com/api/accounts/totp/validate", {"code": code}),
+    ])
+
+    last_status = 0
+    last_body = ""
+    schema_errors = 0
+    for url, payload in attempts:
+        path = url.split("/api/accounts/", 1)[-1]
+        logger.info("[登录] 提交 TOTP → %s payload_keys=%s", path, ",".join(payload.keys()))
+        resp = session.post(url, headers=headers, data=json.dumps(payload), allow_redirects=False)
+        last_status = resp.status_code
+        last_body = (resp.text or "")[:400]
+        if resp.status_code == 404:
+            logger.info("[登录] 端点 404，尝试下一个 TOTP 接口")
+            continue
+        if resp.status_code != 200:
+            err_code = _extract_error_code(resp)
+            if err_code in _ACCOUNT_DEAD_CODES:
+                raise AccountUnusableError(
+                    f"账号已废弃（{err_code}）",
+                    error_code=err_code,
+                )
+            low = last_body.lower()
+            # 缺参/schema 错误：换 payload 继续，不要当成验证码错
+            if resp.status_code in (400, 422) and any(
+                k in low for k in (
+                    "missing required parameter",
+                    "missing_required_parameter",
+                    "invalid_request_error",
+                    "unknown parameter",
+                    "unexpected",
+                )
+            ):
+                schema_errors += 1
+                logger.warning("[登录] TOTP 参数不匹配，换 payload 重试：%s", last_body[:180])
+                continue
+            # 真·码错才抛可重试
+            if resp.status_code in (400, 401, 422) and any(
+                k in low for k in ("invalid", "incorrect", "expired", "wrong", "bad code", "totp", "mfa", "otp")
+            ):
+                raise EmailOtpInvalidError(
+                    f"TOTP 无效或已过期: status={resp.status_code}, body={last_body[:240]}"
+                )
+            raise RuntimeError(f"TOTP 校验失败 status={resp.status_code}: {last_body}")
+        data = resp.json() if resp.content else {}
+        if not isinstance(data, dict):
+            data = {}
+        page_type = (data.get("page") or {}).get("type") if isinstance(data.get("page"), dict) else None
+        logger.info(
+            "[登录] TOTP 通过 page=%s continue=%s",
+            page_type or "-",
+            str(data.get("continue_url") or data.get("url") or "")[:160],
+        )
+        return data
+    if schema_errors:
+        raise RuntimeError(
+            f"TOTP 接口参数均不匹配（缺 type 等）last_status={last_status}: {last_body}"
+        )
+    raise RuntimeError(f"TOTP 接口均不可用 last_status={last_status}: {last_body}")
+
+
+def extract_auth_continue(payload: dict | None) -> tuple[str, str]:
+    """从 auth JSON 响应提取 (continue_url, page_type)。"""
+    data = payload if isinstance(payload, dict) else {}
+    page = data.get("page") if isinstance(data.get("page"), dict) else {}
+    page_type = str(page.get("type") or data.get("type") or "").strip()
+    continue_url = str(
+        data.get("continue_url")
+        or data.get("external_url")
+        or data.get("url")
+        or page.get("continue_url")
+        or page.get("external_url")
+        or page.get("url")
+        or ""
+    ).strip()
+    return continue_url, page_type
+
+
+def needs_email_otp_step(page_type: str = "", continue_url: str = "") -> bool:
+    text = f"{page_type} {continue_url}".lower()
+    return any(
+        k in text
+        for k in (
+            "email_otp",
+            "email-otp",
+            "email-verification",
+            "email_verification",
+            "email verification",
+        )
+    )
+
+
+def needs_totp_step(page_type: str = "", continue_url: str = "") -> bool:
+    text = f"{page_type} {continue_url}".lower()
+    # 避免把 %2Fauth 一类误伤；这里只看明确 mfa/totp 标记
+    markers = (
+        "factor-totp",
+        "factor/totp",
+        "multi-factor",
+        "mfa_challenge",
+        "mfa-challenge",
+        "mfa/verify",
+        "totp",
+        "authenticator",
+        "two_factor",
+        "two-factor",
+        "2fa",
+    )
+    return any(k in text for k in markers)
 
 
 def validate_email_otp(session: BrowserSession, code: str, sentinel_header: str | None = None, so_header: str | None = None) -> dict:

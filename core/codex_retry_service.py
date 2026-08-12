@@ -162,14 +162,76 @@ def request_stop(email: str) -> dict:
     return {"ok": True, "message": "已发送停止信号", "state": "stopped", "running": True, "injected": injected}
 
 
+def _codex_retry_settings() -> tuple[int, float]:
+    """返回 (失败后再试次数, 重试间隔秒)。总尝试 = 1 + 再试次数。"""
+    retries = 3
+    delay = 2.0
+    try:
+        from config import codex as codex_cfg
+        raw_r = getattr(codex_cfg, "CODEX_RETRY_MAX_RETRIES", None)
+        if raw_r is not None and str(raw_r).strip() != "":
+            retries = int(raw_r)
+        raw_d = getattr(codex_cfg, "CODEX_RETRY_DELAY", None)
+        if raw_d is not None and str(raw_d).strip() != "":
+            delay = float(raw_d)
+    except Exception:
+        pass
+    retries = max(0, min(10, int(retries)))
+    delay = max(0.0, min(60.0, float(delay)))
+    return retries, delay
+
+
+def _is_terminal_codex_failure(result: dict | None) -> bool:
+    """不可自动重试的终态：成功 / 停用 / 用户停止 / 废号。"""
+    if not isinstance(result, dict):
+        return False
+    if result.get("ok"):
+        return True
+    status = str(result.get("status") or "").strip().lower()
+    if status in ("success", "stopped", "deactivated", "skipped", "cancelled"):
+        return True
+    msg = str(result.get("message") or "").lower()
+    if any(x in msg for x in (
+        "account_deactivated",
+        "account_deleted",
+        "account_banned",
+        "accountunusable",
+        "账号已废",
+        "用户手动停止",
+    )):
+        return True
+    return False
+
+
+def _retry_delay_for_codex_error(base_delay: float, result_or_error: object) -> float:
+    """限流类错误加长退避；其它用基础间隔。"""
+    delay = max(0.0, float(base_delay or 0.0))
+    text = ""
+    if isinstance(result_or_error, dict):
+        text = f"{result_or_error.get('status') or ''} {result_or_error.get('message') or ''}"
+    else:
+        text = str(result_or_error or "")
+    low = text.lower()
+    if "rate_limit" in low or "too many" in low or "429" in low:
+        return max(delay, 12.0)
+    if "err_ssl" in low or "ssl_protocol" in low or "tunnel" in low or "connection" in low:
+        return max(delay, 3.0)
+    return delay
+
+
 def run_worker(
     email: str,
     *,
     batch_label: str | None = None,
     clear_log: bool = True,
     target_log_path: str | Path | None = None,
+    max_retries: int | None = None,
 ) -> dict:
-    """执行一次 Codex 补跑。调用前必须先 reserve，结束时会自动 release。"""
+    """执行 Codex 补跑（含失败自动重试）。调用前必须先 reserve，结束时会自动 release。
+
+    max_retries：失败后再试次数；None 时读配置 CODEX_RETRY_MAX_RETRIES（默认 3）。
+    总尝试次数 = 1 + max_retries。废号 / 用户停止 不重试。
+    """
     fh: logging.FileHandler | None = None
     root_logger = logging.getLogger()
     result: dict = {"status": "failed", "ok": False, "message": "Codex 补跑未返回结果"}
@@ -197,41 +259,147 @@ def run_worker(
         fh.addFilter(lambda record: record.threadName == thread_name)
         root_logger.addHandler(fh)
 
+        cfg_retries, cfg_delay = _codex_retry_settings()
+        retries = cfg_retries if max_retries is None else max(0, min(10, int(max_retries)))
+        max_attempts = 1 + retries
+
         try:
             import config as config_pkg
             config_pkg.reload_all()
             from config import codex as codex_cfg
             from config import roxybrowser as roxy_cfg
+            # reload 后重新读重试配置
+            cfg_retries, cfg_delay = _codex_retry_settings()
+            if max_retries is None:
+                retries = cfg_retries
+                max_attempts = 1 + retries
             logger.info(
-                "[Codex 补跑] 已热加载配置：CODEX_OAUTH_DRIVER=%s ROXY_OPEN_HEADLESS=%s ROXY_KEEP_BROWSER_OPEN=%s",
+                "[Codex 补跑] 已热加载配置：CODEX_OAUTH_DRIVER=%s ROXY_OPEN_HEADLESS=%s ROXY_KEEP_BROWSER_OPEN=%s "
+                "RETRY_MAX=%s RETRY_DELAY=%s",
                 getattr(codex_cfg, "CODEX_OAUTH_DRIVER", ""),
                 getattr(roxy_cfg, "ROXY_OPEN_HEADLESS", ""),
                 getattr(roxy_cfg, "ROXY_KEEP_BROWSER_OPEN", ""),
+                retries,
+                cfg_delay,
             )
         except Exception as exc:
             logger.warning("[Codex 补跑] 配置热加载失败，将继续使用当前内存配置：%s: %s", type(exc).__name__, exc)
 
         if batch_label:
             logger.info("[Codex 补跑] 批量任务：%s", batch_label)
-        logger.info("[Codex 补跑] 开始：%s", email)
-        logger.info("[Codex 补跑] 阶段说明：获取授权地址 → 登录邮箱 → 邮箱 OTP → 手机验证 → 捕获 callback → 提交/保存凭证")
-        check_stop_requested(email)
-        result = run_codex_oauth(email, force=True)
-        check_stop_requested(email)
         logger.info(
-            "[Codex 补跑] 结果：status=%s ok=%s file=%s callback=%s",
-            result.get("status"), result.get("ok"), result.get("file_path"), result.get("callback_url"),
+            "[Codex 补跑] 开始：%s（最多 %s 次尝试，失败后自动重试 %s 次）",
+            email, max_attempts, retries,
         )
-        result_status = result.get("status", "failed")
-        if result.get("ok"):
-            db.update_account_codex_status(email, "success", None)
-            logger.info("[Codex 补跑] %s 成功", email)
-        elif result_status == "deactivated":
-            db.update_account_codex_status(email, "deactivated", result.get("message"))
-            logger.warning("[Codex 补跑] %s 账号已废: %s", email, result.get("message"))
-        else:
-            db.update_account_codex_status(email, result_status, result.get("message"))
-            logger.warning("[Codex 补跑] %s 失败: %s", email, result.get("message"))
+        logger.info("[Codex 补跑] 阶段说明：获取授权地址 → 登录邮箱 → 邮箱 OTP → 手机验证 → 捕获 callback → 提交/保存凭证")
+
+        for attempt in range(1, max_attempts + 1):
+            check_stop_requested(email)
+            # 首次/重试都写 retrying，账号页「补跑中」可见
+            db.update_account_codex_status(
+                email,
+                "retrying",
+                f"第 {attempt}/{max_attempts} 次尝试" if max_attempts > 1 else "补跑中",
+            )
+            logger.info("[Codex 补跑] 第 %s/%s 次尝试：%s", attempt, max_attempts, email)
+
+            try:
+                result = run_codex_oauth(email, force=True)
+                check_stop_requested(email)
+            except CodexRetryStopped as exc:
+                result = {"status": "stopped", "ok": False, "message": str(exc) or "用户手动停止 Codex 补跑"}
+                db.update_account_codex_status(email, "stopped", result["message"])
+                logger.warning("[Codex 补跑] %s 已停止: %s", email, result["message"])
+                result["attempts"] = attempt
+                return result
+            except Exception as exc:
+                if is_stop_requested(email):
+                    result = {"status": "stopped", "ok": False, "message": "用户手动停止 Codex 补跑"}
+                    db.update_account_codex_status(email, "stopped", result["message"])
+                    logger.warning("[Codex 补跑] %s 已停止", email)
+                    result["attempts"] = attempt
+                    return result
+                result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {exc}"}
+                logger.exception("[Codex 补跑] %s 第 %s/%s 次异常", email, attempt, max_attempts)
+
+            logger.info(
+                "[Codex 补跑] 第 %s/%s 次结果：status=%s ok=%s file=%s callback=%s msg=%s",
+                attempt,
+                max_attempts,
+                result.get("status"),
+                result.get("ok"),
+                result.get("file_path"),
+                result.get("callback_url"),
+                str(result.get("message") or "")[:180],
+            )
+            result_status = str(result.get("status") or "failed")
+            if result.get("ok"):
+                db.update_account_codex_status(email, "success", None)
+                logger.info("[Codex 补跑] %s 成功（第 %s/%s 次）", email, attempt, max_attempts)
+                result["attempts"] = attempt
+                return result
+
+            if _is_terminal_codex_failure(result):
+                # 废号 / 停止等：写终态并结束，不重试
+                msg_low = str(result.get("message") or "").lower()
+                if (
+                    result_status == "deactivated"
+                    or "account_deactivated" in msg_low
+                    or "account_deleted" in msg_low
+                    or "account_banned" in msg_low
+                    or "accountunusable" in msg_low
+                    or "账号已废" in str(result.get("message") or "")
+                ):
+                    final_status = "deactivated"
+                elif result_status == "stopped" or "用户手动停止" in str(result.get("message") or ""):
+                    final_status = "stopped"
+                elif result_status in ("skipped", "cancelled"):
+                    final_status = result_status
+                else:
+                    final_status = result_status or "failed"
+                db.update_account_codex_status(email, final_status, result.get("message"))
+                if final_status == "deactivated":
+                    logger.warning("[Codex 补跑] %s 账号已废，不再重试: %s", email, result.get("message"))
+                elif final_status == "stopped":
+                    logger.warning("[Codex 补跑] %s 已停止，不再重试", email)
+                else:
+                    logger.warning("[Codex 补跑] %s 终态失败，不再重试: %s", email, result.get("message"))
+                result["status"] = final_status
+                result["attempts"] = attempt
+                return result
+
+            if attempt < max_attempts:
+                wait_s = _retry_delay_for_codex_error(cfg_delay, result)
+                logger.warning(
+                    "[Codex 补跑] 第 %s/%s 次失败，%.1fs 后自动重试（剩余 %s 次）: %s",
+                    attempt,
+                    max_attempts,
+                    wait_s,
+                    max_attempts - attempt,
+                    str(result.get("message") or result_status)[:220],
+                )
+                db.update_account_codex_status(
+                    email,
+                    "retrying",
+                    f"第 {attempt}/{max_attempts} 次失败，将重试: {str(result.get('message') or '')[:120]}",
+                )
+                if wait_s > 0:
+                    # 分段 sleep，便于响应停止
+                    end = time.time() + wait_s
+                    while time.time() < end:
+                        check_stop_requested(email)
+                        time.sleep(min(0.5, max(0.05, end - time.time())))
+                continue
+
+            db.update_account_codex_status(email, result_status or "failed", result.get("message"))
+            logger.warning(
+                "[Codex 补跑] %s 最终失败（已达最大尝试 %s 次）: %s",
+                email, max_attempts, result.get("message"),
+            )
+            result["attempts"] = attempt
+            return result
+
+        result["attempts"] = max_attempts
         return result
     except CodexRetryStopped as exc:
         result = {"status": "stopped", "ok": False, "message": str(exc) or "用户手动停止 Codex 补跑"}

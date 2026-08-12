@@ -225,19 +225,67 @@ def _apply_browser_automation_mask(driver) -> None:
         logger.debug("%s 注入自动化特征弱化脚本失败：%s", _log_prefix(driver), exc)
 
 
+def _is_dom_element_handle(el) -> bool:
+    """判断是否为可传给 execute_script 的真实元素句柄（非 dict/None）。
+
+    Cloak/Playwright 若把 DOM 塞进返回 dict，json_value 后会变成普通对象，
+    再调 scrollIntoView/click 会报 el.scrollIntoView is not a function。
+    """
+    if el is None or isinstance(el, (dict, list, tuple, str, int, float, bool)):
+        return False
+    name = el.__class__.__name__
+    if name in ("CloakElement", "WebElement", "ElementHandle"):
+        return True
+    # Selenium remote webelement 等
+    if hasattr(el, "tag_name") and hasattr(el, "id"):
+        return True
+    if hasattr(el, "locator") or hasattr(el, "handle"):
+        return True
+    return False
+
+
 def _human_scroll_to(driver, el) -> None:
+    if not _is_dom_element_handle(el):
+        return
     try:
         block = random.choice(["center", "nearest", "center"])
-        driver.execute_script("arguments[0].scrollIntoView({block: arguments[1], inline:'nearest'});", el, block)
+        # 必须守卫 typeof scrollIntoView，避免 Cloak 传坏句柄时整单炸死
+        driver.execute_script(
+            r"""
+            const el = arguments[0];
+            const block = arguments[1] || 'center';
+            if (!el || typeof el.scrollIntoView !== 'function') return false;
+            try { el.scrollIntoView({block: block, inline: 'nearest'}); } catch (e) { return false; }
+            return true;
+            """,
+            el,
+            block,
+        )
         if _browser_actions_enabled():
             time.sleep(random.uniform(0.08, 0.35))
             # 轻微滚动抖动，避免每次都精准居中。
             driver.execute_script("window.scrollBy(0, arguments[0]);", random.randint(-90, 90))
             time.sleep(random.uniform(0.05, 0.22))
-            driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'nearest'});", el)
+            driver.execute_script(
+                r"""
+                const el = arguments[0];
+                if (!el || typeof el.scrollIntoView !== 'function') return false;
+                try { el.scrollIntoView({block:'center', inline:'nearest'}); } catch (e) { return false; }
+                return true;
+                """,
+                el,
+            )
     except Exception:
         try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            driver.execute_script(
+                r"""
+                const el = arguments[0];
+                if (!el || typeof el.scrollIntoView !== 'function') return false;
+                try { el.scrollIntoView({block:'center'}); } catch (e) { return false; }
+                return true;
+                """,
+                el,
+            )
         except Exception:
             pass
 
@@ -248,6 +296,11 @@ def _human_click(driver, el, *, label: str = "") -> None:
     之前用 ActionChains 在 Roxy/Chrome 150 上偶发卡住 1-2 分钟，导致邮箱提交很慢。
     这里改为 CDP 派发鼠标事件；没有 CDP 时再用 JS/原生 click 兜底。
     """
+    if not _is_dom_element_handle(el):
+        raise RuntimeError(
+            f"human_click 收到非 DOM 元素句柄 label={label or '-'} type={type(el).__name__}；"
+            f"Cloak 路径请在 JS 内完成 click，不要把 Element 塞进 dict 回传"
+        )
     _human_scroll_to(driver, el)
     if not _browser_actions_enabled():
         time.sleep(0.2)
@@ -257,6 +310,7 @@ def _human_click(driver, el, *, label: str = "") -> None:
         human_delay("click")
         point = driver.execute_script(r"""
         const el = arguments[0];
+        if (!el || typeof el.getBoundingClientRect !== 'function') return {};
         const r = el.getBoundingClientRect();
         const x = r.left + r.width * (0.30 + Math.random() * 0.40);
         const y = r.top + r.height * (0.35 + Math.random() * 0.30);
@@ -273,29 +327,67 @@ def _human_click(driver, el, *, label: str = "") -> None:
         else:
             driver.execute_script(r"""
             const el = arguments[0];
+            if (!el) return;
             el.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
             el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
             el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
-            el.click();
+            if (typeof el.click === 'function') el.click();
             """, el)
     except Exception as exc:
         logger.debug("%s 人工化点击失败，回退 el.click label=%s err=%s", _log_prefix(driver), label, exc)
         time.sleep(random.uniform(0.12, 0.45))
         try:
-            driver.execute_script("arguments[0].click();", el)
+            driver.execute_script(
+                "const el=arguments[0]; if (el && typeof el.click==='function') el.click();",
+                el,
+            )
         except Exception:
             el.click()
 
 
 def _human_type_text(driver, el, value: str, *, clear: bool = True) -> None:
     """按字符/小段输入，触发真实 key events；失败时回退 JS setter。"""
+    text = str(value)
+
+    # Cloak/Playwright 适配层：逐字 + 反复 click 容易把光标点到中间导致乱码。
+    # 邮箱/密码等受控输入框用一次性 fill 更稳。
+    if driver.__class__.__name__ == "CloakSeleniumDriver":
+        try:
+            _human_scroll_to(driver, el)
+            try:
+                _human_click(driver, el, label="input_focus")
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].focus();", el)
+                except Exception:
+                    pass
+            if hasattr(el, "fill_text"):
+                el.fill_text(text)
+            else:
+                if clear:
+                    try:
+                        el.clear()
+                    except Exception:
+                        pass
+                el.send_keys(text)
+            driver.execute_script(
+                "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+                "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+                el,
+            )
+            return
+        except Exception as exc:
+            logger.debug("%s Cloak 一次性填入失败，回退 JS setter err=%s", _log_prefix(driver), exc)
+            _set_element_value(driver, el, text)
+            return
+
     if not _browser_actions_enabled():
         if clear:
             try:
                 el.clear()
             except Exception:
                 pass
-        el.send_keys(value)
+        el.send_keys(text)
         return
     try:
         _human_scroll_to(driver, el)
@@ -321,7 +413,6 @@ def _human_type_text(driver, el, value: str, *, clear: bool = True) -> None:
                     el.clear()
                 except Exception:
                     pass
-        text = str(value)
         i = 0
         while i < len(text):
             # 邮箱/密码整体仍逐字符，但偶尔 2 字符一组，节奏更自然。
@@ -338,7 +429,7 @@ def _human_type_text(driver, el, value: str, *, clear: bool = True) -> None:
         )
     except Exception as exc:
         logger.debug("%s 人工化输入失败，回退 JS setter err=%s", _log_prefix(driver), exc)
-        _set_element_value(driver, el, value)
+        _set_element_value(driver, el, text)
 
 
 def _page_warmup(driver, *, reason: str = "") -> None:
@@ -427,32 +518,70 @@ def _find_visible_email_input_js(driver):
       'input[type="email"]',
       'input[name="email"]',
       'input[name="username"]',
+      'input[name="loginfmt"]',
+      'input[name="identifier"]',
       'input#email-input',
-      'input[autocomplete="email"]'
+      'input#username',
+      'input[autocomplete="email"]',
+      'input[autocomplete="username"]',
+      'input[inputmode="email"]'
     ];
     for (const sel of selectors) {
       const el = [...document.querySelectorAll(sel)].find(visible);
       if (el) return el;
     }
-    return null;
+    // 兜底：按 placeholder / aria-label / name 打分选邮箱框
+    const inputs = [...document.querySelectorAll('input')].filter(visible);
+    const score = el => {
+      const hay = [el.type, el.name, el.id, el.autocomplete, el.placeholder,
+        el.getAttribute('aria-label'), el.getAttribute('data-testid')].join(' ').toLowerCase();
+      if (/(email|mail|username|loginfmt|identifier|メール|邮箱|電子郵件)/i.test(hay)) return 100;
+      if (!el.type || ['text','email','search'].includes(String(el.type||'').toLowerCase())) return 10;
+      return 0;
+    };
+    let best = null, bestScore = 0;
+    for (const el of inputs) {
+      const s = score(el);
+      if (s > bestScore) { best = el; bestScore = s; }
+    }
+    return bestScore >= 100 ? best : null;
     """)
 
 
 def _is_oauth_consent_like(driver) -> bool:
-    """检测是否已到 OAuth 授权/consent 页。这里不能再点任何邮箱分支或全局提交按钮。"""
+    """检测是否已到 OAuth 授权/consent 页。这里不能再点任何邮箱分支或全局提交按钮。
+
+    注意：`/oauth/authorize` 是登录入口，不是 consent。
+    真正 consent 类似 `/sign-in-with-chatgpt/codex/consent`。
+    旧逻辑把含 authorize 的 URL 一律当 consent，会导致无法点 Continue with email。
+    """
     try:
         return bool(driver.execute_script(r"""
         const url = String(location.href || '').toLowerCase();
-        if (/oauth|authorize|consent/.test(url) && !/login|signup|identifier|email-verification/.test(url)) return true;
+        // 登录/标识/验证码/绑手机：明确不是 consent
+        if (/\/oauth\/authorize\b|\/log-in\b|\/login\b|\/signup\b|\/create-account\b|identifier|email-verification|add-phone|phone-verification|password/.test(url)) {
+          return false;
+        }
+        // 真正 consent / workspace
+        if (/\/consent\b|sign-in-with-chatgpt\/codex\/consent|\/workspace\b|about-you|select-workspace/.test(url)) {
+          return true;
+        }
         const formsWithEmail = [...document.querySelectorAll('form')]
           .some(form => form.querySelector('input[type="email"],input[name="email"],input[name="username"],input[autocomplete="email"]'));
         if (formsWithEmail) return false;
-        const actions = [...document.querySelectorAll('button,a,[role="button"],input[type="submit"],input[type="button"]')]
-          .map(el => [el.id, el.name, el.type, el.getAttribute('data-testid'), el.getAttribute('data-test-id'),
-            el.getAttribute('data-provider'), el.getAttribute('data-auth-provider'), el.getAttribute('href'),
-            el.getAttribute('formaction'), el.value, el.className].filter(Boolean).join(' ').toLowerCase())
-          .join(' ');
-        return /oauth|authorize|consent|grant|allow/.test(actions) && !/email|username/.test(actions);
+        // 有可见邮箱输入框也不是 consent
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        if ([...document.querySelectorAll('input[type="email"],input[name="email"],input[name="username"],input[autocomplete="email"]')].some(visible)) {
+          return false;
+        }
+        const bodyText = String(document.body && document.body.innerText || '').toLowerCase();
+        // consent 常见文案：Allow / Authorize / Grant access，且无 email 输入
+        if (/(allow access|grant access|authorize this|allow this app|允许访问|授权)/i.test(bodyText)
+            && !/(continue with email|sign in with email|email address|邮箱|メール)/i.test(bodyText)) {
+          return true;
+        }
+        return false;
         """))
     except Exception:
         return False
@@ -476,7 +605,11 @@ def _assert_not_external_idp(driver, label: str = '') -> None:
 
 
 def _click_email_entry_option(driver) -> bool:
-    """点击“邮箱方式”入口；只看 DOM 技术属性，不看按钮可见文案，并显式排除 Google 等第三方。"""
+    """点击“邮箱方式”入口。
+
+    优先看 data-provider/testid 等技术属性；若无结果再看可见文案
+    （Continue with email / メールで続行 等），并显式排除 Google/Apple 等第三方。
+    """
     if _is_oauth_consent_like(driver):
         logger.info("%s 当前疑似 OAuth 授权页，跳过邮箱入口兜底点击", _log_prefix(driver))
         return False
@@ -497,15 +630,38 @@ def _click_email_entry_option(driver) -> bool:
           .filter(Boolean).join(' ')).join(' ');
       return `${own} ${desc}`.toLowerCase();
     };
-    const bad = /google|apple|microsoft|github|facebook|saml|sso|oauth|social|oidc|idp|provider|authorize|consent|grant|allow/;
-    const good = /(^|[^a-z])(email|mail|username|passwordless|otp|magic)([^a-z]|$)/;
-    const candidates = [...document.querySelectorAll('button,a,[role="button"],input[type="button"],input[type="submit"]')]
-      .filter(visible)
-      .map(el => ({el, attrs: attrText(el), hasLogo: !!el.querySelector('img,svg,use')}))
-      .filter(x => good.test(x.attrs) && !bad.test(x.attrs) && !x.hasLogo);
-    if (candidates.length !== 1) return null;
-    candidates[0].el.scrollIntoView({block:'center'});
-    return candidates[0].el;
+    const textOf = el => String(el.innerText || el.value || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    // 第三方坏词：不要用 oauth/provider/authorize 这类太宽泛词，会误伤邮箱按钮
+    const badAttr = /google|apple|microsoft|github|facebook|saml|\bsso\b|social|oidc|\bidp\b/;
+    const badText = /google|apple|microsoft|github|facebook|继续使用 google|sign in with google|continue with google|continue with apple|continue with microsoft/;
+    const goodAttr = /(^|[^a-z])(email|mail|username|passwordless|otp|magic)([^a-z]|$)/;
+    const goodText = /continue with email|sign up with email|log in with email|sign in with email|use email|email address|メールで続行|メールアドレス|使用邮箱|使用電子郵件|邮箱登录|電子郵件/;
+
+    const nodes = [...document.querySelectorAll('button,a,[role="button"],input[type="button"],input[type="submit"]')].filter(visible);
+    // 1) 技术属性命中
+    const byAttr = nodes
+      .map(el => ({el, attrs: attrText(el), text: textOf(el).toLowerCase(), hasLogo: !!el.querySelector('img,svg,use')}))
+      .filter(x => goodAttr.test(x.attrs) && !badAttr.test(x.attrs) && !badText.test(x.text));
+    if (byAttr.length === 1) {
+      byAttr[0].el.scrollIntoView({block:'center'});
+      return byAttr[0].el;
+    }
+    // 2) 可见文案命中（Codex/OpenAI 登录页常见）
+    const byText = nodes
+      .map(el => ({el, attrs: attrText(el), text: textOf(el).toLowerCase()}))
+      .filter(x => goodText.test(x.text) && !badAttr.test(x.attrs) && !badText.test(x.text));
+    if (byText.length >= 1) {
+      // 优先更长、更明确的 “continue with email”
+      byText.sort((a,b) => (b.text.includes('continue with email')?2:0) - (a.text.includes('continue with email')?2:0) || b.text.length - a.text.length);
+      byText[0].el.scrollIntoView({block:'center'});
+      return byText[0].el;
+    }
+    // 3) 属性多候选时取第一个较干净的
+    if (byAttr.length > 1) {
+      byAttr[0].el.scrollIntoView({block:'center'});
+      return byAttr[0].el;
+    }
+    return null;
     """)
     if target:
         _human_click(driver, target, label="email_entry")
@@ -938,8 +1094,117 @@ def _is_email_login_page_still_present(driver) -> bool:
     return bool(state.get("inputs"))
 
 
+def _inspect_auth_page_failure(driver) -> dict:
+    """识别限流 / 废号 / 普通 auth 错误页。
+
+    返回：
+      {
+        kind: rate_limit | account_unusable | auth_error | "",
+        error_code: str,
+        url: str,
+        title: str,
+        text: str,
+      }
+    """
+    url = ""
+    title = ""
+    text = ""
+    try:
+        url = str(getattr(driver, "current_url", "") or "")
+    except Exception:
+        url = ""
+    try:
+        snap = driver.execute_script(r"""
+        return {
+          url: String(location.href || ''),
+          title: String(document.title || ''),
+          text: String(document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1600),
+        };
+        """) or {}
+        url = str(snap.get("url") or url or "")
+        title = str(snap.get("title") or "")
+        text = str(snap.get("text") or "")
+    except Exception:
+        pass
+
+    blob = " ".join([url, title, text])
+    try:
+        from core.openai_auth import (
+            detect_account_unusable_text,
+            detect_auth_failure_from_url,
+            detect_rate_limit_text,
+        )
+    except Exception:
+        detect_account_unusable_text = lambda _t: ""  # type: ignore
+        detect_auth_failure_from_url = lambda _u: ("", "")  # type: ignore
+        detect_rate_limit_text = lambda _t: ""  # type: ignore
+
+    kind, code = detect_auth_failure_from_url(url)
+    if not kind:
+        rl = detect_rate_limit_text(blob)
+        if rl:
+            kind, code = "rate_limit", rl
+    if not kind:
+        dead = detect_account_unusable_text(blob)
+        if dead:
+            kind, code = "account_unusable", dead
+    if not kind:
+        # chatgpt.com/auth/error Oops 页（非 payload）
+        low = blob.lower()
+        if "/auth/error" in low or "error=undefined" in low or "oops" in low:
+            kind, code = "auth_error", "auth_error"
+    return {
+        "kind": kind or "",
+        "error_code": code or "",
+        "url": url,
+        "title": title,
+        "text": text[:400],
+    }
+
+
+def _raise_if_auth_page_terminal(driver, *, where: str = "") -> None:
+    """若当前页是限流/废号，抛出带 error_code 的明确异常。"""
+    info = _inspect_auth_page_failure(driver)
+    kind = info.get("kind") or ""
+    code = info.get("error_code") or ""
+    url = str(info.get("url") or "")[:220]
+    if kind == "rate_limit":
+        from core.openai_auth import RateLimitError
+
+        raise RateLimitError(
+            f"OpenAI Auth 限流 error_code={code or 'rate_limit_exceeded'} where={where or '-'} url={url}",
+            error_code=code or "rate_limit_exceeded",
+        )
+    if kind == "account_unusable":
+        from core.openai_auth import AccountUnusableError
+
+        raise AccountUnusableError(
+            f"账号已废 error_code={code or 'account_deactivated'} where={where or '-'} url={url} text={(info.get('text') or '')[:160]}",
+            error_code=code or "account_deactivated",
+        )
+
+
 def _auth_error_page_state(driver) -> dict:
     """识别 ChatGPT 登录/注册 Oops 错误页（/auth/error?error=undefined）。"""
+    # 先解析 payload 限流/废号，避免被普通 Oops 恢复逻辑吞掉。
+    try:
+        info = _inspect_auth_page_failure(driver)
+        if info.get("kind") in ("rate_limit", "account_unusable"):
+            return {
+                "ok": True,
+                "url": info.get("url") or "",
+                "urlHit": True,
+                "textHit": True,
+                "isError": True,
+                "bodyPreview": (info.get("text") or "")[:180],
+                "buttonTexts": [],
+                "hasGoBack": False,
+                "goBackText": "",
+                "failureKind": info.get("kind"),
+                "errorCode": info.get("error_code") or "",
+            }
+    except Exception:
+        pass
     try:
         return driver.execute_script(r"""
         const url = String(location.href || '');
@@ -1094,6 +1359,20 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
     cleared_recover_done = False
     expected_email = str(email or "").strip().lower()
     while time.time() < end:
+        # 限流 / 废号优先：不要等成 unknown 再泛化报错
+        fail = _inspect_auth_page_failure(driver)
+        if fail.get("kind") == "rate_limit":
+            logger.warning(
+                "%s 邮箱提交后命中限流：code=%s url=%s",
+                _log_prefix(driver), fail.get("error_code"), str(fail.get("url") or "")[:180],
+            )
+            return "rate_limit"
+        if fail.get("kind") == "account_unusable":
+            logger.warning(
+                "%s 邮箱提交后命中废号页：code=%s url=%s",
+                _log_prefix(driver), fail.get("error_code"), str(fail.get("url") or "")[:180],
+            )
+            return "account_unusable"
         if _is_auth_error_page(driver):
             logger.warning(
                 "%s 邮箱提交后进入错误页：%s",
@@ -1111,6 +1390,14 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
             return "password"
         state = _email_input_value_state(driver)
         last = state
+        # 即使无输入框，URL 也可能是 authorize 中间态或 error payload
+        url_now = str((state or {}).get("url") or getattr(driver, "current_url", "") or "")
+        if "auth.openai.com/error" in url_now.lower() or "payload=" in url_now.lower():
+            fail2 = _inspect_auth_page_failure(driver)
+            if fail2.get("kind") == "rate_limit":
+                return "rate_limit"
+            if fail2.get("kind") == "account_unusable":
+                return "account_unusable"
         inputs = state.get("inputs") or []
         if inputs:
             values = [str(i.get("value") or "") for i in inputs]
@@ -1144,6 +1431,11 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
                 cleared_seen_at = None
             # 仍是当前邮箱页，继续短等。
         time.sleep(0.8)
+    fail = _inspect_auth_page_failure(driver)
+    if fail.get("kind") == "rate_limit":
+        return "rate_limit"
+    if fail.get("kind") == "account_unusable":
+        return "account_unusable"
     if _is_auth_error_page(driver):
         return "auth_error"
     logger.info("%s 邮箱提交后等待下一步超时，最后邮箱页状态=%s", _log_prefix(driver), last)
@@ -1201,10 +1493,42 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
         state_name = _wait_email_submit_next_state(driver, email, timeout=20)
         if state_name == "login_password":
             raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
+        if state_name == "account_unusable":
+            _raise_if_auth_page_terminal(driver, where=f"email_submit_account_unusable_{attempt}")
+            from core.openai_auth import AccountUnusableError
+
+            raise AccountUnusableError(
+                f"邮箱提交后账号已废 where=email_submit_{attempt} url={getattr(driver, 'current_url', '')}",
+                error_code="account_deactivated",
+            )
+        if state_name == "rate_limit":
+            # 同浏览器内短退避再试一轮；仍失败则抛 RateLimitError 给任务层换出口重试（不降并发）
+            logger.warning(
+                "%s 邮箱提交命中限流，短退避后重试（%s/%s）url=%s",
+                _log_prefix(driver), attempt, attempts, getattr(driver, "current_url", ""),
+            )
+            time.sleep(min(8.0, 3.0 + attempt * 2.0))
+            try:
+                _safe_get(
+                    driver,
+                    "https://chatgpt.com/auth/login",
+                    timeout=min(35, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)),
+                    attempts=2,
+                    accept_hosts=("chatgpt.com", "auth.openai.com"),
+                )
+                human_delay("navigate")
+                _maybe_accept(driver)
+            except Exception as exc:
+                logger.warning("%s 限流后重开登录页失败：%s", _log_prefix(driver), str(exc)[:160])
+            continue
         if state_name in ("password", "otp", "logged_in"):
             logger.info("%s 邮箱提交后已进入下一步：%s", _log_prefix(driver), state_name)
             return state_name
         if state_name == "auth_error" or _is_auth_error_page(driver):
+            # 限流/废号不要当 Oops 点 Go back
+            terminal = _inspect_auth_page_failure(driver)
+            if terminal.get("kind") in ("rate_limit", "account_unusable"):
+                _raise_if_auth_page_terminal(driver, where=f"email_submit_auth_error_{attempt}")
             _recover_from_auth_error_page(driver, reason=f"after_email_submit_{attempt}")
             # 错误页恢复后多给一轮机会（不占用 attempt 上限的“空转”感，但仍计入循环）。
             logger.warning("%s 邮箱提交撞到错误页，已 Go back 并重开登录页，准备第 %s/%s 轮重试", _log_prefix(driver), attempt, attempts)
@@ -1212,9 +1536,15 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
             continue
         logger.warning("%s 邮箱提交后仍未进入下一步：%s，准备重填重试 state=%s", _log_prefix(driver), state_name, _email_input_value_state(driver))
         # unknown 且 URL 像 error 时也走恢复。
-        if "auth/error" in str((_email_input_value_state(driver) or {}).get("url") or "").lower():
+        cur_url = str((_email_input_value_state(driver) or {}).get("url") or getattr(driver, "current_url", "") or "")
+        if "auth/error" in cur_url.lower() or "payload=" in cur_url.lower():
+            term = _inspect_auth_page_failure(driver)
+            if term.get("kind") in ("rate_limit", "account_unusable"):
+                _raise_if_auth_page_terminal(driver, where=f"email_submit_unknown_{attempt}")
             _recover_from_auth_error_page(driver, reason=f"unknown_error_url_{attempt}")
         time.sleep(1.0)
+    # 耗尽尝试：若最后是限流/废号，抛带 error_code 的异常
+    _raise_if_auth_page_terminal(driver, where="email_submit_exhausted")
     raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
 
 
@@ -1283,6 +1613,13 @@ def _is_email_verification_page(driver) -> bool:
         url = ''
     if '/log-in/password' in url:
         return False
+    # TOTP/Authenticator 页也常有 one-time-code 输入框，不能当成邮箱 OTP
+    try:
+        from core.totp_login import is_totp_page_driver
+        if is_totp_page_driver(driver):
+            return False
+    except Exception:
+        pass
     if 'email-verification' in url:
         return True
     state = _email_otp_page_state(driver)
@@ -1309,11 +1646,176 @@ def _clear_otp_inputs(driver) -> None:
         pass
 
 
+def _safe_element_text(el) -> str:
+    """兼容 Selenium / Cloak 元素：CloakElement 可能没有 .text 属性。"""
+    if el is None:
+        return ""
+    for getter in (
+        lambda: getattr(el, "text", None),
+        lambda: el.get_attribute("innerText"),
+        lambda: el.get_attribute("textContent"),
+        lambda: el.get_attribute("value"),
+        lambda: el.get_attribute("data-dd-action-name"),
+        lambda: el.get_attribute("aria-label"),
+    ):
+        try:
+            val = getter()
+            if val is not None and str(val).strip():
+                return str(val).strip()
+        except Exception:
+            continue
+    return ""
+
+
+def _is_auth_route_error_page(driver) -> bool:
+    """OpenAI auth 路由错误页：Oops / Route Error / Invalid content type。"""
+    try:
+        state = _email_otp_page_state(driver)
+    except Exception:
+        state = {}
+    title = str(state.get("title") or "").lower()
+    text = str(state.get("text") or "").lower()
+    url = str(state.get("url") or getattr(driver, "current_url", "") or "").lower()
+    if "oops" in title or "oops, an error" in text or "an error occurred" in title:
+        return True
+    if "route error" in text or "invalid content type" in text:
+        return True
+    if "error occurred" in text and ("email-verification" in url or "auth.openai.com" in url):
+        # 真·验证码错误页通常仍有 OTP 输入框；纯 Oops 页 inputs 为空
+        inputs = state.get("inputs") or []
+        if not inputs:
+            return True
+    return False
+
+
+def _recover_auth_route_error(driver) -> dict:
+    """处理 OpenAI Oops/Route Error 页：优先点 Try again。"""
+    if not _is_auth_route_error_page(driver):
+        return {"ok": False, "reason": "not_error_page"}
+    logger.warning(
+        "%s[OTP] 检测到 auth 路由错误页，尝试点击 Try again：url=%s",
+        _log_prefix(driver),
+        getattr(driver, "current_url", ""),
+    )
+    try:
+        clicked = driver.execute_script(r"""
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
+        const nodes = [...document.querySelectorAll('button,a,[role=button],input[type=button],input[type=submit]')].filter(visible);
+        const score = (el) => {
+          const t = ((el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('data-dd-action-name') || '') + '').toLowerCase();
+          if (/try again|retry|再试|重试|もう一度|再度/.test(t)) return 100;
+          if (/again|再/.test(t)) return 60;
+          return 0;
+        };
+        const target = nodes.map(el => [score(el), el]).filter(x => x[0] > 0 && enabled(x[1])).sort((a,b)=>b[0]-a[0])[0]?.[1];
+        if (!target) return {ok:false, reason:'no_try_again'};
+        target.scrollIntoView({block:'center'});
+        target.click();
+        return {ok:true, text:(target.innerText || target.textContent || '').trim().slice(0,80)};
+        """) or {}
+    except Exception as exc:
+        clicked = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+    if clicked.get("ok"):
+        logger.info("%s[OTP] 已点击错误页恢复按钮：%s", _log_prefix(driver), clicked.get("text") or "Try again")
+        time.sleep(random.uniform(1.5, 2.8) if _browser_actions_enabled() else 2.0)
+        if not _is_auth_route_error_page(driver):
+            return {"ok": True, "action": "try_again", "text": clicked.get("text")}
+        return {"ok": False, "need_restart_login": True, "reason": "still_error_after_try_again"}
+    return {"ok": False, "need_restart_login": True, "reason": str(clicked.get("reason") or "try_again_missing")}
+
+
+def _restart_email_login_flow(driver, email: str, *, login_url: str = "https://chatgpt.com/auth/login") -> str:
+    """从 ChatGPT 登录页重开邮箱流，返回 next_state（otp/password/...）。"""
+    logger.info("%s[OTP] 路由错误后重开登录页并重新提交邮箱：%s", _log_prefix(driver), email)
+    try:
+        _safe_get(
+            driver,
+            login_url,
+            timeout=35,
+            attempts=2,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
+    except Exception:
+        try:
+            driver.get(login_url)
+        except Exception as exc:
+            raise RuntimeError(f"auth_route_error: 重开登录页失败: {exc}") from exc
+    human_delay("navigate")
+    _maybe_accept(driver)
+    return _submit_email_and_wait_next(driver, email, attempts=3)
+
+
+def _otp_flow_already_passed(driver) -> bool:
+    """OTP 是否其实已经通过（页面已离开验证码流）。
+
+    常见误判：验证码已生效并跳到 chatgpt.com 主站，但等待超时被当成 invalid，
+    随后又去点“重新发送”，在主站找不到按钮而失败。
+    """
+    try:
+        if _has_access_token(driver):
+            return True
+    except Exception:
+        pass
+    try:
+        url = str(getattr(driver, "current_url", "") or "").lower()
+    except Exception:
+        url = ""
+    if "/log-in/password" in url:
+        return False
+    # 路由错误页不算通过
+    try:
+        if _is_auth_route_error_page(driver):
+            return False
+    except Exception:
+        pass
+    if _is_email_verification_page(driver):
+        return False
+    # 明确后续页才算通过；不要把任意 auth.openai.com 都当成已通过
+    if "chatgpt.com" in url:
+        return True
+    if any(x in url for x in (
+        "about-you", "add-phone", "phone-verification", "consent",
+        "workspace", "callback", "you're-all-set", "all-set",
+    )):
+        return True
+    return False
+
+
 def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
-    """点击重新发送邮箱验证码。优先按 DOM 属性识别，文本仅兜底。"""
+    """点击重新发送邮箱验证码。优先按 DOM 属性识别，文本仅兜底。
+
+    若已不在验证码页（OTP 实际已通过），返回 skipped，不抛错。
+    若落在 OpenAI Oops/Route Error 页，先点 Try again；仍失败则抛 auth_route_error。
+    若是 Authentication Error / account_deactivated，直接抛 AccountUnusableError。
+    """
     end = time.time() + timeout
     last = None
     while time.time() < end:
+        # 废号 / 限流页没有 resend，优先识别
+        _raise_if_auth_page_terminal(driver, where="resend_otp")
+        if _is_auth_route_error_page(driver):
+            # 路由错误也可能夹带废号文案
+            term = _inspect_auth_page_failure(driver)
+            if term.get("kind") in ("rate_limit", "account_unusable"):
+                _raise_if_auth_page_terminal(driver, where="resend_route_error")
+            rec = _recover_auth_route_error(driver)
+            if rec.get("ok"):
+                # Try again 后可能回到 OTP 页，继续找 resend
+                if _otp_flow_already_passed(driver):
+                    return {"ok": True, "skipped": True, "reason": "otp_already_passed_after_try_again"}
+                continue
+            raise RuntimeError(
+                f"auth_route_error: OpenAI OTP 路由错误页无法恢复 reason={rec.get('reason')} "
+                f"state={_email_otp_page_state(driver)}"
+            )
+        if _otp_flow_already_passed(driver):
+            logger.info(
+                "%s[OTP] 当前已不在验证码页，跳过重新发送：url=%s",
+                _log_prefix(driver),
+                getattr(driver, "current_url", ""),
+            )
+            return {"ok": True, "skipped": True, "reason": "otp_already_passed"}
         try:
             btn = driver.execute_script(r"""
             const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
@@ -1326,40 +1828,128 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
               const name = String(el.getAttribute('name') || '').toLowerCase();
               const value = String(el.getAttribute('value') || '').toLowerCase();
               if (name === 'intent' && value === 'resend') return true;
+              // 排除 Try again（那是错误页恢复，不是重发验证码）
+              const text = ((el.innerText || el.textContent || '') + '').toLowerCase();
+              if (/try again|retry/.test(text)) return false;
               return /resend|send.*new|new.*code|again/.test(attrs);
             });
             if (attrHit) return attrHit;
             // 兜底：多语言文本，避免因页面没有稳定属性时卡死。
-            return candidates.find(el => enabled(el) && /resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重新发送电子邮件|重发|再次发送|再送信|新しい|届かない/.test((el.innerText || el.textContent || '').toLowerCase())) || null;
+            return candidates.find(el => {
+              if (!enabled(el)) return false;
+              const t = ((el.innerText || el.textContent || '') + '').toLowerCase();
+              if (/try again|retry/.test(t)) return false;
+              return /resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重新发送电子邮件|重发|再次发送|再送信|新しい|届かない/.test(t);
+            }) || null;
             """)
             if btn:
-                text = str(btn.text or btn.get_attribute('value') or btn.get_attribute('data-dd-action-name') or '').strip()
+                text = _safe_element_text(btn)
                 _human_click(driver, btn, label="resend_otp")
                 logger.info("%s[OTP] 已点击重新发送验证码按钮：%s", _log_prefix(driver), text or '-')
                 time.sleep(random.uniform(1.1, 2.4) if _browser_actions_enabled() else 1.5)
                 return {"ok": True, "text": text}
         except Exception as exc:
+            # 终端异常直接抛出
+            from core.openai_auth import AccountUnusableError, RateLimitError
+
+            if isinstance(exc, (AccountUnusableError, RateLimitError)):
+                raise
             last = exc
         time.sleep(0.5)
+    # 结束前再确认一次：可能等待期间已跳转成功
+    if _otp_flow_already_passed(driver):
+        logger.info(
+            "%s[OTP] 等待重发按钮期间已离开验证码页，按 OTP 已通过处理：url=%s",
+            _log_prefix(driver),
+            getattr(driver, "current_url", ""),
+        )
+        return {"ok": True, "skipped": True, "reason": "otp_already_passed"}
+    _raise_if_auth_page_terminal(driver, where="resend_otp_timeout")
+    if _is_auth_route_error_page(driver):
+        raise RuntimeError(
+            f"auth_route_error: OpenAI OTP 路由错误页且无 resend 按钮 state={_email_otp_page_state(driver)}"
+        )
     raise RuntimeError(f"找不到可点击的重新发送验证码按钮: last={last}, state={_email_otp_page_state(driver)}")
 
 
-def _wait_after_email_otp_submit(driver, timeout: int = 10) -> str:
-    """提交 OTP 后等待页面离开验证码页；仍在验证码页且有错误/输入框则认为验证码无效。"""
+def _wait_after_email_otp_submit(driver, timeout: int = 20) -> str:
+    """提交 OTP 后等待页面离开验证码页。
+
+    返回：
+      - accepted：已离开验证码页 / OTP 已通过
+      - invalid：仍在验证码页且输入错误
+      - route_error：OpenAI Oops/Route Error 页
+      - account_unusable：账号已废
+      - rate_limit：Auth 限流
+    """
     end = time.time() + timeout
     last = {}
     while time.time() < end:
         time.sleep(0.5)
+        fail = _inspect_auth_page_failure(driver)
+        if fail.get("kind") == "account_unusable":
+            logger.warning(
+                "%s[OTP] 提交后落到废号页：code=%s url=%s",
+                _log_prefix(driver), fail.get("error_code"), str(fail.get("url") or "")[:180],
+            )
+            return "account_unusable"
+        if fail.get("kind") == "rate_limit":
+            logger.warning(
+                "%s[OTP] 提交后落到限流页：code=%s url=%s",
+                _log_prefix(driver), fail.get("error_code"), str(fail.get("url") or "")[:180],
+            )
+            return "rate_limit"
+        if _is_auth_route_error_page(driver):
+            logger.warning(
+                "%s[OTP] 提交后落到 auth 路由错误页：%s",
+                _log_prefix(driver),
+                _email_otp_page_state(driver),
+            )
+            return "route_error"
+        if _otp_flow_already_passed(driver):
+            return "accepted"
         if not _is_email_verification_page(driver):
-            return 'accepted'
+            # 离开验证码页也可能是 Authentication Error（URL 仍可能含 email-verification）
+            fail2 = _inspect_auth_page_failure(driver)
+            if fail2.get("kind") == "account_unusable":
+                return "account_unusable"
+            if fail2.get("kind") == "rate_limit":
+                return "rate_limit"
+            return "accepted"
         last = _email_otp_page_state(driver)
-        invalid = any(str(i.get('ariaInvalid') or '').lower() == 'true' for i in (last.get('inputs') or []))
-        if invalid or (last.get('errors') or []):
-            return 'invalid'
-    if _is_email_verification_page(driver):
-        logger.warning("%s[OTP] 提交后仍停留验证码页，按验证码无效/过期处理 snapshot=%s", _log_prefix(driver), _email_otp_page_state(driver))
-        return 'invalid'
-    return 'accepted'
+        # 页面 body/errors 里可能直接写 error_code: account_deactivated
+        body_blob = " ".join([
+            str(last.get("title") or ""),
+            str(last.get("text") or ""),
+            " ".join(str(x) for x in (last.get("errors") or [])),
+        ])
+        try:
+            from core.openai_auth import detect_account_unusable_text, detect_rate_limit_text
+
+            if detect_account_unusable_text(body_blob):
+                return "account_unusable"
+            if detect_rate_limit_text(body_blob):
+                return "rate_limit"
+        except Exception:
+            pass
+        invalid = any(str(i.get("ariaInvalid") or "").lower() == "true" for i in (last.get("inputs") or []))
+        if invalid or (last.get("errors") or []):
+            return "invalid"
+    fail = _inspect_auth_page_failure(driver)
+    if fail.get("kind") == "account_unusable":
+        return "account_unusable"
+    if fail.get("kind") == "rate_limit":
+        return "rate_limit"
+    if _is_auth_route_error_page(driver):
+        return "route_error"
+    if _otp_flow_already_passed(driver) or not _is_email_verification_page(driver):
+        return "accepted"
+    logger.warning(
+        "%s[OTP] 提交后仍停留验证码页，按验证码无效/过期处理 snapshot=%s",
+        _log_prefix(driver),
+        _email_otp_page_state(driver),
+    )
+    return "invalid"
 
 
 def _click_continue(driver) -> None:
@@ -1747,6 +2337,11 @@ def _click_passwordless_signup_if_present(driver) -> dict:
     """
     新版注册/登录流在 password 页可能默认要求密码。
     如果页面提供“使用一次性验证码”按钮，优先点击进入邮箱 OTP 页面。
+
+    注意：必须在 JS 内完成 click，并只返回可 JSON 序列化字段。
+    Cloak/Playwright 适配层无法把 DOM Element 塞进 dict 再传回 Python
+    （evaluate_handle + json_value 会丢 button / 抛错），旧写法会导致
+    明明页面有「ワンタイムコードでログインする」却点不到。
     """
     try:
         result = driver.execute_script(r"""
@@ -1762,7 +2357,7 @@ def _click_passwordless_signup_if_present(driver) -> dict:
             el.id, name, value, el.getAttribute('aria-label'), el.getAttribute('title'),
             el.getAttribute('data-testid'), el.getAttribute('data-dd-action-name'), el.className, el.textContent
           ].join(' ').toLowerCase();
-          const text = norm(el.textContent || el.getAttribute('value') || '');
+          const text = norm(el.textContent || el.getAttribute('value') || el.getAttribute('aria-label') || '');
           return (
             (name === 'intent' && value.includes('passwordless') && value.includes('send_otp')) ||
             (name === 'intent' && value.includes('passwordless') && value.includes('otp')) ||
@@ -1780,6 +2375,7 @@ def _click_passwordless_signup_if_present(driver) -> dict:
             text.includes('一次性驗證碼') ||
             text.includes('メールでコード') ||
             text.includes('ワンタイムコード') ||
+            text.includes('ワンタイムコードでログイン') ||
             text.includes('認証コード') ||
             text.includes('useonetimeregistrationcode') ||
             text.includes('useaone-timecodetosignup') ||
@@ -1792,22 +2388,40 @@ def _click_passwordless_signup_if_present(driver) -> dict:
           );
         };
         const btn = candidates.find(isPasswordlessOtp);
-        if (!btn) return {ok:false, reason:'missing_passwordless_button'};
-        btn.scrollIntoView({block:'center'});
-        return {
+        if (!btn) {
+          return {
+            ok:false,
+            reason:'missing_passwordless_button',
+            buttons: candidates.slice(0, 12).map(el => (el.textContent || el.getAttribute('value') || '').trim().slice(0, 40))
+          };
+        }
+        btn.scrollIntoView({block:'center', inline:'nearest'});
+        const meta = {
           ok:true,
-          reason:'passwordless_send_otp_target',
-          button: btn,
+          reason:'clicked_passwordless_send_otp',
           name: btn.getAttribute('name') || '',
           value: btn.getAttribute('value') || '',
-          text: (btn.textContent || '').trim().slice(0, 80)
+          text: (btn.textContent || btn.getAttribute('value') || '').trim().slice(0, 80),
+          tag: (btn.tagName || '').toLowerCase()
         };
+        try {
+          btn.focus();
+          btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
+          btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+          if (typeof btn.click === 'function') btn.click();
+        } catch (e) {
+          const form = btn.closest('form');
+          if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);
+          else if (form) form.submit();
+          else return {ok:false, reason:'click_failed:' + String(e), text: meta.text};
+        }
+        return meta;
         """) or {"ok": False, "reason": "empty_result"}
-        if result.get("ok") and result.get("button"):
-            _human_click(driver, result.get("button"), label="passwordless_otp")
-            result["reason"] = "clicked_passwordless_send_otp"
-            result.pop("button", None)
-        return result
+        if isinstance(result, dict):
+            return result
+        return {"ok": False, "reason": f"bad_result_type:{type(result).__name__}"}
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
@@ -1846,13 +2460,31 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             return None
         password = _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
+        # 关键：必须在 JS 内完成填密 + 提交，只返回可 JSON 序列化字段。
+        # Cloak/Playwright 无法把 DOM Element 塞进 dict 再回传 Python（json_value 丢句柄），
+        # 旧写法 return {input, button} 后 _human_type/_human_click 会触发
+        # el.scrollIntoView is not a function。
         result = driver.execute_script(r"""
+        const password = String(arguments[0] || '');
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
           && !el.disabled && !el.readOnly;
+        const safeScroll = el => {
+          try {
+            if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({block:'center', inline:'nearest'});
+          } catch (e) {}
+        };
+        const setValue = (el, value) => {
+          const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) setter.call(el, value); else el.value = value;
+          el.dispatchEvent(new Event('input', {bubbles:true}));
+          el.dispatchEvent(new Event('change', {bubbles:true}));
+        };
         const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
           .find(visible);
         if (!input) return {ok:false, reason:'missing_password_input'};
+        if (!password) return {ok:false, reason:'empty_password'};
         const form = input.closest('form');
         const scope = form || document;
         const buttons = [...scope.querySelectorAll('button,input[type="submit"]')]
@@ -1865,15 +2497,45 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
           .filter(x => x.below)
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
-        buttons[0].el.scrollIntoView({block:'center'});
-        return {ok:true, reason:'password_targets', input, button: buttons[0].el};
-        """) or {}
+        const btn = buttons[0].el;
+        safeScroll(input);
+        try { input.focus(); } catch (e) {}
+        setValue(input, password);
+        const filled = String(input.value || '').length > 0;
+        if (!filled) return {ok:false, reason:'password_not_filled'};
+        safeScroll(btn);
+        let submitMethod = 'click';
+        try {
+          btn.focus();
+          btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
+          btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+          if (typeof btn.click === 'function') btn.click();
+        } catch (e) {
+          if (form && typeof form.requestSubmit === 'function') {
+            form.requestSubmit(btn);
+            submitMethod = 'requestSubmit';
+          } else if (form) {
+            form.submit();
+            submitMethod = 'form.submit';
+          } else {
+            return {ok:false, reason:'submit_failed:' + String(e)};
+          }
+        }
+        return {
+          ok:true,
+          reason:'password_filled_and_submitted',
+          submitMethod,
+          buttonText: (btn.innerText || btn.textContent || btn.value || '').trim().slice(0, 80),
+          passwordLen: password.length,
+          url: location.href
+        };
+        """, password) or {}
         if not result.get('ok'):
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
-        _human_type_text(driver, result.get("input"), password, clear=True)
         human_delay("form", minimum=0.4, maximum=1.4)
-        _human_click(driver, result.get("button"), label="password_submit")
-        logger.info("%s 已填写并提交密码页", _log_prefix(driver))
+        logger.info("%s 已填写并提交密码页：%s", _log_prefix(driver), result)
         # 提交密码后通常进入邮箱验证码页，最多等一段时间。
         wait_end = time.time() + 20
         while time.time() < wait_end:
@@ -2004,6 +2666,26 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
         for _ in range(3):
             if _click_if_enabled_submit(driver):
                 logger.info('%s 已点击资料页提交按钮，等待 OAuth 跳转', _log_prefix(driver))
+                # 给 callback/跳转一点时间；若仍停 about-you 再补点一次
+                leave_end = time.time() + 18
+                while time.time() < leave_end:
+                    try:
+                        cur = str(getattr(driver, "current_url", "") or "").lower()
+                    except Exception:
+                        cur = ""
+                    if _has_access_token(driver):
+                        logger.info("%s 资料提交后已检测到登录态", _log_prefix(driver))
+                        return True
+                    if "about-you" not in cur and "profile" not in cur:
+                        logger.info("%s 资料页已跳转：url=%s", _log_prefix(driver), cur or "-")
+                        return True
+                    if "chatgpt.com" in cur:
+                        logger.info("%s 资料提交后已到 ChatGPT：url=%s", _log_prefix(driver), cur)
+                        return True
+                    time.sleep(0.8)
+                # 仍在 about-you：再提交一次
+                if _click_if_enabled_submit(driver):
+                    logger.info("%s 资料页仍未跳转，已补点提交，继续后续 session 流程", _log_prefix(driver))
                 return True
             time.sleep(1)
         logger.warning('%s 找不到可点击的资料页提交按钮 snapshot=%s', _log_prefix(driver), _page_snapshot(driver))
@@ -2381,6 +3063,27 @@ def _switch_to_chatgpt_window_if_any(driver) -> bool:
     return False
 
 
+def _session_diag_snapshot(driver) -> dict:
+    """超时诊断：URL + 关键 cookie 是否齐全。"""
+    try:
+        url = str(getattr(driver, "current_url", "") or "")
+    except Exception:
+        url = ""
+    cookies = {}
+    try:
+        cookies = _collect_chatgpt_cookies(driver)
+    except Exception:
+        cookies = {}
+    hint = _cookie_auth_hint(cookies)
+    return {
+        "url": url,
+        "cookie_count": hint.get("count"),
+        "has_session_token": hint.get("has_session_token"),
+        "has_next_auth": hint.get("has_next_auth"),
+        "cookie_names": hint.get("names"),
+    }
+
+
 def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) -> dict:
     """等待页面完成跳转并从 ChatGPT 页面内读取登录 session/accessToken。
 
@@ -2392,6 +3095,7 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
     session cookie / accessToken 才会稳定写入；这里会自动点一次，并：
     1) 强制打开 chatgpt.com 主站
     2) 页面 fetch 失败/仅 WARNING_BANNER 时，用浏览器 cookie 直拉 session
+    3) 若仍停 about-you，补点提交；周期性打印 cookie 诊断
     """
     end = time.time() + timeout
     auto_jump_end = time.time() + max(3, int(auto_jump_wait or 15))
@@ -2400,6 +3104,8 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
     all_set_clicked = False
     post_continue_refreshed = False
     empty_rounds = 0
+    about_you_resubmits = 0
+    signin_bounce_tried = False
 
     while time.time() < end:
         _check_manual_stop()
@@ -2407,24 +3113,47 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
             current = str(driver.current_url or '')
         except Exception:
             current = ''
+        current_l = current.lower()
 
-        if 'chatgpt.com' not in current:
+        # 资料页未跳转：补提交，避免过早硬跳 chatgpt.com 丢 callback
+        if "about-you" in current_l or ("auth.openai.com" in current_l and "profile" in current_l):
+            if about_you_resubmits < 3:
+                logger.info(
+                    "%s 仍在资料页，补点提交等待 OAuth（%s/3）：url=%s",
+                    _log_prefix(driver), about_you_resubmits + 1, current,
+                )
+                try:
+                    _click_if_enabled_submit(driver)
+                except Exception:
+                    pass
+                about_you_resubmits += 1
+                time.sleep(2.5)
+                continue
+
+        if 'chatgpt.com' not in current_l:
             if _switch_to_chatgpt_window_if_any(driver):
                 current = str(getattr(driver, "current_url", "") or "")
+                current_l = current.lower()
             elif time.time() >= auto_jump_end and not forced_chatgpt_open:
                 try:
-                    logger.info("%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 内读取 session", _log_prefix(driver), int(auto_jump_wait or 15))
+                    logger.info(
+                        "%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 读取 session；diag=%s",
+                        _log_prefix(driver),
+                        int(auto_jump_wait or 15),
+                        _session_diag_snapshot(driver),
+                    )
                     _safe_get(driver, "https://chatgpt.com/", timeout=35, attempts=2, accept_hosts=("chatgpt.com",))
                     forced_chatgpt_open = True
                     time.sleep(3)
                     current = str(getattr(driver, "current_url", "") or "")
+                    current_l = current.lower()
                 except Exception as exc:
                     last_data = f"{type(exc).__name__}: {exc}"
             else:
                 time.sleep(1)
                 continue
 
-        if 'chatgpt.com' in current:
+        if 'chatgpt.com' in current_l:
             # 先处理 You're all set：否则 /api/auth/session 可能一直没有 accessToken。
             if _click_all_set_continue_if_present(driver, clicked_once=all_set_clicked):
                 all_set_clicked = True
@@ -2433,23 +3162,68 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                     post_continue_refreshed = True
                 try:
                     current = str(driver.current_url or '')
+                    current_l = current.lower()
                 except Exception:
-                    current = current
+                    pass
             try:
                 data = _read_chatgpt_session_once(driver)
                 if data and data.get("accessToken"):
                     return data
-                last_data = f"session 暂无 accessToken keys={list((data or {}).keys()) if isinstance(data, dict) else []}"
+                keys = list((data or {}).keys()) if isinstance(data, dict) else []
+                last_data = f"session 暂无 accessToken keys={keys}"
                 empty_rounds += 1
+                diag = _session_diag_snapshot(driver)
+                if empty_rounds == 1 or empty_rounds % 4 == 0:
+                    logger.warning(
+                        "%s 仍无 accessToken（round=%s）：keys=%s diag=%s",
+                        _log_prefix(driver), empty_rounds, keys, diag,
+                    )
                 # 点过 Continue 后仍只有 WARNING_BANNER：隔几轮再强制刷一次主站。
-                if all_set_clicked and empty_rounds >= 3 and empty_rounds % 3 == 0:
+                if empty_rounds >= 3 and empty_rounds % 3 == 0:
                     _force_chatgpt_home_for_session(driver)
                     post_continue_refreshed = True
+                # 没有 session-token 时，尝试 next-auth signin 入口促发回跳
+                if (
+                    empty_rounds >= 6
+                    and not signin_bounce_tried
+                    and not diag.get("has_session_token")
+                ):
+                    signin_bounce_tried = True
+                    try:
+                        logger.info(
+                            "%s cookie 无 session-token，尝试打开 /api/auth/signin 促发登录回跳",
+                            _log_prefix(driver),
+                        )
+                        _safe_get(
+                            driver,
+                            "https://chatgpt.com/api/auth/signin",
+                            timeout=25,
+                            attempts=1,
+                            accept_hosts=("chatgpt.com", "auth.openai.com"),
+                        )
+                        time.sleep(2.5)
+                        _safe_get(
+                            driver,
+                            "https://chatgpt.com/",
+                            timeout=25,
+                            attempts=1,
+                            accept_hosts=("chatgpt.com",),
+                        )
+                        time.sleep(2)
+                    except Exception as bounce_exc:
+                        logger.info(
+                            "%s signin 回跳尝试失败：%s",
+                            _log_prefix(driver),
+                            str(bounce_exc)[:160],
+                        )
             except Exception as exc:
                 last_data = f"{type(exc).__name__}: {exc}"
         time.sleep(1.2 if all_set_clicked else 2)
 
-    raise RuntimeError(f"等待 /api/auth/session accessToken 超时，最后响应: {str(last_data)[:800]}")
+    diag = _session_diag_snapshot(driver)
+    raise RuntimeError(
+        f"等待 /api/auth/session accessToken 超时，最后响应: {str(last_data)[:500]}；diag={diag}"
+    )
 
 
 def _check_manual_stop() -> None:
@@ -2536,14 +3310,68 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
             except Exception as exc:
                 logger.info("[Roxy注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
-            outcome = _wait_after_email_otp_submit(driver, timeout=10)
-            if outcome == 'accepted':
+            outcome = _wait_after_email_otp_submit(driver, timeout=20)
+            if outcome == "accepted" or _otp_flow_already_passed(driver):
+                if outcome != "accepted":
+                    logger.info("[Roxy注册][OTP] 等待结果=%s，但已离开验证码页，按通过处理", outcome)
                 break
+            if outcome == "account_unusable":
+                from core.openai_auth import AccountUnusableError
+
+                info = _inspect_auth_page_failure(driver)
+                code = info.get("error_code") or "account_deactivated"
+                raise AccountUnusableError(
+                    f"OTP 提交后账号已废 error_code={code} url={info.get('url') or getattr(driver, 'current_url', '')}",
+                    error_code=code,
+                )
+            if outcome == "rate_limit":
+                from core.openai_auth import RateLimitError
+
+                info = _inspect_auth_page_failure(driver)
+                code = info.get("error_code") or "rate_limit_exceeded"
+                raise RateLimitError(
+                    f"OTP 提交后 Auth 限流 error_code={code} url={info.get('url') or getattr(driver, 'current_url', '')}",
+                    error_code=code,
+                )
+            if outcome == "route_error" or _is_auth_route_error_page(driver):
+                logger.warning(
+                    "[Roxy注册][OTP] 提交后路由错误（%s/%s），尝试恢复 url=%s",
+                    otp_attempt, max_otp_attempts, getattr(driver, "current_url", ""),
+                )
+                rec = _recover_auth_route_error(driver)
+                if rec.get("ok") and _otp_flow_already_passed(driver):
+                    break
+                if otp_attempt >= max_otp_attempts:
+                    raise RuntimeError(
+                        f"auth_route_error: OpenAI OTP 路由错误连续失败 url={getattr(driver, 'current_url', '')}"
+                    )
+                _restart_email_login_flow(driver, email)
+                otp_after_ts = time.time()
+                current_otp = None
+                human_delay("api")
+                continue
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
             logger.warning("[Roxy注册][OTP] 验证码错误/过期，准备重新发送并重新获取验证码（%s/%s）", otp_attempt + 1, max_otp_attempts)
             otp_after_ts = time.time()
-            _click_resend_email_otp(driver, timeout=25)
+            try:
+                resend = _click_resend_email_otp(driver, timeout=25)
+            except Exception as resend_exc:
+                from core.openai_auth import AccountUnusableError, RateLimitError
+
+                if isinstance(resend_exc, (AccountUnusableError, RateLimitError)):
+                    raise
+                if "auth_route_error" in str(resend_exc) or _is_auth_route_error_page(driver):
+                    logger.warning("[Roxy注册][OTP] 重发遇路由错误，重开邮箱登录：%s", str(resend_exc)[:160])
+                    _restart_email_login_flow(driver, email)
+                    otp_after_ts = time.time()
+                    current_otp = None
+                    human_delay("api")
+                    continue
+                raise
+            if resend.get("skipped"):
+                logger.info("[Roxy注册][OTP] 重发前发现已离开验证码页，按 OTP 通过继续")
+                break
             human_delay("api")
             current_otp = None
 
@@ -2563,9 +3391,34 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
         _check_manual_stop()
 
-        if _twofa_cfg.ENABLE_2FA:
-            logger.warning("[Roxy注册] 当前 Roxy 自动化路径暂不执行 2FA 设置，已跳过")
+        # 2FA：ENABLE_2FA=True 时用浏览器 cookie 走协议 enroll
         totp_secret = None
+        try:
+            from config import twofa as _twofa_live
+            enable_2fa = bool(getattr(_twofa_live, "ENABLE_2FA", False))
+        except Exception:
+            enable_2fa = bool(getattr(_twofa_cfg, "ENABLE_2FA", False))
+        if enable_2fa:
+            try:
+                from core.account_export import setup_2fa_from_browser_driver
+                logger.info("[Roxy注册] ENABLE_2FA=True，开始设置 TOTP 2FA")
+                totp_secret = setup_2fa_from_browser_driver(
+                    driver,
+                    email,
+                    proxy=proxy,
+                )
+                logger.info(
+                    "[Roxy注册] 2FA 设置完成 secret=%s...%s",
+                    (totp_secret or "")[:4],
+                    (totp_secret or "")[-4:],
+                )
+            except Exception as exc:
+                logger.error("[Roxy注册] 2FA 设置失败：%s: %s", type(exc).__name__, exc)
+                logger.debug("[Roxy注册] 2FA 失败详情", exc_info=True)
+                logger.warning("[Roxy注册] 将继续保存账号（不含 TOTP secret），可后续手动设置")
+                totp_secret = None
+        else:
+            logger.info("[Roxy注册] 已跳过 2FA 设置 (ENABLE_2FA=False)")
 
         codex_result = {
             "status": "skipped",
@@ -2622,13 +3475,27 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
     except Exception as exc:
         logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Roxy注册] 失败详情", exc_info=True)
-        # 未确认创建前回收邮箱；确认后避免重复使用。
+        err_text = f"{type(exc).__name__}: {str(exc)[:300]}"
+        # 废号立即 disabled；可重试失败保持 used 供任务层重试；已创建则 failed。
         try:
             from core.email_provider import release_email
-            release_email(email, status="failed" if create_acknowledged else "available", note=f"Roxy注册失败: {str(exc)[:180]}")
+            from core.openai_auth import (
+                AccountUnusableError,
+                RateLimitError,
+                should_disable_registration_email_for_error,
+            )
+
+            if isinstance(exc, AccountUnusableError) or should_disable_registration_email_for_error(exc):
+                release_email(email, status="disabled", note=f"自动停用: {str(exc)[:180]}")
+            elif create_acknowledged:
+                release_email(email, status="failed", note=f"Roxy注册失败: {str(exc)[:180]}")
+            elif isinstance(exc, RateLimitError):
+                logger.info("[Roxy注册] 限流失败，保持邮箱 used 供任务重试：%s", email)
+            else:
+                logger.info("[Roxy注册] 可重试失败，保持邮箱 used：%s (%s)", email, type(exc).__name__)
         except Exception:
             pass
-        return {"success": False, "email": email, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        return {"success": False, "email": email, "error": err_text}
     finally:
         if driver and not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
             try:

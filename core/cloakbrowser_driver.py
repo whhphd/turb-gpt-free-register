@@ -84,27 +84,92 @@ class CloakElement:
             return ""
 
     def send_keys(self, *values: str) -> None:
-        # 兼容 Selenium: el.send_keys(Keys.COMMAND, 'a')。
-        text = "".join(str(v or "") for v in values)
-        lower = text.lower()
+        """兼容 Selenium send_keys 语义：默认是“追加输入”，不是整框覆盖。
+
+        注意：
+        1) 不能对每个字符都 click()，否则光标会点到输入框中部，字符插乱
+           （如 icloud.com -> iclomoc.du）。
+        2) 不能用 fill() 做逐字输入，fill 会覆盖整个 value。
+        """
+        parts = [str(v if v is not None else "") for v in values]
+        # Selenium Keys 私有区编码：
+        # CONTROL=\ue009 COMMAND=\ue03d BACKSPACE=\ue003 DELETE=\ue017 ENTER=\ue007 TAB=\ue004
+        has_mod = any(p in ("\ue009", "\ue03d", "\ue008") for p in parts)  # ctrl/cmd/meta
+        has_a = any(p == "a" or p == "A" for p in parts)
+        text = "".join(parts)
+
+        # Ctrl/Cmd + A => 全选（人工化输入清空前会走这里）；这里需要先聚焦。
+        if has_mod and has_a:
+            try:
+                self.click()
+            except Exception:
+                pass
+            try:
+                self.page.keyboard.press("Control+A")
+            except Exception:
+                try:
+                    self.page.keyboard.press("Meta+A")
+                except Exception:
+                    pass
+            return
+
+        # 单键特殊键（不强制 click，避免打乱光标；调用方应已 focus）
+        if text in ("\ue003",):  # BACKSPACE
+            self.page.keyboard.press("Backspace")
+            return
+        if text in ("\ue017",):  # DELETE
+            self.page.keyboard.press("Delete")
+            return
+        if text in ("\ue007", "\n", "\r"):  # ENTER
+            self.page.keyboard.press("Enter")
+            return
+        if text in ("\ue004", "\t"):  # TAB
+            self.page.keyboard.press("Tab")
+            return
+
+        # 过滤残留控制字符后再输入
+        printable = "".join(ch for ch in text if ord(ch) >= 32 or ch in ("\n", "\t"))
+        if not printable:
+            return
+
+        # 追加输入：不要 click，不要 fill。
         try:
-            self.click()
+            self.page.keyboard.type(printable, delay=15)
+            return
         except Exception:
             pass
-        if "\ue03d" in text or "\ue009" in text or "command" in lower or "control" in lower:
-            # Selenium Keys.CONTROL/COMMAND 编码可能传入私有区字符；这里按全选处理。
-            try:
-                self.page.keyboard.press("Meta+A")
-            except Exception:
-                self.page.keyboard.press("Control+A")
-            return
+        try:
+            if self.locator is not None and hasattr(self.locator, "press_sequentially"):
+                self.locator.press_sequentially(printable, delay=15)
+                return
+        except Exception:
+            pass
+        # 最后兜底：整框写入（仅当键盘输入都失败时）
+        try:
+            if self.locator is not None:
+                self.locator.fill(printable, timeout=10000)
+            else:
+                self.handle.fill(printable, timeout=10000)
+        except Exception:
+            pass
+
+    def fill_text(self, value: str) -> None:
+        """一次性写入完整文本（Playwright fill），适合邮箱/密码等 React 受控框。"""
+        text = str(value or "")
         try:
             if self.locator is not None:
                 self.locator.fill(text, timeout=10000)
-            else:
-                self.handle.fill(text, timeout=10000)
+                return
         except Exception:
-            self.page.keyboard.type(text, delay=35)
+            pass
+        try:
+            if self.handle is not None:
+                self.handle.fill(text, timeout=10000)
+                return
+        except Exception:
+            pass
+        self.clear()
+        self.send_keys(text)
 
     def get_attribute(self, name: str) -> str | None:
         try:

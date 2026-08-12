@@ -11,12 +11,14 @@
 """
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from core import codex_retry_service, db
+from core.timeutil import beijing_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,10 @@ _executor_workers = _DEFAULT_MAX_WORKERS
 _executor_generation = 0
 _retired_executors: list[ThreadPoolExecutor] = []
 _executor_lock = threading.RLock()
+
+# 注册任务失败后的自动重试：最多再试 N 次（不含首次），总尝试 = 1 + N。
+_DEFAULT_REGISTRATION_RETRIES = 3
+_DEFAULT_REGISTRATION_RETRY_DELAY = 2.0
 
 _STOP_EVENTS: dict[int, threading.Event] = {}
 _ACTIVE_JOBS: set[int] = set()
@@ -156,17 +162,52 @@ def _is_final_session_access_token_timeout(error: object) -> bool:
     )
 
 
+def _is_rate_limit_registration_error(error: object) -> bool:
+    """OpenAI Auth 限流：可重试，不降并发，只加退避。"""
+    try:
+        from core.openai_auth import RateLimitError, detect_rate_limit_text
+
+        if isinstance(error, RateLimitError):
+            return True
+        return bool(detect_rate_limit_text(str(error or "")))
+    except Exception:
+        text = str(error or "").lower()
+        return "rate_limit" in text or "ratelimiterror" in text
+
+
 def _should_disable_failed_registration_email(error: object) -> bool:
-    """需要直接停用邮箱的注册失败类型。"""
+    """需要直接停用邮箱的注册失败类型（废号 / 已注册 / session 死态）。"""
     text = str(error or "")
     if not text:
         return False
+    if _is_final_session_access_token_timeout(text):
+        return True
+    try:
+        from core.openai_auth import should_disable_registration_email_for_error
+
+        if should_disable_registration_email_for_error(error):
+            return True
+    except Exception:
+        pass
     return (
-        _is_final_session_access_token_timeout(text)
-        or "邮箱提交后进入登录密码页" in text
+        "邮箱提交后进入登录密码页" in text
         or "auth.openai.com/log-in/password" in text
         or "/log-in/password" in text
+        or "account_deactivated" in text
+        or "account_deleted" in text
+        or "account_banned" in text
+        or "AccountUnusableError" in text
+        or "账号已废" in text
     )
+
+
+def _retry_delay_for_error(base_delay: float, error: object) -> float:
+    """按错误类型调整退避；限流加长等待，但不改并发。"""
+    delay = max(0.0, float(base_delay or 0.0))
+    if _is_rate_limit_registration_error(error):
+        # 限流时换出口重开浏览器前多等一会，避免同一波打爆 Auth
+        return max(delay, 12.0)
+    return delay
 
 
 def _disable_job_email(email: str | None, reason: str) -> bool:
@@ -274,8 +315,204 @@ class _JobLogContext:
             logging.getLogger().removeHandler(self.handler)
 
 
+def _registration_retry_settings() -> tuple[int, float]:
+    """返回 (最多重试次数, 重试间隔秒)。总尝试次数 = 1 + 重试次数。"""
+    retries = _DEFAULT_REGISTRATION_RETRIES
+    delay = _DEFAULT_REGISTRATION_RETRY_DELAY
+    try:
+        from config import register as _r
+        raw = getattr(_r, "REGISTRATION_MAX_RETRIES", None)
+        if raw is not None and str(raw).strip() != "":
+            retries = int(raw)
+    except Exception:
+        pass
+    try:
+        from config import register as _r
+        raw = getattr(_r, "REGISTRATION_RETRY_DELAY", None)
+        if raw is not None and str(raw).strip() != "":
+            delay = float(raw)
+    except Exception:
+        pass
+    retries = max(0, min(10, int(retries)))
+    delay = max(0.0, min(60.0, float(delay)))
+    return retries, delay
+
+
+def execute_registration(
+    *,
+    email: str | None = None,
+    name: str | None = None,
+    birthday: str | None = None,
+    keep_browser: bool = False,
+    skip_codex: bool = False,
+    log_fn: Any | None = None,
+    should_stop: Any | None = None,
+) -> dict:
+    """执行普通注册流程（含与 WebUI 任务相同的失败重试）。
+
+    GCash 第一步、后台注册任务都应走这里，而不是各自直调 cloak/roxy。
+    返回结构与 main.run_registration 一致；额外带 attempts。
+    """
+    from main import run_registration
+    from core.profile_utils import generate_random_birthday
+
+    def _log(level: str, msg: str) -> None:
+        if log_fn is not None:
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+        if level == "warning":
+            logger.warning("%s", msg)
+        elif level == "error":
+            logger.error("%s", msg)
+        else:
+            logger.info("%s", msg)
+
+    def _stopped() -> bool:
+        if should_stop is None:
+            return False
+        try:
+            return bool(should_stop())
+        except Exception:
+            return False
+
+    max_retries, retry_delay = _registration_retry_settings()
+    max_attempts = 1 + max_retries
+    job_email = str(email or "").strip() or None
+    job_name = str(name or "").strip() or None
+    last_error = "unknown"
+    last_result: dict = {"success": False, "error": "unknown"}
+
+    for attempt in range(1, max_attempts + 1):
+        if _stopped():
+            _release_unconsumed_job_email(job_email, "用户手动停止")
+            return {
+                "success": False,
+                "email": job_email,
+                "error": "用户手动停止",
+                "stopped": True,
+                "attempts": attempt - 1,
+            }
+
+        try:
+            if not job_email:
+                job_email, job_name, birthday0 = _prepare_registration_args()
+                birthday = birthday or birthday0
+                _log("info", f"本任务固定使用邮箱: {job_email}（失败重试不换号）")
+            use_email = job_email
+            use_name = job_name or _random_display_name()
+            use_birthday = birthday or generate_random_birthday()
+
+            _log(
+                "info",
+                f"开始注册（第 {attempt}/{max_attempts} 次，邮箱={use_email}，"
+                f"失败最多再重试 {max_retries} 次"
+                f"{'，keep_browser' if keep_browser else ''}"
+                f"{'，skip_codex' if skip_codex else ''}）",
+            )
+            result = run_registration(
+                email=use_email,
+                name=use_name,
+                birthday=use_birthday,
+                keep_browser=keep_browser,
+                skip_codex=skip_codex,
+            )
+            last_result = result if isinstance(result, dict) else {"success": False, "error": "unknown"}
+            last_result["attempts"] = attempt
+
+            if _stopped():
+                # 成功拿到 driver 时也要让调用方有机会关掉
+                _release_unconsumed_job_email(use_email, "用户手动停止")
+                last_result = {
+                    **last_result,
+                    "success": False,
+                    "error": "用户手动停止",
+                    "stopped": True,
+                }
+                return last_result
+
+            if isinstance(result, dict) and result.get("success"):
+                _log("info", f"注册成功: {result.get('email')}（第 {attempt}/{max_attempts} 次尝试）")
+                return last_result
+
+            err = (result or {}).get("error") if isinstance(result, dict) else "unknown"
+            result_email = (result or {}).get("email") if isinstance(result, dict) else None
+            account_id = (result or {}).get("account_id") if isinstance(result, dict) else None
+            last_error = str(err)[:500]
+            job_email = str(result_email or use_email or job_email or "").strip() or job_email
+            email_to_handle = str(result_email or use_email or job_email or "").strip()
+
+            # 账号已落库：不再整单重跑，避免重复注册
+            if account_id:
+                if _should_disable_failed_registration_email(err):
+                    _disable_job_email(email_to_handle, str(err))
+                else:
+                    _release_unconsumed_job_email(email_to_handle, str(err))
+                _log("error", f"失败（账号已生成 account_id={account_id}，不再自动重试）: {err}")
+                return last_result
+
+            if _should_disable_failed_registration_email(err):
+                _disable_job_email(email_to_handle, str(err))
+                _log("error", f"失败（邮箱需停用，不再用原邮箱重试）: {err}")
+                return last_result
+
+            if attempt < max_attempts:
+                wait_s = _retry_delay_for_error(retry_delay, err)
+                kind = "限流退避" if _is_rate_limit_registration_error(err) else "失败"
+                _log(
+                    "warning",
+                    f"第 {attempt}/{max_attempts} 次{kind}，{wait_s:.1f}s 后用原邮箱重试"
+                    f"（{email_to_handle}，剩余 {max_attempts - attempt} 次）: {err}",
+                )
+                if wait_s > 0:
+                    time.sleep(wait_s)
+                continue
+
+            _release_unconsumed_job_email(email_to_handle, str(err))
+            _log("error", f"失败（已达最大尝试 {max_attempts} 次，原邮箱={email_to_handle}）: {err}")
+            return last_result
+
+        except Exception as exc:
+            err_text = f"{type(exc).__name__}: {exc}"
+            last_error = err_text[:500]
+            email_to_handle = str(job_email or "").strip()
+            last_result = {
+                "success": False,
+                "email": job_email,
+                "error": last_error,
+                "attempts": attempt,
+            }
+            if _should_disable_failed_registration_email(err_text):
+                _disable_job_email(email_to_handle, err_text)
+                _log("error", f"异常且邮箱需停用，不再用原邮箱重试: {err_text}")
+                return last_result
+            if _stopped():
+                _release_unconsumed_job_email(email_to_handle, err_text)
+                last_result["stopped"] = True
+                last_result["error"] = "用户手动停止"
+                return last_result
+            if attempt < max_attempts:
+                wait_s = _retry_delay_for_error(retry_delay, err_text)
+                _log(
+                    "warning",
+                    f"第 {attempt}/{max_attempts} 次异常，{wait_s:.1f}s 后用原邮箱重试"
+                    f"（{email_to_handle}，剩余 {max_attempts - attempt} 次）: {err_text}",
+                )
+                if wait_s > 0:
+                    time.sleep(wait_s)
+                continue
+            _release_unconsumed_job_email(email_to_handle, err_text)
+            _log("error", f"最终失败（已达最大尝试 {max_attempts} 次，原邮箱={email_to_handle}）: {last_error}")
+            return last_result
+
+    last_result = last_result if isinstance(last_result, dict) else {"success": False, "error": last_error}
+    last_result.setdefault("attempts", max_attempts)
+    return last_result
+
+
 def _run_one_job(job_id: int, log_file: str) -> None:
-    """单任务入口（线程池里跑这个）。"""
+    """单任务入口（线程池里跑这个）。失败后自动重试，最多再试 3 次。"""
     log_logger = logging.getLogger(__name__)
     _activate_job(job_id)
 
@@ -291,85 +528,217 @@ def _run_one_job(job_id: int, log_file: str) -> None:
         _deactivate_job(job_id)
         return
 
-    db.update_job(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
+    db.update_job(job_id, status="running", started_at=beijing_now_iso())
 
-    email: str | None = None
+    max_retries, retry_delay = _registration_retry_settings()
+    max_attempts = 1 + max_retries
+    last_error = "unknown"
+    last_account_id = None
+    # 任务内固定邮箱：首次领取后，失败重试始终用同一邮箱，不重新领号。
+    job_email: str | None = None
+    job_name: str | None = None
+
     try:
         with _JobLogContext(log_file):
             from main import run_registration
-            log_logger.info(f"[Job {job_id}] 开始注册任务")
-            email, name, birthday = _prepare_registration_args()
-            db.update_job(job_id, email=email)
-            check_stop_requested()
-            result = run_registration(email=email, name=name, birthday=birthday)
-            if is_stop_requested(job_id):
-                _release_unconsumed_job_email(email, "用户手动停止")
-                db.update_job(
-                    job_id,
-                    status="stopped",
-                    error="用户手动停止",
-                    completed_at=datetime.now().isoformat(timespec="seconds"),
-                )
-                log_logger.warning(f"[Job {job_id}] 已按用户请求停止")
-                return
-            if isinstance(result, dict) and result.get("success"):
-                db.update_job(
-                    job_id,
-                    status="success",
-                    email=result.get("email"),
-                    account_id=result.get("account_id"),
-                    completed_at=datetime.now().isoformat(timespec="seconds"),
-                )
-                log_logger.info(f"[Job {job_id}] 成功: {result.get('email')}")
-            else:
-                # 注意：失败也可能伴随 account_id（如 Codex 失败但账号已注册成功）
-                err = (result or {}).get("error") if isinstance(result, dict) else "unknown"
-                result_email = (result or {}).get("email") if isinstance(result, dict) else None
-                db.update_job(
-                    job_id,
-                    status="failed",
-                    email=result_email,
-                    account_id=(result or {}).get("account_id") if isinstance(result, dict) else None,
-                    error=str(err)[:500],
-                    completed_at=datetime.now().isoformat(timespec="seconds"),
-                )
-                email_to_handle = str(result_email or email or "").strip()
-                if _should_disable_failed_registration_email(err):
-                    _disable_job_email(email_to_handle, str(err))
-                else:
+            from core.profile_utils import generate_random_birthday
+
+            for attempt in range(1, max_attempts + 1):
+                if is_stop_requested(job_id):
+                    _release_unconsumed_job_email(job_email, "用户手动停止")
+                    db.update_job(
+                        job_id,
+                        status="stopped",
+                        error="用户手动停止",
+                        completed_at=beijing_now_iso(),
+                    )
+                    log_logger.warning(f"[Job {job_id}] 已按用户请求停止")
+                    return
+
+                try:
+                    if not job_email:
+                        job_email, job_name, _birthday0 = _prepare_registration_args()
+                        db.update_job(job_id, email=job_email)
+                        log_logger.info(
+                            f"[Job {job_id}] 本任务固定使用邮箱: {job_email}（失败重试不换号）"
+                        )
+                    email = job_email
+                    name = job_name or _random_display_name()
+                    birthday = generate_random_birthday()
+
+                    log_logger.info(
+                        f"[Job {job_id}] 开始注册任务（第 {attempt}/{max_attempts} 次，邮箱={email}，"
+                        f"失败最多再重试 {max_retries} 次）"
+                    )
+                    check_stop_requested()
+                    result = run_registration(email=email, name=name, birthday=birthday)
+
+                    if is_stop_requested(job_id):
+                        _release_unconsumed_job_email(email, "用户手动停止")
+                        db.update_job(
+                            job_id,
+                            status="stopped",
+                            error="用户手动停止",
+                            completed_at=beijing_now_iso(),
+                        )
+                        log_logger.warning(f"[Job {job_id}] 已按用户请求停止")
+                        return
+
+                    if isinstance(result, dict) and result.get("success"):
+                        db.update_job(
+                            job_id,
+                            status="success",
+                            email=result.get("email"),
+                            account_id=result.get("account_id"),
+                            completed_at=beijing_now_iso(),
+                        )
+                        log_logger.info(
+                            f"[Job {job_id}] 成功: {result.get('email')}（第 {attempt}/{max_attempts} 次尝试）"
+                        )
+                        return
+
+                    # 注意：失败也可能伴随 account_id（如 Codex 失败但账号已注册成功）
+                    err = (result or {}).get("error") if isinstance(result, dict) else "unknown"
+                    result_email = (result or {}).get("email") if isinstance(result, dict) else None
+                    account_id = (result or {}).get("account_id") if isinstance(result, dict) else None
+                    last_error = str(err)[:500]
+                    job_email = str(result_email or email or job_email or "").strip() or job_email
+                    last_account_id = account_id
+                    email_to_handle = str(result_email or email or job_email or "").strip()
+
+                    # 账号已落库：不再整单重跑注册，避免重复注册。
+                    if account_id:
+                        if _should_disable_failed_registration_email(err):
+                            _disable_job_email(email_to_handle, str(err))
+                        else:
+                            _release_unconsumed_job_email(email_to_handle, str(err))
+                        db.update_job(
+                            job_id,
+                            status="failed",
+                            email=result_email or job_email,
+                            account_id=account_id,
+                            error=last_error,
+                            completed_at=beijing_now_iso(),
+                        )
+                        log_logger.error(
+                            f"[Job {job_id}] 失败（账号已生成 account_id={account_id}，不再自动重试）: {err}"
+                        )
+                        return
+
+                    # 邮箱已确认不可用（如已注册密码页）：停用后不再用原邮箱重试。
+                    if _should_disable_failed_registration_email(err):
+                        _disable_job_email(email_to_handle, str(err))
+                        db.update_job(
+                            job_id,
+                            status="failed",
+                            email=result_email or job_email,
+                            account_id=account_id,
+                            error=last_error,
+                            completed_at=beijing_now_iso(),
+                        )
+                        log_logger.error(
+                            f"[Job {job_id}] 失败（邮箱需停用，不再用原邮箱重试）: {err}"
+                        )
+                        return
+
+                    # 可重试失败：保留邮箱占用，不回收、不换号。限流只加退避，不降并发。
+                    if attempt < max_attempts:
+                        wait_s = _retry_delay_for_error(retry_delay, err)
+                        kind = "限流退避" if _is_rate_limit_registration_error(err) else "失败"
+                        log_logger.warning(
+                            f"[Job {job_id}] 第 {attempt}/{max_attempts} 次{kind}，{wait_s:.1f}s 后用原邮箱重试"
+                            f"（{email_to_handle}，剩余 {max_attempts - attempt} 次）: {err}"
+                        )
+                        if wait_s > 0:
+                            time.sleep(wait_s)
+                        continue
+
                     _release_unconsumed_job_email(email_to_handle, str(err))
-                log_logger.error(f"[Job {job_id}] 失败: {err}")
-    except StopRequested as exc:
-        _release_unconsumed_job_email(email, str(exc))
-        log_logger.warning(f"[Job {job_id}] 已停止: {exc}")
-        db.update_job(
-            job_id,
-            status="stopped",
-            error="用户手动停止",
-            completed_at=datetime.now().isoformat(timespec="seconds"),
-        )
-    except Exception as exc:
-        err_text = f"{type(exc).__name__}: {exc}"
-        if _should_disable_failed_registration_email(err_text):
-            _disable_job_email(email, err_text)
-        else:
-            _release_unconsumed_job_email(email, err_text)
-        if is_stop_requested(job_id):
-            log_logger.warning(f"[Job {job_id}] 停止中捕获异常，按停止处理: {type(exc).__name__}: {exc}")
-            db.update_job(
-                job_id,
-                status="stopped",
-                error="用户手动停止",
-                completed_at=datetime.now().isoformat(timespec="seconds"),
-            )
-            return
-        log_logger.exception(f"[Job {job_id}] 异常")
-        db.update_job(
-            job_id,
-            status="failed",
-            error=f"{type(exc).__name__}: {exc}"[:500],
-            completed_at=datetime.now().isoformat(timespec="seconds"),
-        )
+                    db.update_job(
+                        job_id,
+                        status="failed",
+                        email=result_email or job_email,
+                        account_id=account_id,
+                        error=last_error,
+                        completed_at=beijing_now_iso(),
+                    )
+                    log_logger.error(
+                        f"[Job {job_id}] 失败（已达最大尝试 {max_attempts} 次，原邮箱={email_to_handle}）: {err}"
+                    )
+                    return
+
+                except StopRequested as exc:
+                    _release_unconsumed_job_email(job_email, str(exc))
+                    log_logger.warning(f"[Job {job_id}] 已停止: {exc}")
+                    db.update_job(
+                        job_id,
+                        status="stopped",
+                        error="用户手动停止",
+                        completed_at=beijing_now_iso(),
+                    )
+                    return
+                except Exception as exc:
+                    err_text = f"{type(exc).__name__}: {exc}"
+                    last_error = err_text[:500]
+                    email_to_handle = str(job_email or "").strip()
+                    if _should_disable_failed_registration_email(err_text):
+                        _disable_job_email(email_to_handle, err_text)
+                        if is_stop_requested(job_id):
+                            db.update_job(
+                                job_id,
+                                status="stopped",
+                                error="用户手动停止",
+                                completed_at=beijing_now_iso(),
+                            )
+                            return
+                        db.update_job(
+                            job_id,
+                            status="failed",
+                            email=job_email,
+                            error=last_error,
+                            completed_at=beijing_now_iso(),
+                        )
+                        log_logger.error(
+                            f"[Job {job_id}] 异常且邮箱需停用，不再用原邮箱重试: {err_text}"
+                        )
+                        return
+                    if is_stop_requested(job_id):
+                        _release_unconsumed_job_email(email_to_handle, err_text)
+                        log_logger.warning(
+                            f"[Job {job_id}] 停止中捕获异常，按停止处理: {type(exc).__name__}: {exc}"
+                        )
+                        db.update_job(
+                            job_id,
+                            status="stopped",
+                            error="用户手动停止",
+                            completed_at=beijing_now_iso(),
+                        )
+                        return
+                    log_logger.exception(
+                        f"[Job {job_id}] 第 {attempt}/{max_attempts} 次异常: {type(exc).__name__}: {exc}"
+                    )
+                    if attempt < max_attempts:
+                        wait_s = _retry_delay_for_error(retry_delay, err_text)
+                        log_logger.warning(
+                            f"[Job {job_id}] {wait_s:.1f}s 后用原邮箱重试"
+                            f"（{email_to_handle}，剩余 {max_attempts - attempt} 次）"
+                        )
+                        if wait_s > 0:
+                            time.sleep(wait_s)
+                        continue
+                    _release_unconsumed_job_email(email_to_handle, err_text)
+                    db.update_job(
+                        job_id,
+                        status="failed",
+                        email=job_email,
+                        account_id=last_account_id,
+                        error=last_error,
+                        completed_at=beijing_now_iso(),
+                    )
+                    log_logger.error(
+                        f"[Job {job_id}] 最终失败（已达最大尝试 {max_attempts} 次，原邮箱={email_to_handle}）: {last_error}"
+                    )
+                    return
     finally:
         _deactivate_job(job_id)
 
@@ -383,14 +752,14 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
         _deactivate_job(job_id)
         return
 
-    db.update_job(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
+    db.update_job(job_id, status="running", started_at=beijing_now_iso())
     try:
         result = codex_retry_service.run_worker(
             email,
             clear_log=False,
             target_log_path=log_file,
         )
-        now_iso = datetime.now().isoformat(timespec="seconds")
+        now_iso = beijing_now_iso()
         if is_stop_requested(job_id) or result.get("status") == "stopped":
             db.update_job(job_id, status="stopped", email=email, account_id=account_id, error=str(result.get("message") or "用户手动停止")[:500], completed_at=now_iso)
         elif result.get("ok"):
@@ -415,7 +784,7 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
             job_id,
             status="failed",
             error=f"{type(exc).__name__}: {exc}"[:500],
-            completed_at=datetime.now().isoformat(timespec="seconds"),
+            completed_at=beijing_now_iso(),
         )
         codex_retry_service.release(email)
         logger.exception("[Job %s] Codex 补跑异常", job_id)
@@ -454,7 +823,7 @@ def submit_registration(count: int = 1, email_source: str | None = None, workers
                     int(job["id"]),
                     status="failed",
                     error=f"队列提交失败：{type(exc).__name__}: {exc}"[:500],
-                    completed_at=datetime.now().isoformat(timespec="seconds"),
+                    completed_at=beijing_now_iso(),
                 )
                 logger.exception("[Service] 注册任务 #%s 提交线程池失败", job["id"])
             jobs.append(db.get_job(int(job["id"])) or job)
@@ -591,7 +960,7 @@ def retry_job(job_id: int, workers: int | None = None) -> dict:
             int(job["id"]),
             status="failed",
             error=f"队列提交失败：{type(exc).__name__}: {exc}"[:500],
-            completed_at=datetime.now().isoformat(timespec="seconds"),
+            completed_at=beijing_now_iso(),
         )
         logger.exception("[Service] 重试任务 #%s 提交线程池失败", job["id"])
         return {"ok": False, "error": "重试任务创建成功，但提交执行失败", "status": 500, "job": db.get_job(int(job["id"]))}
@@ -617,7 +986,7 @@ def cancel_pending_jobs() -> int:
     """
     jobs = db.list_jobs(limit=1000)
     cancelled = 0
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now_iso = beijing_now_iso()
     for job in jobs:
         if job.get("status") == "pending":
             db.update_job(
@@ -637,7 +1006,7 @@ def request_stop_job(job_id: int) -> dict:
     if not job:
         return {"ok": False, "error": "任务不存在", "status": 404}
     status = job.get("status")
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now_iso = beijing_now_iso()
     if status == "pending":
         db.update_job(job_id, status="cancelled", completed_at=now_iso, error="用户手动停止/取消排队")
         _append_job_log(job_id, "用户手动停止：任务尚未运行，已取消排队。")

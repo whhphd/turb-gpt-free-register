@@ -39,6 +39,18 @@ class BrowserSession:
     使用 curl_cffi 的 impersonate 功能绕过 Cloudflare TLS 指纹检测。
     """
 
+    @staticmethod
+    def _normalize_proxy_for_curl(proxy: str | None) -> str | None:
+        """把 SOCKS5 代理规范成 curl 更稳的 socks5h（远程 DNS）。"""
+        if proxy is None:
+            return None
+        text = str(proxy).strip()
+        if not text:
+            return text
+        if text.lower().startswith("socks5://"):
+            return "socks5h://" + text[len("socks5://"):]
+        return text
+
     def __init__(self, proxy: str = None, *, detect_exit_geo: bool = True):
         """
         初始化会话。
@@ -57,6 +69,10 @@ class BrowserSession:
             self.proxy = pick_proxy()
         else:
             self.proxy = proxy
+        # curl/libcurl：socks5:// 走本地 DNS，经 1024proxy 等住宅 SOCKS 时
+        # 访问 auth.openai.com 易出现 WRONG_VERSION_NUMBER / Broken pipe；
+        # socks5h:// 由代理端解析 DNS，实测更稳。Chromium/Cloak 仍可用 socks5://。
+        self.proxy = self._normalize_proxy_for_curl(self.proxy)
 
         # 生成设备ID（oai-did），整个注册流程复用
         self.device_id = str(uuid.uuid4())
@@ -203,11 +219,17 @@ class BrowserSession:
         except Exception:
             return {}
 
+        # 轮转代理（rotate）每次连接 IP 都可能变，不能按 proxy URL 缓存，否则会一直复用首次出口画像。
+        proxy_l = str(self.proxy or "").lower()
+        is_rotating = any(x in proxy_l for x in ("rotate", "rotating", "sticky=false", "session-"))
         cache_key = self.proxy or "__direct__"
-        with _GEO_CACHE_LOCK:
-            cached = _GEO_CACHE.get(cache_key)
-            if cached is not None:
-                return dict(cached)
+        if not is_rotating:
+            with _GEO_CACHE_LOCK:
+                cached = _GEO_CACHE.get(cache_key)
+                if cached is not None:
+                    return dict(cached)
+        else:
+            cache_key = f"{self.proxy}|{self.device_id}"
 
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         for url in endpoints:
