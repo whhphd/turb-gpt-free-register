@@ -3,8 +3,9 @@
 
 支持格式（---- 或 ==== 分隔，优先）：
   1) 邮箱----取码地址[----accessToken][----totp]
-  2) 邮箱----密码----2FA密钥[----accessToken]
-  3) 邮箱----密码----clientId----refreshToken[----accessToken][----totp]  (Outlook)
+  2) 邮箱----MFA密钥----取码地址[----accessToken]   ← 邮箱+2FA+接码（无登录密码）
+  3) 邮箱----密码----2FA密钥[----accessToken]
+  4) 邮箱----密码----clientId----refreshToken[----accessToken][----totp]  (Outlook)
 
 也兼容：
   - 竖线 | 分隔
@@ -128,7 +129,10 @@ def detect_import_kind(parts: list[str]) -> str:
         if _is_url(parts[1]):
             # email----url----token/totp
             return "generic_api"
-        if _looks_like_totp(parts[2]) and not _looks_like_client_id(parts[1]):
+        # email----MFA----取码地址（无登录密码，靠邮箱 OTP + 可选 TOTP）
+        if _looks_like_totp(parts[1]) and _is_url(parts[2]):
+            return "generic_api"
+        if _looks_like_totp(parts[2]) and not _looks_like_client_id(parts[1]) and not _is_url(parts[2]):
             return "password_totp"
         # email----password----clientId 缺 refresh → unknown
         return "unknown"
@@ -139,6 +143,9 @@ def detect_import_kind(parts: list[str]) -> str:
             return "outlook"
         # email----url----token----totp
         if _is_url(parts[1]):
+            return "generic_api"
+        # email----MFA----url----token
+        if _looks_like_totp(parts[1]) and _is_url(parts[2]):
             return "generic_api"
         # email----password----totp----token
         if _looks_like_totp(parts[2]):
@@ -161,8 +168,11 @@ def parse_import_account_line(line: str, *, preferred_source: str | None = None)
     else:
         kind = pref
         # 用户强制类型时做基本校验
-        if kind == "generic_api" and not _is_url(parts[1]) and len(parts) < 2:
-            return None
+        if kind == "generic_api":
+            # 允许 email----url 或 email----mfa----url
+            has_url = _is_url(parts[1]) or (len(parts) >= 3 and _is_url(parts[2]))
+            if not has_url:
+                return None
         if kind == "outlook" and len(parts) < 4:
             # 允许把 3 段当 password_totp 兜底
             if detect_import_kind(parts) == "password_totp":
@@ -179,17 +189,26 @@ def parse_import_account_line(line: str, *, preferred_source: str | None = None)
     rec: dict = {"email": email, "kind": kind}
 
     if kind == "generic_api":
-        if not _is_url(parts[1]):
+        # A) email----url[----token/totp][----totp]
+        # B) email----mfa----url[----accessToken]
+        if _is_url(parts[1]):
+            rec["code_url"] = parts[1].strip()
+            if len(parts) >= 3:
+                if _looks_like_totp(parts[2]) and len(parts) == 3:
+                    rec["totp_secret"] = normalize_totp_secret(parts[2])
+                else:
+                    rec["access_token"] = parts[2].strip()
+            if len(parts) >= 4:
+                rec["totp_secret"] = normalize_totp_secret(parts[3]) or parts[3].strip()
+        elif len(parts) >= 3 and _looks_like_totp(parts[1]) and _is_url(parts[2]):
+            rec["totp_secret"] = normalize_totp_secret(parts[1])
+            rec["code_url"] = parts[2].strip()
+            if len(parts) >= 4:
+                rec["access_token"] = parts[3].strip()
+        else:
             return None
-        rec["code_url"] = parts[1].strip()
-        # 可选 token / totp
-        if len(parts) >= 3:
-            if _looks_like_totp(parts[2]) and len(parts) == 3:
-                rec["totp_secret"] = normalize_totp_secret(parts[2])
-            else:
-                rec["access_token"] = parts[2].strip()
-        if len(parts) >= 4:
-            rec["totp_secret"] = normalize_totp_secret(parts[3]) or parts[3].strip()
+        if not rec.get("code_url"):
+            return None
         rec["source"] = "generic_api"
         return rec
 

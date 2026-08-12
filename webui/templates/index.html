@@ -1196,6 +1196,30 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap;
     }
     .pool-monitor-auto-log:empty::before { content: '暂无巡检日志'; color: #c0c4cc; }
+    .sogou-restock-log-section {
+      margin-top: 14px; padding-top: 14px; border-top: 1px solid #ebeef5;
+    }
+    .sogou-restock-log-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      margin-bottom: 8px;
+    }
+    .sogou-restock-log-head h3 {
+      margin: 0; color: #303133; font-size: 14px; font-weight: 600;
+    }
+    .sogou-restock-log-live {
+      display: inline-flex; align-items: center; gap: 6px; color: #67c23a; font-size: 12px;
+    }
+    .sogou-restock-log-live i {
+      width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: 0 0 auto;
+    }
+    .sogou-restock-log-live.is-paused { color: #909399; }
+    .sogou-restock-log-live.is-error { color: #f56c6c; }
+    .sogou-restock-log {
+      box-sizing: border-box; min-height: 132px; max-height: 280px; margin: 0; padding: 12px 14px;
+      overflow: auto; border: 1px solid #dcdfe6; border-radius: 6px; background: #f7f8fa;
+      color: #4b5563; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
     @media (max-width: 900px) {
       .pool-monitor-auto-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
@@ -2425,6 +2449,12 @@
       </svg>
       <span class="sidebar-item-label">Codex 授权</span>
     </button>
+    <button type="button" data-tab="pool-admin" class="sidebar-item">
+      <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 11v6c0 1.7 4 3 9 3s9-1.3 9-3v-6"/>
+      </svg>
+      <span class="sidebar-item-label">号池管理</span>
+    </button>
     <button type="button" data-tab="outlook" class="sidebar-item">
       <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><path d="M22 6l-10 7L2 6"/>
@@ -2813,16 +2843,50 @@
         <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexDownloadBulkCpaV2" disabled title="从 CPA auth-files 下载选中账号的真实 Codex JSON，并打包成 ZIP（可直接解压放入 CPA auth-dir）">从CPA下载</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexPushPoolV2" disabled title="把勾选的 Codex 授权凭证推送到 sub2api 号池（默认分组8 / 并发50，可在配置改）">推送号池</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCodexUploadPushPoolV2" title="手动上传 CPA 或 sub2api 格式 JSON，自动识别转换后按保存的号池配置推送（凭据不动，concurrency/分组等用配置覆盖）">上传推送号池</button>
-        <button type="button" class="jobs-tb-btn" id="btnCodexPoolMonitorScanV2" title="扫描 sub2api 号池 openai/oauth 账号，只处理本站匹配号；外渠道忽略">扫描号池状态</button>
         <input type="file" id="codexUploadPoolFilesV2" accept=".json,application/json" multiple hidden>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnCodexDeleteBulkV2" disabled title="删除选中的本地 Codex JSON 凭证文件">删除选中</button>
       </div>
-      <div class="pool-monitor-panel" id="poolMonitorPanelV2" hidden>
+      <div class="codex-table-v2-wrap">
+        <table class="codex-table-v2">
+          <colgroup>
+            <col class="col-check"><col class="col-email"><col class="col-plan"><col class="col-status">
+            <col class="col-account"><col class="col-time"><col class="col-time"><col class="col-actions">
+          </colgroup>
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="codexSelectAllV2" title="全选/取消全选当前页" disabled></th>
+              <th class="col-email">邮箱</th>
+              <th class="col-plan">Plan</th>
+              <th class="col-status">状态</th>
+              <th class="col-account">Account ID</th>
+              <th class="col-time">更新时间</th>
+              <th class="col-time">过期时间</th>
+              <th class="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody id="codexBodyV2"></tbody>
+        </table>
+      </div>
+      <div class="jobs-v2-pager" id="pager-codex-v2"></div>
+    </section>
+  </div>
+
+  <!-- ============ 号池管理 ============ -->
+  <div id="tab-pool-admin" class="hidden">
+    <h1 class="register-title">号池管理</h1>
+    <div class="acc-v2-btn-group" style="margin:0 0 14px;display:flex;gap:8px;flex-wrap:wrap">
+      <button type="button" class="jobs-tb-btn is-active" id="btnPoolAdminSubMonitor" data-pool-sub="monitor">号池巡视</button>
+      <button type="button" class="jobs-tb-btn" id="btnPoolAdminSubFinished" data-pool-sub="finished">成品号入池</button>
+      <button type="button" class="jobs-tb-btn" id="btnPoolAdminSubRestock" data-pool-sub="restock">自动补池</button>
+    </div>
+
+    <section id="poolAdminMonitorSection" aria-label="号池巡视">
+      <div class="pool-monitor-panel" id="poolMonitorPanelV2" style="display:block">
         <div class="pool-monitor-head">
           <h2>号池状态监控</h2>
           <span class="pool-monitor-meta" id="poolMonitorMetaV2">尚未扫描</span>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCodexPoolMonitorScanV2" title="扫描 sub2api 号池 openai/oauth 账号，只处理本站匹配号；外渠道忽略">扫描号池状态</button>
           <button type="button" class="jobs-tb-btn" id="btnPoolMonitorRescanV2" title="重新扫描号池">重新扫描</button>
-          <button type="button" class="jobs-tb-btn" id="btnPoolMonitorHideV2" title="收起面板">收起</button>
         </div>
         <div class="pool-monitor-auto" id="poolMonitorAutoV2">
           <label class="pm-auto-switch" title="开启后每 15 分钟：扫描 → 补跑≤10 → 删废；状态持久化">
@@ -2893,28 +2957,123 @@
           <div class="pool-monitor-empty" id="poolMonitorEmptyV2">点击「扫描号池状态」开始</div>
         </div>
       </div>
-      <div class="codex-table-v2-wrap">
-        <table class="codex-table-v2">
-          <colgroup>
-            <col class="col-check"><col class="col-email"><col class="col-plan"><col class="col-status">
-            <col class="col-account"><col class="col-time"><col class="col-time"><col class="col-actions">
-          </colgroup>
-          <thead>
-            <tr>
-              <th class="col-check"><input type="checkbox" id="codexSelectAllV2" title="全选/取消全选当前页" disabled></th>
-              <th class="col-email">邮箱</th>
-              <th class="col-plan">Plan</th>
-              <th class="col-status">状态</th>
-              <th class="col-account">Account ID</th>
-              <th class="col-time">更新时间</th>
-              <th class="col-time">过期时间</th>
-              <th class="col-actions">操作</th>
-            </tr>
-          </thead>
-          <tbody id="codexBodyV2"></tbody>
-        </table>
+    </section>
+
+    <section id="poolAdminRestockSection" class="hidden" aria-label="SogouEdu 自动补池">
+      <div class="pool-monitor-panel" style="display:block">
+        <div class="pool-monitor-head">
+          <h2>SogouEdu 自动补池</h2>
+          <span class="pool-monitor-meta" id="sogouRestockStatusV2">尚未加载</span>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSogouRestockRunV2">立即补池</button>
+          <button type="button" class="jobs-tb-btn" id="btnSogouRestockConnectionV2">测试 SogouEdu 连接</button>
+        </div>
+        <div class="pool-monitor-summary" id="sogouRestockSummaryV2">
+          <div class="pm-chip"><span>健康号数</span><strong id="sogouRestockHealthyV2">-</strong></div>
+          <div class="pm-chip"><span>号池总数</span><strong id="sogouRestockTotalV2">-</strong></div>
+          <div class="pm-chip is-good"><span>补池状态</span><strong id="sogouRestockOrderV2">无未完成订单</strong></div>
+          <div class="pm-chip"><span>SogouEdu 凭据</span><strong id="sogouRestockCredentialV2">未配置</strong></div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0">
+          <label class="fld">启用自动补池<input type="checkbox" id="sogouRestockEnabledV2"></label>
+          <label class="fld">监测分组 ID<input type="number" min="1" id="sogouRestockMonitorGroupV2"></label>
+          <label class="fld">推池分组 ID<input type="number" min="1" id="sogouRestockPushGroupV2"></label>
+          <label class="fld">购买产品<select id="sogouRestockProductV2"><option value="oauth_7d">OAuth 7 天</option><option value="oauth_30d">OAuth 30 天</option></select></label>
+          <label class="fld">最低健康库存<input type="number" min="0" id="sogouRestockMinV2"></label>
+          <label class="fld">目标健康库存<input type="number" min="0" id="sogouRestockTargetV2"></label>
+          <label class="fld">单次最大购买<input type="number" min="1" id="sogouRestockMaxOrderV2"></label>
+          <label class="fld">监测间隔（秒）<input type="number" min="1" id="sogouRestockMonitorIntervalV2"></label>
+          <label class="fld">订单轮询间隔（秒）<input type="number" min="1" id="sogouRestockOrderIntervalV2"></label>
+          <label class="fld">恢复轮询间隔（秒）<input type="number" min="1" id="sogouRestockRecoveryIntervalV2"></label>
+          <label class="fld">推池并发<input type="number" min="1" id="sogouRestockConcurrencyV2"></label>
+          <label class="fld">优先级<input type="number" id="sogouRestockPriorityV2"></label>
+          <label class="fld">负载因子<input type="number" min="1" id="sogouRestockLoadV2"></label>
+          <label class="fld">计费倍率<input type="number" min="0" step="0.1" id="sogouRestockRateV2"></label>
+          <label class="fld">过期自动暂停<input type="checkbox" id="sogouRestockPauseExpiredV2"></label>
+          <label class="fld" style="grid-column:1/-1">账号导入模型白名单（每行一个；留空表示全部模型）<textarea id="sogouRestockModelsV2" rows="3" placeholder="gpt-5.5\ngpt-5.4"></textarea></label>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSogouRestockSaveV2">保存补池配置</button>
+          <span class="pool-monitor-meta">健康统计包含手动补入账号；错误、不可调度和过期账号不计入。</span>
+        </div>
+        <div class="pool-monitor-table-wrap">
+          <table class="pool-monitor-table"><thead><tr><th>订单</th><th>产品</th><th>数量</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody id="sogouRestockOrdersBodyV2"></tbody></table>
+        </div>
+        <section class="sogou-restock-log-section" aria-labelledby="sogouRestockLogTitleV2">
+          <div class="sogou-restock-log-head">
+            <h3 id="sogouRestockLogTitleV2">最近日志</h3>
+            <span class="sogou-restock-log-live is-paused" id="sogouRestockLogStateV2"><i aria-hidden="true"></i><span>等待自动刷新</span></span>
+          </div>
+          <pre class="sogou-restock-log" id="sogouRestockLogsV2" role="log" aria-live="polite">暂无自动补池日志</pre>
+        </section>
       </div>
-      <div class="jobs-v2-pager" id="pager-codex-v2"></div>
+    </section>
+
+    <section id="poolAdminFinishedSection" class="hidden" aria-label="成品号入池">
+      <div class="pool-monitor-panel" style="display:block">
+        <div class="pool-monitor-head">
+          <h2>成品号入池</h2>
+          <span class="pool-monitor-meta">导入已注册素材 → 补跑 Codex → 推送号池（按批管理）</span>
+        </div>
+        <div style="display:grid;gap:10px;margin-bottom:12px">
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <label style="flex:1 1 220px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:#606266">
+              批次名称
+              <input id="fabBatchName" type="text" placeholder="例如：供应商A-0809" style="padding:8px 10px;border:1px solid #dcdfe6;border-radius:8px">
+            </label>
+            <label style="flex:1 1 220px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:#606266">
+              备注（售后用）
+              <input id="fabBatchNote" type="text" placeholder="采购渠道 / 订单号 / 联系人" style="padding:8px 10px;border:1px solid #dcdfe6;border-radius:8px">
+            </label>
+            <label style="width:120px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:#606266">
+              Codex 并发
+              <input id="fabCodexWorkers" type="number" min="1" max="16" value="3" style="padding:8px 10px;border:1px solid #dcdfe6;border-radius:8px">
+            </label>
+          </div>
+          <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#606266">
+            账号清单（支持 邮箱----取码 / 邮箱----MFA----取码 / 邮箱----密码----2FA / Outlook 等格式，每行一个）
+            <textarea id="fabBatchText" rows="10" placeholder="email----code_url&#10;email----MFA----code_url&#10;email----password----totp" style="padding:10px;border:1px solid #dcdfe6;border-radius:8px;font-family:ui-monospace,Consolas,monospace;font-size:12px;resize:vertical"></textarea>
+          </label>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#606266;cursor:pointer" title="勾选：Codex 成功后自动推 sub2api 号池；不勾选：只补跑 Codex，稍后在 Codex 授权页自行导出/推送">
+              <input type="checkbox" id="fabAutoPush" checked>
+              自动入池
+            </label>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnFabCreateRun">创建并开始</button>
+            <button type="button" class="jobs-tb-btn" id="btnFabRefresh">刷新批次列表</button>
+            <span class="pool-monitor-meta" id="fabHint">默认：导入 → Codex；勾选「自动入池」时再推号池</span>
+          </div>
+        </div>
+        <div class="pool-monitor-summary" id="fabSummaryBar" hidden>
+          <div class="pm-chip"><span>本批导入</span><strong id="fabSumImported">0</strong></div>
+          <div class="pm-chip is-good"><span>Plus</span><strong id="fabSumPlus">0</strong></div>
+          <div class="pm-chip is-good"><span>Codex 成功</span><strong id="fabSumCodexOk">0</strong></div>
+          <div class="pm-chip is-bad"><span>Codex 失败</span><strong id="fabSumCodexFail">0</strong></div>
+          <div class="pm-chip is-good"><span>入池成功</span><strong id="fabSumPoolOk">0</strong></div>
+          <div class="pm-chip is-bad"><span>入池失败</span><strong id="fabSumPoolFail">0</strong></div>
+        </div>
+        <div id="fabSummaryText" class="pool-monitor-meta" style="margin:8px 0 12px;font-size:13px;color:#303133"></div>
+        <div style="display:grid;grid-template-columns:minmax(240px,320px) 1fr;gap:12px">
+          <div>
+            <div class="pool-monitor-meta" style="margin-bottom:6px">历史批次</div>
+            <div id="fabBatchList" class="pool-monitor-auto-log" style="max-height:420px;min-height:200px"></div>
+          </div>
+          <div>
+            <div class="pool-monitor-meta" style="margin-bottom:6px">当前批次详情 / 日志</div>
+            <div id="fabBatchDetail" class="pool-monitor-auto-log" style="max-height:180px;min-height:100px;margin-bottom:8px"></div>
+            <div id="fabBatchLog" class="pool-monitor-auto-log" style="max-height:240px;min-height:120px"></div>
+            <div class="pool-monitor-table-wrap" style="margin-top:8px;max-height:280px">
+              <table class="pool-monitor-table">
+                <thead>
+                  <tr>
+                    <th>邮箱</th><th>导入</th><th>Codex</th><th>入池</th><th>Plan</th><th>说明</th>
+                  </tr>
+                </thead>
+                <tbody id="fabItemsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 
@@ -3023,7 +3182,8 @@
         <h3 id="outlookImportTitle">导入账号 / 邮箱素材</h3>
         <p>支持粘贴已有账号后到「账号」页手动补跑 Codex。常用两种：
           <br>① <code>邮箱----取码地址</code>
-          <br>② <code>邮箱----密码----2FA密钥</code>
+          <br>② <code>邮箱----MFA密钥----取码地址</code>
+          <br>③ <code>邮箱----密码----2FA密钥</code>
           <br>也兼容 Outlook 四段：邮箱----密码----clientId----refreshToken（---- / ==== / | 均可）
         </p>
       </div>
@@ -3037,7 +3197,7 @@
           <button type="button" class="outlook-v2-select-btn" id="importSourceV2Btn" aria-haspopup="listbox" aria-expanded="false">自动识别格式</button>
           <div class="outlook-v2-select-menu" role="listbox">
             <button type="button" class="outlook-v2-select-item is-active" data-value="auto" role="option">自动识别格式</button>
-            <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">邮箱----取码地址</button>
+            <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">邮箱----取码 / MFA----取码</button>
             <button type="button" class="outlook-v2-select-item" data-value="password_totp" role="option">邮箱----密码----2FA</button>
             <button type="button" class="outlook-v2-select-item" data-value="outlook" role="option">Outlook 邮箱池</button>
           </div>
@@ -3051,7 +3211,7 @@
       </label>
       <label class="outlook-import-field">
         <span>账号列表</span>
-        <textarea id="importTextV2" placeholder="邮箱----https://取码接口地址&#10;邮箱----密码----2FA密钥&#10;邮箱----密码----clientId----refreshToken"></textarea>
+        <textarea id="importTextV2" placeholder="邮箱----https://取码接口地址&#10;邮箱----MFA密钥----https://取码接口地址&#10;邮箱----密码----2FA密钥&#10;邮箱----密码----clientId----refreshToken"></textarea>
       </label>
     </div>
     <div class="outlook-import-foot">
@@ -3317,6 +3477,7 @@ const TAB_TITLES = {
   accounts: '账号',
   codex: 'Codex 授权',
   outlook: '邮箱池',
+  'pool-admin': '号池管理',
   config: '配置',
 };
 function setMobileTopbarTitle(tab) {
@@ -3332,23 +3493,31 @@ function setSidebarOpen(open) {
   }
 }
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','codex','outlook','config'];
+  const allowed = ['register','accounts','codex','pool-admin','outlook','config'];
   if (!allowed.includes(tab)) tab = 'register';
   $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
-  allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
+  allowed.forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) el.classList.toggle('hidden', t !== tab);
+  });
   setMobileTopbarTitle(tab);
   setSidebarOpen(false);
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
   if (tab === 'accounts') loadAccounts();
   if (tab === 'codex') {
     loadCodex();
+  }
+  if (tab === 'pool-admin') {
+    showPoolAdminSub(localStorage.getItem('gpt_pool_admin_sub') || 'monitor');
     loadPoolMonitorLast();
     resumePoolMonitorRepairIfAny();
     loadPoolMonitorAuto({ logs: true });
+    loadFinishedBatches();
   }
   if (tab === 'outlook') loadOutlook();
   if (tab === 'config') loadConfig();
   if (tab === 'register') refreshJobs();
+  syncSogouRestockLogPolling();
 }
 $$('nav button').forEach(b => b.addEventListener('click', () => activateTab(b.dataset.tab)));
 
@@ -7278,11 +7447,7 @@ async function codexUploadPushPoolOnFiles(ev) {
   bind('btnCodexDeleteBulkV2', codexDeleteBulk);
   bind('btnCodexPoolMonitorScanV2', () => scanPoolMonitor());
   bind('btnPoolMonitorRescanV2', () => scanPoolMonitor());
-  bind('btnPoolMonitorHideV2', () => {
-    const panel = $('#poolMonitorPanelV2');
-    if (panel) panel.hidden = true;
-    stopPoolMonitorAutoPoll();
-  });
+  // 号池巡视已迁到「号池管理」，面板常显
   bind('btnPmSelectActionableV2', selectActionablePoolMonitor);
   bind('btnPmRepairSelectedV2', repairPoolMonitorSelected);
   bind('btnPmMarkDeadSelectedV2', markDeadPoolMonitorSelected);
@@ -7292,6 +7457,347 @@ async function codexUploadPushPoolOnFiles(ev) {
   if (pmAutoCb) {
     pmAutoCb.addEventListener('change', () => setPoolMonitorAutoEnabled(!!pmAutoCb.checked));
   }
+
+  // ---- 号池管理子页 + 成品号入池 ----
+  let FAB_SELECTED_ID = '';
+  let FAB_POLL_TIMER = null;
+  function showPoolAdminSub(sub) {
+    const s = (sub === 'finished' || sub === 'restock') ? sub : 'monitor';
+    localStorage.setItem('gpt_pool_admin_sub', s);
+    const mon = $('#poolAdminMonitorSection');
+    const fin = $('#poolAdminFinishedSection');
+    const rst = $('#poolAdminRestockSection');
+    if (mon) mon.classList.toggle('hidden', s !== 'monitor');
+    if (fin) fin.classList.toggle('hidden', s !== 'finished');
+    if (rst) rst.classList.toggle('hidden', s !== 'restock');
+    const b1 = $('#btnPoolAdminSubMonitor');
+    const b2 = $('#btnPoolAdminSubFinished');
+    const b3 = $('#btnPoolAdminSubRestock');
+    if (b1) b1.classList.toggle('is-active', s === 'monitor');
+    if (b2) b2.classList.toggle('is-active', s === 'finished');
+    if (b3) b3.classList.toggle('is-active', s === 'restock');
+    if (s === 'finished') loadFinishedBatches();
+    if (s === 'restock') loadSogouRestock();
+    syncSogouRestockLogPolling();
+  }
+  bind('btnPoolAdminSubMonitor', () => showPoolAdminSub('monitor'));
+  bind('btnPoolAdminSubFinished', () => showPoolAdminSub('finished'));
+  bind('btnPoolAdminSubRestock', () => showPoolAdminSub('restock'));
+
+  function _sogouInput(id, value) {
+    const el = $(id);
+    if (el) el.value = value == null ? '' : String(value);
+  }
+  function renderSogouRestockStatus(status) {
+    const cfg = status && status.config || {};
+    const set = (id, value) => { const el = $(id); if (el) el.textContent = value == null ? '-' : String(value); };
+    const toggle = (id, value) => { const el = $(id); if (el) el.checked = !!value; };
+    toggle('#sogouRestockEnabledV2', cfg.enabled);
+    _sogouInput('#sogouRestockMonitorGroupV2', cfg.monitor_group_id);
+    _sogouInput('#sogouRestockPushGroupV2', cfg.push_group_id);
+    _sogouInput('#sogouRestockProductV2', cfg.product || 'oauth_7d');
+    _sogouInput('#sogouRestockMinV2', cfg.min_healthy);
+    _sogouInput('#sogouRestockTargetV2', cfg.target_healthy);
+    _sogouInput('#sogouRestockMaxOrderV2', cfg.max_purchase_per_order);
+    _sogouInput('#sogouRestockMonitorIntervalV2', cfg.monitor_interval_sec);
+    _sogouInput('#sogouRestockOrderIntervalV2', cfg.order_poll_interval_sec);
+    _sogouInput('#sogouRestockRecoveryIntervalV2', cfg.recovery_poll_interval_sec);
+    _sogouInput('#sogouRestockConcurrencyV2', cfg.concurrency);
+    _sogouInput('#sogouRestockPriorityV2', cfg.priority);
+    _sogouInput('#sogouRestockLoadV2', cfg.load_factor);
+    _sogouInput('#sogouRestockRateV2', cfg.rate_multiplier);
+    toggle('#sogouRestockPauseExpiredV2', cfg.auto_pause_on_expired);
+    _sogouInput('#sogouRestockModelsV2', (cfg.model_whitelist || []).join('\n'));
+    set('#sogouRestockStatusV2', cfg.enabled ? (status.running ? '自动补池运行中' : '自动补池已开启') : '自动补池关闭');
+    set('#sogouRestockCredentialV2', status.credentials_configured ? '已配置' : '未配置');
+    const order = status.current_order;
+    set('#sogouRestockOrderV2', order ? `${order.order_id || '创建中'} · ${order.status || 'pending'}` : '无未完成订单');
+    const last = status.last_run || {};
+    const inventory = status.inventory || {};
+    set('#sogouRestockHealthyV2', inventory.healthy ?? last.healthy);
+    set('#sogouRestockTotalV2', inventory.total ?? last.total);
+  }
+  function renderSogouRestockOrders(items) {
+    const body = $('#sogouRestockOrdersBodyV2');
+    if (!body) return;
+    body.innerHTML = (items || []).slice().reverse().map(row => `<tr>
+      <td>${esc(row.order_id || row.idempotency_key || '-')}</td><td>${esc(row.product || '-')}</td>
+      <td>${esc(row.quantity == null ? '-' : row.quantity)}</td><td>${esc(row.status || '-')}</td>
+      <td>${esc(row.updated_at || row.created_at || '-')}</td><td>${esc(row.last_error || '')}</td>
+    </tr>`).join('') || '<tr><td colspan="6" style="color:#c0c4cc">暂无订单记录</td></tr>';
+  }
+  const SOGOU_RESTOCK_LOG_INTERVAL_MS = 2000;
+  let SOGOU_RESTOCK_LOG_TIMER = null;
+  let SOGOU_RESTOCK_LOG_LOADING = false;
+  let SOGOU_RESTOCK_LOG_SIGNATURE = '';
+
+  function isSogouRestockLogVisible() {
+    const tab = $('#tab-pool-admin');
+    const section = $('#poolAdminRestockSection');
+    return document.visibilityState === 'visible' && !!tab && !tab.classList.contains('hidden') &&
+      !!section && !section.classList.contains('hidden');
+  }
+  function setSogouRestockLogState(text, state = '') {
+    const el = $('#sogouRestockLogStateV2');
+    if (!el) return;
+    el.classList.toggle('is-paused', state === 'paused');
+    el.classList.toggle('is-error', state === 'error');
+    const label = el.querySelector('span');
+    if (label) label.textContent = text;
+  }
+  function formatSogouRestockLogTime(value) {
+    if (!value) return '-';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return String(value);
+    return parsed.toLocaleString('zh-CN', { hour12: false });
+  }
+  function formatSogouRestockLog(row) {
+    const actionLabels = {
+      inventory_ok: '库存充足', ordered: '订单已创建', waiting: '等待订单', taken: '取货完成',
+      pushed: '推池完成', push_retry: '推池待重试', push_waiting: '等待有效账号', order_failed: '订单失败',
+    };
+    const parts = [`[${formatSogouRestockLogTime(row.finished_at || row.started_at)}]`];
+    parts.push(row.ok === false ? '失败' : (row.skipped ? '跳过' : '成功'));
+    const action = actionLabels[row.action] || row.action;
+    if (action) parts.push(action);
+    if (row.reason) parts.push(`原因 ${row.reason}`);
+    if (row.healthy != null || row.total != null) parts.push(`健康 ${row.healthy ?? '-'} / 总数 ${row.total ?? '-'}`);
+    if (row.quantity != null) parts.push(`计划补入 ${row.quantity}`);
+    if (row.order_id) parts.push(`订单 ${row.order_id}`);
+    if (row.status) parts.push(`状态 ${row.status}`);
+    const recovery = row.recovery || {};
+    if (recovery.repaired || recovery.recreated) parts.push(`修复 ${recovery.repaired || 0} / 重建 ${recovery.recreated || 0}`);
+    if (row.error) parts.push(`错误 ${row.error}`);
+    return parts.join(' · ');
+  }
+  function renderSogouRestockLogs(items) {
+    const logEl = $('#sogouRestockLogsV2');
+    if (!logEl) return;
+    const rows = Array.isArray(items) ? items : [];
+    const signature = JSON.stringify(rows);
+    if (signature === SOGOU_RESTOCK_LOG_SIGNATURE) return;
+    const nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 28;
+    SOGOU_RESTOCK_LOG_SIGNATURE = signature;
+    logEl.textContent = rows.length ? rows.map(formatSogouRestockLog).join('\n') : '暂无自动补池日志';
+    if (nearBottom || rows.length <= 1) requestAnimationFrame(() => { logEl.scrollTop = logEl.scrollHeight; });
+  }
+  async function loadSogouRestockLogs({ notify = false } = {}) {
+    if (SOGOU_RESTOCK_LOG_LOADING) return;
+    SOGOU_RESTOCK_LOG_LOADING = true;
+    try {
+      const logs = await api('/api/pool-admin/sogou-restock/logs?lines=100');
+      renderSogouRestockLogs(logs.items || []);
+      setSogouRestockLogState(`实时更新 · ${new Date().toLocaleTimeString('zh-CN', {hour12:false})}`);
+    } catch (err) {
+      setSogouRestockLogState(`刷新失败 · ${err.message}`, 'error');
+      if (notify) showToast('加载自动补池日志失败: ' + err.message);
+    } finally {
+      SOGOU_RESTOCK_LOG_LOADING = false;
+    }
+  }
+  function stopSogouRestockLogPolling() {
+    if (SOGOU_RESTOCK_LOG_TIMER) clearInterval(SOGOU_RESTOCK_LOG_TIMER);
+    SOGOU_RESTOCK_LOG_TIMER = null;
+    setSogouRestockLogState('自动刷新已暂停', 'paused');
+  }
+  function syncSogouRestockLogPolling() {
+    if (!isSogouRestockLogVisible()) {
+      stopSogouRestockLogPolling();
+      return;
+    }
+    if (!SOGOU_RESTOCK_LOG_TIMER) {
+      loadSogouRestockLogs();
+      SOGOU_RESTOCK_LOG_TIMER = setInterval(loadSogouRestockLogs, SOGOU_RESTOCK_LOG_INTERVAL_MS);
+    }
+  }
+  async function loadSogouRestock() {
+    try {
+      const [status, orders] = await Promise.all([
+        api('/api/pool-admin/sogou-restock'),
+        api('/api/pool-admin/sogou-restock/orders?limit=30'),
+      ]);
+      renderSogouRestockStatus(status);
+      renderSogouRestockOrders(orders.items || []);
+    } catch (err) {
+      showToast('加载自动补池失败: ' + err.message);
+    }
+  }
+  function sogouRestockConfigPayload() {
+    const value = id => ($(id) && $(id).value) || '';
+    const num = id => Number(value(id));
+    return {
+      enabled: !!($('#sogouRestockEnabledV2') && $('#sogouRestockEnabledV2').checked),
+      monitor_group_id: num('#sogouRestockMonitorGroupV2'), push_group_id: num('#sogouRestockPushGroupV2'),
+      product: value('#sogouRestockProductV2'), min_healthy: num('#sogouRestockMinV2'), target_healthy: num('#sogouRestockTargetV2'),
+      max_purchase_per_order: num('#sogouRestockMaxOrderV2'), monitor_interval_sec: num('#sogouRestockMonitorIntervalV2'),
+      order_poll_interval_sec: num('#sogouRestockOrderIntervalV2'), recovery_poll_interval_sec: num('#sogouRestockRecoveryIntervalV2'),
+      concurrency: num('#sogouRestockConcurrencyV2'), priority: num('#sogouRestockPriorityV2'), load_factor: num('#sogouRestockLoadV2'),
+      rate_multiplier: num('#sogouRestockRateV2'), auto_pause_on_expired: !!($('#sogouRestockPauseExpiredV2') && $('#sogouRestockPauseExpiredV2').checked),
+      model_whitelist: value('#sogouRestockModelsV2').split(/\r?\n|,/).map(x => x.trim()).filter(Boolean),
+    };
+  }
+  async function saveSogouRestock() {
+    const btn = $('#btnSogouRestockSaveV2');
+    if (btn) btn.disabled = true;
+    try {
+      await api('/api/pool-admin/sogou-restock/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(sogouRestockConfigPayload()) });
+      showToast('自动补池配置已保存');
+      await loadSogouRestock();
+    } catch (err) { showToast('保存自动补池配置失败: ' + err.message); }
+    finally { if (btn) btn.disabled = false; }
+  }
+  async function runSogouRestock() {
+    const btn = $('#btnSogouRestockRunV2');
+    if (btn) btn.disabled = true;
+    try { const r = await api('/api/pool-admin/sogou-restock/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); showToast(r.error || '自动补池执行完成'); await loadSogouRestock(); await loadSogouRestockLogs(); }
+    catch (err) { showToast('自动补池执行失败: ' + err.message); }
+    finally { if (btn) btn.disabled = false; }
+  }
+  async function testSogouRestockConnection() {
+    try { const r = await api('/api/pool-admin/sogou-restock/test-connection', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); showToast(r.message || '连接成功'); }
+    catch (err) { showToast('SogouEdu 连接失败: ' + err.message); }
+  }
+  bind('btnSogouRestockSaveV2', saveSogouRestock);
+  bind('btnSogouRestockRunV2', runSogouRestock);
+  bind('btnSogouRestockConnectionV2', testSogouRestockConnection);
+  document.addEventListener('visibilitychange', syncSogouRestockLogPolling);
+  window.addEventListener('pagehide', stopSogouRestockLogPolling);
+
+  function _fabStatusLabel(st) {
+    const m = { pending:'待运行', running:'运行中', done:'完成', partial:'部分成功', failed:'失败' };
+    return m[st] || st || '-';
+  }
+  function renderFabBatchList(items) {
+    const box = $('#fabBatchList');
+    if (!box) return;
+    if (!items || !items.length) {
+      box.innerHTML = '<div style="color:#c0c4cc">暂无批次</div>';
+      return;
+    }
+    box.innerHTML = items.map(b => {
+      const active = b.id === FAB_SELECTED_ID ? 'background:#eef2ff;' : '';
+      const sum = b.summary || {};
+      return `<div data-fab-id="${esc(b.id)}" style="cursor:pointer;padding:8px;border-bottom:1px solid #ebeef5;${active}">
+        <div style="font-weight:600;color:#303133">${esc(b.name || b.id)}</div>
+        <div style="font-size:12px;color:#909399">${esc(_fabStatusLabel(b.status))} · ${esc(b.created_at || '')}</div>
+        <div style="font-size:12px;color:#606266">导入${sum.imported||0} Codex${sum.codex_success||0} 入池${sum.pool_pushed||0}</div>
+      </div>`;
+    }).join('');
+    box.querySelectorAll('[data-fab-id]').forEach(el => {
+      el.addEventListener('click', () => {
+        FAB_SELECTED_ID = el.getAttribute('data-fab-id') || '';
+        loadFinishedBatchDetail(FAB_SELECTED_ID);
+        renderFabBatchList(items);
+      });
+    });
+  }
+  function renderFabDetail(batch) {
+    const detail = $('#fabBatchDetail');
+    const logBox = $('#fabBatchLog');
+    const body = $('#fabItemsBody');
+    const bar = $('#fabSummaryBar');
+    const sumText = $('#fabSummaryText');
+    if (!batch) {
+      if (detail) detail.textContent = '选择左侧批次查看详情';
+      if (logBox) logBox.textContent = '';
+      if (body) body.innerHTML = '';
+      if (bar) bar.hidden = true;
+      if (sumText) sumText.textContent = '';
+      return;
+    }
+    const s = batch.summary || {};
+    if (bar) {
+      bar.hidden = false;
+      const set = (id, v) => { const el = $(id); if (el) el.textContent = String(v ?? 0); };
+      set('#fabSumImported', s.imported);
+      set('#fabSumPlus', s.plus);
+      set('#fabSumCodexOk', s.codex_success);
+      set('#fabSumCodexFail', s.codex_failed);
+      set('#fabSumPoolOk', s.pool_pushed);
+      set('#fabSumPoolFail', s.pool_failed);
+    }
+    if (sumText) sumText.textContent = batch.summary_text || '';
+    if (detail) {
+      const pushLabel = (batch.auto_push === false) ? '否（仅 Codex）' : '是';
+      detail.innerHTML = [
+        `<div><b>${esc(batch.name || '')}</b> <span class="mono">${esc(batch.id || '')}</span></div>`,
+        `<div>状态：${esc(_fabStatusLabel(batch.status))} / 阶段：${esc(batch.phase || '-')}</div>`,
+        `<div>自动入池：${esc(pushLabel)}</div>`,
+        `<div>备注：${esc(batch.note || '-')}</div>`,
+        batch.error ? `<div style="color:#f56c6c">错误：${esc(batch.error)}</div>` : '',
+      ].join('');
+    }
+    if (logBox) {
+      const logs = batch.logs || batch.log_tail || [];
+      logBox.innerHTML = logs.length
+        ? logs.map(l => `<div>${esc(l)}</div>`).join('')
+        : '<div style="color:#c0c4cc">暂无日志</div>';
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+    if (body) {
+      const items = batch.items || [];
+      body.innerHTML = items.map(it => `<tr>
+        <td>${esc(it.email || '')}</td>
+        <td>${esc(it.import_status || '')}</td>
+        <td>${esc(it.codex_status || '')}</td>
+        <td>${esc(it.pool_status || '')}</td>
+        <td>${esc(it.plan || (it.is_plus ? 'plus?' : ''))}</td>
+        <td>${esc([it.codex_message, it.pool_message, it.import_reason].filter(Boolean).join(' | ').slice(0,120))}</td>
+      </tr>`).join('') || '<tr><td colspan="6" style="color:#c0c4cc">暂无明细</td></tr>';
+    }
+    // 运行中自动刷新
+    if (batch.status === 'running' || batch.status === 'pending') {
+      if (FAB_POLL_TIMER) clearTimeout(FAB_POLL_TIMER);
+      FAB_POLL_TIMER = setTimeout(() => loadFinishedBatchDetail(batch.id), 3000);
+    }
+  }
+  async function loadFinishedBatches() {
+    try {
+      const r = await api('/api/pool-admin/batches?limit=50');
+      const items = r.items || [];
+      if (!FAB_SELECTED_ID && items[0]) FAB_SELECTED_ID = items[0].id;
+      renderFabBatchList(items);
+      if (FAB_SELECTED_ID) await loadFinishedBatchDetail(FAB_SELECTED_ID);
+    } catch (err) {
+      showToast('加载批次失败: ' + err.message);
+    }
+  }
+  async function loadFinishedBatchDetail(id) {
+    if (!id) return;
+    try {
+      const r = await api('/api/pool-admin/batches/' + encodeURIComponent(id));
+      renderFabDetail(r.batch || null);
+    } catch (err) {
+      showToast('加载批次详情失败: ' + err.message);
+    }
+  }
+  async function createFinishedBatchAndRun() {
+    const name = ($('#fabBatchName') && $('#fabBatchName').value || '').trim();
+    const note = ($('#fabBatchNote') && $('#fabBatchNote').value || '').trim();
+    const text = ($('#fabBatchText') && $('#fabBatchText').value || '');
+    const workers = Number(($('#fabCodexWorkers') && $('#fabCodexWorkers').value) || 3);
+    const autoPush = !($('#fabAutoPush') && !$('#fabAutoPush').checked);
+    if (!text.trim()) { showToast('请粘贴账号清单'); return; }
+    const btn = $('#btnFabCreateRun');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api('/api/pool-admin/batches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, note, text, auto_run: true, auto_push: autoPush, codex_workers: workers }),
+      });
+      FAB_SELECTED_ID = (r.batch && r.batch.id) || '';
+      if ($('#fabBatchText')) $('#fabBatchText').value = '';
+      showToast(autoPush ? '批次已创建并开始（含自动入池）' : '批次已创建并开始（仅 Codex，不入池）');
+      await loadFinishedBatches();
+    } catch (err) {
+      showToast('创建失败: ' + err.message);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+  bind('btnFabCreateRun', createFinishedBatchAndRun);
+  bind('btnFabRefresh', loadFinishedBatches);
 
   // Excel 式列筛选：展开/勾选
   const excelFilters = document.getElementById('codexExcelFiltersV2');
@@ -7408,6 +7914,9 @@ function smsConfigSectionForKey(key) {
 }
 
 function codexConfigSectionForKey(key) {
+  if (key.startsWith('SOGOUEDU_') || key === 'SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED') {
+    return ['SogouEdu 补池', 'SogouEdu 购号 API 连接参数；自动补池业务参数在「号池管理 → 自动补池」单独配置'];
+  }
   if (['CODEX_OAUTH_DRIVER','CODEX_AUTH_URL_SOURCE'].includes(key)) {
     return ['基础配置', 'Codex 授权驱动和授权地址来源配置'];
   }

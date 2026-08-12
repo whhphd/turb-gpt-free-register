@@ -62,6 +62,17 @@ SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED: bool = True
 
 
 # ============================================================
+# SogouEdu 自动补池（用户名/密码只从 .env 读取）
+# ============================================================
+
+SOGOUEDU_API_BASE: str = "https://sogouedu.cc"
+SOGOUEDU_USERNAME: str = ""
+SOGOUEDU_PASSWORD: str = ""
+SOGOUEDU_API_TIMEOUT: int = 30
+SOGOUEDU_MAX_RETRIES: int = 2
+
+
+# ============================================================
 # Codex OAuth 授权对接 sub2
 # 当 config.codex.CODEX_AUTH_URL_SOURCE="sub2" 时使用：
 #   1) 从 sub2 获取 Codex 授权链接
@@ -110,6 +121,11 @@ apply_env_overrides(globals(), {
     'SUB2API_POOL_RATE_MULTIPLIER': 'float',
     'SUB2API_POOL_BATCH_SIZE': 'int',
     'SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED': 'bool',
+    'SOGOUEDU_API_BASE': 'str',
+    'SOGOUEDU_USERNAME': 'str',
+    'SOGOUEDU_PASSWORD': 'str',
+    'SOGOUEDU_API_TIMEOUT': 'int',
+    'SOGOUEDU_MAX_RETRIES': 'int',
     'SUB2_CODEX_API_BASE': 'str',
     'SUB2_CODEX_AUTH_URL_PATH': 'str',
     'SUB2_CODEX_CALLBACK_PATH': 'str',

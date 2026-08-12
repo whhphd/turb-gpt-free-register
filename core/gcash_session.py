@@ -502,26 +502,47 @@ def _owner_loop(sess: dict[str, Any], cmd_q: queue.Queue) -> None:
         if driver_mode not in ("cloak", "cloakbrowser"):
             raise RuntimeError(f"GCash 提链需要 REGISTRATION_DRIVER=cloak，当前={driver_mode!r}")
 
-        from core.registration_service import _prepare_registration_args
-        from core.profile_utils import generate_random_birthday
-        from core.cloakbrowser_registration import run_cloak_registration
+        # 第一步与普通注册完全相同：走 registration_service.execute_registration
+        # （含同一套失败重试 / 废号停用 / 限流退避），仅 keep_browser + skip_codex。
+        from core.registration_service import execute_registration
 
         with _LOCK:
-            _append_log(sess, "领取邮箱并开始 Cloak 注册（keep_browser + skip_codex）…")
-        email, name, _ = _prepare_registration_args()
-        birthday = generate_random_birthday()
-        with _LOCK:
-            sess["email"] = email
-            sess["message"] = f"正在注册 {email}"
-            _append_log(sess, f"邮箱={email} name={name}")
+            _append_log(
+                sess,
+                "调用普通注册流程（execute_registration，keep_browser + skip_codex，含自动重试）…",
+            )
+            sess["message"] = "正在注册（普通注册流程）"
 
-        result = run_cloak_registration(
-            email=email,
-            name=name or "User",
-            birthday=birthday,
+        def _gcash_log(line: str) -> None:
+            with _LOCK:
+                _append_log(sess, line)
+                # 同步邮箱到会话，方便 UI 展示重试中的号
+                if "邮箱=" in line or "固定使用邮箱:" in line or "本任务固定使用邮箱:" in line:
+                    pass
+                if "固定使用邮箱:" in line:
+                    try:
+                        em = line.split("固定使用邮箱:", 1)[1].split("（", 1)[0].strip()
+                        if em:
+                            sess["email"] = em
+                            sess["message"] = f"正在注册 {em}"
+                    except Exception:
+                        pass
+                elif "开始注册（第" in line and "邮箱=" in line:
+                    try:
+                        em = line.split("邮箱=", 1)[1].split("，", 1)[0].strip()
+                        if em:
+                            sess["email"] = em
+                            sess["message"] = f"正在注册 {em}"
+                    except Exception:
+                        pass
+
+        result = execute_registration(
             keep_browser=True,
             skip_codex=True,
+            log_fn=_gcash_log,
+            should_stop=lambda: bool(sess.get("abort")),
         )
+        email = (result or {}).get("email") if isinstance(result, dict) else None
         if not isinstance(result, dict) or not result.get("success"):
             err = (result or {}).get("error") if isinstance(result, dict) else "unknown"
             drv = result.get("driver") if isinstance(result, dict) else None
@@ -530,7 +551,11 @@ def _owner_loop(sess: dict[str, Any], cmd_q: queue.Queue) -> None:
                     drv.quit()
                 except Exception:
                     pass
-            raise RuntimeError(str(err or "注册失败"))
+            attempts = (result or {}).get("attempts") if isinstance(result, dict) else None
+            raise RuntimeError(
+                f"{err or '注册失败'}"
+                + (f"（已尝试 {attempts} 次）" if attempts else "")
+            )
 
         driver = result.get("driver")
         with _LOCK:
@@ -559,7 +584,8 @@ def _owner_loop(sess: dict[str, Any], cmd_q: queue.Queue) -> None:
             sess["error"] = ""
             _append_log(
                 sess,
-                f"注册成功 account_id={sess.get('account_id')} AT_len={len(str(sess.get('access_token') or ''))}",
+                f"注册成功 account_id={sess.get('account_id')} AT_len={len(str(sess.get('access_token') or ''))}"
+                f" attempts={result.get('attempts')}",
             )
 
         # 命令循环（同一线程操作 Playwright）

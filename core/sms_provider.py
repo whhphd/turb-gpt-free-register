@@ -125,7 +125,7 @@ _DELIVERY_EVENTS: dict[str, list[dict]] = {}
 # activation_id -> 已记账 outcome（防 timeout + send_reject 双计）
 _DELIVERY_BY_AID: dict[str, str] = {}
 # 全局最近 N 次发送/投递结果（约 10 账号×10 次；过大则老经验淡出慢）
-_DELIVERY_MAX_EVENTS = 100
+_DELIVERY_MAX_EVENTS = 1000
 # 兼容旧名：时间窗已废弃，仅作文档/迁移参考
 _DELIVERY_WINDOW_SEC = 0
 # 槽位至少 N 次样本才用槽位级「到码率」微调；连跪惩罚 n≥1 即可
@@ -697,6 +697,23 @@ def _cfg_max_price() -> float:
 def _cfg_min_price() -> float:
     raw = str(getattr(_cfg, "SMS_MIN_PRICE", "") or "").strip()
     return _safe_float(raw, 0.0) if raw else 0.0
+
+
+def _cfg_force_slot() -> tuple[str, str] | None:
+    """临时强制槽位：SMS_FORCE_SLOT=country:provider_id（如 12:3209）。测完清空。"""
+    raw = str(getattr(_cfg, "SMS_FORCE_SLOT", "") or "").strip()
+    if not raw:
+        return None
+    # 兼容 12:3209 / 12/3209 / 12,3209
+    for sep in (":", "/", ",", "|"):
+        if sep in raw:
+            left, right = raw.split(sep, 1)
+            cty = left.strip()
+            pid = right.strip()
+            if cty and pid:
+                return cty, pid
+            break
+    return None
 
 
 def _cfg_min_stock() -> int:
@@ -2635,6 +2652,68 @@ def acquire_number(
         svc = str(service or _cfg.SMS_SERVICE or "").strip()
         if not svc:
             raise SmsProviderError(f"{label} service 不能为空：请填写 SMS_SERVICE（OpenAI 用 dr）")
+
+        # ---- 临时强制槽位（测 provider 用）：跳过全部选号逻辑 ----
+        force = _cfg_force_slot()
+        if force:
+            f_cty, f_pid = force
+            # 显式传入 country 时仍允许覆盖国码；provider 固定
+            cty = str(country or "").strip() or f_cty
+            pid = f_pid
+            params = {
+                "action": "getNumber",
+                "service": svc,
+                "country": cty,
+                "providerIds": pid,
+            }
+            # 强制档不吃全局 SMS_MIN_PRICE（否则 0.004 会被 minPrice=0.05 卡死）
+            # maxPrice 给小宽松上限；仍受 SMS_MAX_PRICE 硬顶
+            user_cap = _cfg_max_price()
+            force_max = 0.05
+            if user_cap > 0:
+                force_max = min(force_max, user_cap)
+            if force_max > 0:
+                params["maxPrice"] = f"{force_max:.4f}".rstrip("0").rstrip(".")
+            logger.warning(
+                "[SMS:%s] ⚠ 临时强制槽位 SMS_FORCE_SLOT=%s:%s → 只用 country=%s provider=%s "
+                "（已跳过 Top/权重/分桶/换槽；maxPrice=%s；测完请清空 SMS_FORCE_SLOT）",
+                label, f_cty, f_pid, cty, pid, params.get("maxPrice", "-"),
+            )
+            claim_slot_inflight(_slot_key(cty, pid))
+            try:
+                text = _request_activate(http, params)
+            finally:
+                release_slot_inflight(_slot_key(cty, pid))
+            if not text.startswith("ACCESS_NUMBER:"):
+                if "NO_NUMBERS" in text or text.strip() == "NO_NUMBERS":
+                    raise SmsNoNumbersError(
+                        f"{label} 强制槽 {cty}:{pid} 无号：{text[:160]}"
+                    )
+                raise SmsProviderError(
+                    f"{label} 强制槽 {cty}:{pid} getNumber 非预期：{text[:200]}"
+                )
+            parts = text.split(":")
+            if len(parts) < 3:
+                raise SmsProviderError(
+                    f"{label} 强制槽 {cty}:{pid} 响应缺号码：{text[:160]}"
+                )
+            activation_id = parts[1].strip()
+            phone = parts[2].strip()
+            _ACQUIRED_AT[activation_id] = time.time()
+            remember_activation_meta(activation_id, {
+                "country": cty,
+                "provider_id": pid,
+                "price": 0.004,
+                "service": svc,
+                "channel": provider,
+                "max_price": force_max,
+                "force_slot": True,
+            })
+            logger.info(
+                f"[SMS:{label}] 强制槽取号成功：activation_id={activation_id}, phone=+{phone}, "
+                f"service={svc}, country={cty}, provider={pid}, force_slot=1"
+            )
+            return activation_id, phone
 
         # 国家×供应商×价位候选：上限内尽量省钱，失败只冷却槽位不 ban 整国
         countries = None

@@ -225,19 +225,67 @@ def _apply_browser_automation_mask(driver) -> None:
         logger.debug("%s 注入自动化特征弱化脚本失败：%s", _log_prefix(driver), exc)
 
 
+def _is_dom_element_handle(el) -> bool:
+    """判断是否为可传给 execute_script 的真实元素句柄（非 dict/None）。
+
+    Cloak/Playwright 若把 DOM 塞进返回 dict，json_value 后会变成普通对象，
+    再调 scrollIntoView/click 会报 el.scrollIntoView is not a function。
+    """
+    if el is None or isinstance(el, (dict, list, tuple, str, int, float, bool)):
+        return False
+    name = el.__class__.__name__
+    if name in ("CloakElement", "WebElement", "ElementHandle"):
+        return True
+    # Selenium remote webelement 等
+    if hasattr(el, "tag_name") and hasattr(el, "id"):
+        return True
+    if hasattr(el, "locator") or hasattr(el, "handle"):
+        return True
+    return False
+
+
 def _human_scroll_to(driver, el) -> None:
+    if not _is_dom_element_handle(el):
+        return
     try:
         block = random.choice(["center", "nearest", "center"])
-        driver.execute_script("arguments[0].scrollIntoView({block: arguments[1], inline:'nearest'});", el, block)
+        # 必须守卫 typeof scrollIntoView，避免 Cloak 传坏句柄时整单炸死
+        driver.execute_script(
+            r"""
+            const el = arguments[0];
+            const block = arguments[1] || 'center';
+            if (!el || typeof el.scrollIntoView !== 'function') return false;
+            try { el.scrollIntoView({block: block, inline: 'nearest'}); } catch (e) { return false; }
+            return true;
+            """,
+            el,
+            block,
+        )
         if _browser_actions_enabled():
             time.sleep(random.uniform(0.08, 0.35))
             # 轻微滚动抖动，避免每次都精准居中。
             driver.execute_script("window.scrollBy(0, arguments[0]);", random.randint(-90, 90))
             time.sleep(random.uniform(0.05, 0.22))
-            driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'nearest'});", el)
+            driver.execute_script(
+                r"""
+                const el = arguments[0];
+                if (!el || typeof el.scrollIntoView !== 'function') return false;
+                try { el.scrollIntoView({block:'center', inline:'nearest'}); } catch (e) { return false; }
+                return true;
+                """,
+                el,
+            )
     except Exception:
         try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            driver.execute_script(
+                r"""
+                const el = arguments[0];
+                if (!el || typeof el.scrollIntoView !== 'function') return false;
+                try { el.scrollIntoView({block:'center'}); } catch (e) { return false; }
+                return true;
+                """,
+                el,
+            )
         except Exception:
             pass
 
@@ -248,6 +296,11 @@ def _human_click(driver, el, *, label: str = "") -> None:
     之前用 ActionChains 在 Roxy/Chrome 150 上偶发卡住 1-2 分钟，导致邮箱提交很慢。
     这里改为 CDP 派发鼠标事件；没有 CDP 时再用 JS/原生 click 兜底。
     """
+    if not _is_dom_element_handle(el):
+        raise RuntimeError(
+            f"human_click 收到非 DOM 元素句柄 label={label or '-'} type={type(el).__name__}；"
+            f"Cloak 路径请在 JS 内完成 click，不要把 Element 塞进 dict 回传"
+        )
     _human_scroll_to(driver, el)
     if not _browser_actions_enabled():
         time.sleep(0.2)
@@ -257,6 +310,7 @@ def _human_click(driver, el, *, label: str = "") -> None:
         human_delay("click")
         point = driver.execute_script(r"""
         const el = arguments[0];
+        if (!el || typeof el.getBoundingClientRect !== 'function') return {};
         const r = el.getBoundingClientRect();
         const x = r.left + r.width * (0.30 + Math.random() * 0.40);
         const y = r.top + r.height * (0.35 + Math.random() * 0.30);
@@ -273,16 +327,20 @@ def _human_click(driver, el, *, label: str = "") -> None:
         else:
             driver.execute_script(r"""
             const el = arguments[0];
+            if (!el) return;
             el.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
             el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
             el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
-            el.click();
+            if (typeof el.click === 'function') el.click();
             """, el)
     except Exception as exc:
         logger.debug("%s 人工化点击失败，回退 el.click label=%s err=%s", _log_prefix(driver), label, exc)
         time.sleep(random.uniform(0.12, 0.45))
         try:
-            driver.execute_script("arguments[0].click();", el)
+            driver.execute_script(
+                "const el=arguments[0]; if (el && typeof el.click==='function') el.click();",
+                el,
+            )
         except Exception:
             el.click()
 
@@ -1036,8 +1094,117 @@ def _is_email_login_page_still_present(driver) -> bool:
     return bool(state.get("inputs"))
 
 
+def _inspect_auth_page_failure(driver) -> dict:
+    """识别限流 / 废号 / 普通 auth 错误页。
+
+    返回：
+      {
+        kind: rate_limit | account_unusable | auth_error | "",
+        error_code: str,
+        url: str,
+        title: str,
+        text: str,
+      }
+    """
+    url = ""
+    title = ""
+    text = ""
+    try:
+        url = str(getattr(driver, "current_url", "") or "")
+    except Exception:
+        url = ""
+    try:
+        snap = driver.execute_script(r"""
+        return {
+          url: String(location.href || ''),
+          title: String(document.title || ''),
+          text: String(document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1600),
+        };
+        """) or {}
+        url = str(snap.get("url") or url or "")
+        title = str(snap.get("title") or "")
+        text = str(snap.get("text") or "")
+    except Exception:
+        pass
+
+    blob = " ".join([url, title, text])
+    try:
+        from core.openai_auth import (
+            detect_account_unusable_text,
+            detect_auth_failure_from_url,
+            detect_rate_limit_text,
+        )
+    except Exception:
+        detect_account_unusable_text = lambda _t: ""  # type: ignore
+        detect_auth_failure_from_url = lambda _u: ("", "")  # type: ignore
+        detect_rate_limit_text = lambda _t: ""  # type: ignore
+
+    kind, code = detect_auth_failure_from_url(url)
+    if not kind:
+        rl = detect_rate_limit_text(blob)
+        if rl:
+            kind, code = "rate_limit", rl
+    if not kind:
+        dead = detect_account_unusable_text(blob)
+        if dead:
+            kind, code = "account_unusable", dead
+    if not kind:
+        # chatgpt.com/auth/error Oops 页（非 payload）
+        low = blob.lower()
+        if "/auth/error" in low or "error=undefined" in low or "oops" in low:
+            kind, code = "auth_error", "auth_error"
+    return {
+        "kind": kind or "",
+        "error_code": code or "",
+        "url": url,
+        "title": title,
+        "text": text[:400],
+    }
+
+
+def _raise_if_auth_page_terminal(driver, *, where: str = "") -> None:
+    """若当前页是限流/废号，抛出带 error_code 的明确异常。"""
+    info = _inspect_auth_page_failure(driver)
+    kind = info.get("kind") or ""
+    code = info.get("error_code") or ""
+    url = str(info.get("url") or "")[:220]
+    if kind == "rate_limit":
+        from core.openai_auth import RateLimitError
+
+        raise RateLimitError(
+            f"OpenAI Auth 限流 error_code={code or 'rate_limit_exceeded'} where={where or '-'} url={url}",
+            error_code=code or "rate_limit_exceeded",
+        )
+    if kind == "account_unusable":
+        from core.openai_auth import AccountUnusableError
+
+        raise AccountUnusableError(
+            f"账号已废 error_code={code or 'account_deactivated'} where={where or '-'} url={url} text={(info.get('text') or '')[:160]}",
+            error_code=code or "account_deactivated",
+        )
+
+
 def _auth_error_page_state(driver) -> dict:
     """识别 ChatGPT 登录/注册 Oops 错误页（/auth/error?error=undefined）。"""
+    # 先解析 payload 限流/废号，避免被普通 Oops 恢复逻辑吞掉。
+    try:
+        info = _inspect_auth_page_failure(driver)
+        if info.get("kind") in ("rate_limit", "account_unusable"):
+            return {
+                "ok": True,
+                "url": info.get("url") or "",
+                "urlHit": True,
+                "textHit": True,
+                "isError": True,
+                "bodyPreview": (info.get("text") or "")[:180],
+                "buttonTexts": [],
+                "hasGoBack": False,
+                "goBackText": "",
+                "failureKind": info.get("kind"),
+                "errorCode": info.get("error_code") or "",
+            }
+    except Exception:
+        pass
     try:
         return driver.execute_script(r"""
         const url = String(location.href || '');
@@ -1192,6 +1359,20 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
     cleared_recover_done = False
     expected_email = str(email or "").strip().lower()
     while time.time() < end:
+        # 限流 / 废号优先：不要等成 unknown 再泛化报错
+        fail = _inspect_auth_page_failure(driver)
+        if fail.get("kind") == "rate_limit":
+            logger.warning(
+                "%s 邮箱提交后命中限流：code=%s url=%s",
+                _log_prefix(driver), fail.get("error_code"), str(fail.get("url") or "")[:180],
+            )
+            return "rate_limit"
+        if fail.get("kind") == "account_unusable":
+            logger.warning(
+                "%s 邮箱提交后命中废号页：code=%s url=%s",
+                _log_prefix(driver), fail.get("error_code"), str(fail.get("url") or "")[:180],
+            )
+            return "account_unusable"
         if _is_auth_error_page(driver):
             logger.warning(
                 "%s 邮箱提交后进入错误页：%s",
@@ -1209,6 +1390,14 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
             return "password"
         state = _email_input_value_state(driver)
         last = state
+        # 即使无输入框，URL 也可能是 authorize 中间态或 error payload
+        url_now = str((state or {}).get("url") or getattr(driver, "current_url", "") or "")
+        if "auth.openai.com/error" in url_now.lower() or "payload=" in url_now.lower():
+            fail2 = _inspect_auth_page_failure(driver)
+            if fail2.get("kind") == "rate_limit":
+                return "rate_limit"
+            if fail2.get("kind") == "account_unusable":
+                return "account_unusable"
         inputs = state.get("inputs") or []
         if inputs:
             values = [str(i.get("value") or "") for i in inputs]
@@ -1242,6 +1431,11 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
                 cleared_seen_at = None
             # 仍是当前邮箱页，继续短等。
         time.sleep(0.8)
+    fail = _inspect_auth_page_failure(driver)
+    if fail.get("kind") == "rate_limit":
+        return "rate_limit"
+    if fail.get("kind") == "account_unusable":
+        return "account_unusable"
     if _is_auth_error_page(driver):
         return "auth_error"
     logger.info("%s 邮箱提交后等待下一步超时，最后邮箱页状态=%s", _log_prefix(driver), last)
@@ -1299,10 +1493,42 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
         state_name = _wait_email_submit_next_state(driver, email, timeout=20)
         if state_name == "login_password":
             raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
+        if state_name == "account_unusable":
+            _raise_if_auth_page_terminal(driver, where=f"email_submit_account_unusable_{attempt}")
+            from core.openai_auth import AccountUnusableError
+
+            raise AccountUnusableError(
+                f"邮箱提交后账号已废 where=email_submit_{attempt} url={getattr(driver, 'current_url', '')}",
+                error_code="account_deactivated",
+            )
+        if state_name == "rate_limit":
+            # 同浏览器内短退避再试一轮；仍失败则抛 RateLimitError 给任务层换出口重试（不降并发）
+            logger.warning(
+                "%s 邮箱提交命中限流，短退避后重试（%s/%s）url=%s",
+                _log_prefix(driver), attempt, attempts, getattr(driver, "current_url", ""),
+            )
+            time.sleep(min(8.0, 3.0 + attempt * 2.0))
+            try:
+                _safe_get(
+                    driver,
+                    "https://chatgpt.com/auth/login",
+                    timeout=min(35, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)),
+                    attempts=2,
+                    accept_hosts=("chatgpt.com", "auth.openai.com"),
+                )
+                human_delay("navigate")
+                _maybe_accept(driver)
+            except Exception as exc:
+                logger.warning("%s 限流后重开登录页失败：%s", _log_prefix(driver), str(exc)[:160])
+            continue
         if state_name in ("password", "otp", "logged_in"):
             logger.info("%s 邮箱提交后已进入下一步：%s", _log_prefix(driver), state_name)
             return state_name
         if state_name == "auth_error" or _is_auth_error_page(driver):
+            # 限流/废号不要当 Oops 点 Go back
+            terminal = _inspect_auth_page_failure(driver)
+            if terminal.get("kind") in ("rate_limit", "account_unusable"):
+                _raise_if_auth_page_terminal(driver, where=f"email_submit_auth_error_{attempt}")
             _recover_from_auth_error_page(driver, reason=f"after_email_submit_{attempt}")
             # 错误页恢复后多给一轮机会（不占用 attempt 上限的“空转”感，但仍计入循环）。
             logger.warning("%s 邮箱提交撞到错误页，已 Go back 并重开登录页，准备第 %s/%s 轮重试", _log_prefix(driver), attempt, attempts)
@@ -1310,9 +1536,15 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
             continue
         logger.warning("%s 邮箱提交后仍未进入下一步：%s，准备重填重试 state=%s", _log_prefix(driver), state_name, _email_input_value_state(driver))
         # unknown 且 URL 像 error 时也走恢复。
-        if "auth/error" in str((_email_input_value_state(driver) or {}).get("url") or "").lower():
+        cur_url = str((_email_input_value_state(driver) or {}).get("url") or getattr(driver, "current_url", "") or "")
+        if "auth/error" in cur_url.lower() or "payload=" in cur_url.lower():
+            term = _inspect_auth_page_failure(driver)
+            if term.get("kind") in ("rate_limit", "account_unusable"):
+                _raise_if_auth_page_terminal(driver, where=f"email_submit_unknown_{attempt}")
             _recover_from_auth_error_page(driver, reason=f"unknown_error_url_{attempt}")
         time.sleep(1.0)
+    # 耗尽尝试：若最后是限流/废号，抛带 error_code 的异常
+    _raise_if_auth_page_terminal(driver, where="email_submit_exhausted")
     raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
 
 
@@ -1555,11 +1787,18 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
 
     若已不在验证码页（OTP 实际已通过），返回 skipped，不抛错。
     若落在 OpenAI Oops/Route Error 页，先点 Try again；仍失败则抛 auth_route_error。
+    若是 Authentication Error / account_deactivated，直接抛 AccountUnusableError。
     """
     end = time.time() + timeout
     last = None
     while time.time() < end:
+        # 废号 / 限流页没有 resend，优先识别
+        _raise_if_auth_page_terminal(driver, where="resend_otp")
         if _is_auth_route_error_page(driver):
+            # 路由错误也可能夹带废号文案
+            term = _inspect_auth_page_failure(driver)
+            if term.get("kind") in ("rate_limit", "account_unusable"):
+                _raise_if_auth_page_terminal(driver, where="resend_route_error")
             rec = _recover_auth_route_error(driver)
             if rec.get("ok"):
                 # Try again 后可能回到 OTP 页，继续找 resend
@@ -1610,6 +1849,11 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
                 time.sleep(random.uniform(1.1, 2.4) if _browser_actions_enabled() else 1.5)
                 return {"ok": True, "text": text}
         except Exception as exc:
+            # 终端异常直接抛出
+            from core.openai_auth import AccountUnusableError, RateLimitError
+
+            if isinstance(exc, (AccountUnusableError, RateLimitError)):
+                raise
             last = exc
         time.sleep(0.5)
     # 结束前再确认一次：可能等待期间已跳转成功
@@ -1620,6 +1864,7 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
             getattr(driver, "current_url", ""),
         )
         return {"ok": True, "skipped": True, "reason": "otp_already_passed"}
+    _raise_if_auth_page_terminal(driver, where="resend_otp_timeout")
     if _is_auth_route_error_page(driver):
         raise RuntimeError(
             f"auth_route_error: OpenAI OTP 路由错误页且无 resend 按钮 state={_email_otp_page_state(driver)}"
@@ -1634,11 +1879,26 @@ def _wait_after_email_otp_submit(driver, timeout: int = 20) -> str:
       - accepted：已离开验证码页 / OTP 已通过
       - invalid：仍在验证码页且输入错误
       - route_error：OpenAI Oops/Route Error 页
+      - account_unusable：账号已废
+      - rate_limit：Auth 限流
     """
     end = time.time() + timeout
     last = {}
     while time.time() < end:
         time.sleep(0.5)
+        fail = _inspect_auth_page_failure(driver)
+        if fail.get("kind") == "account_unusable":
+            logger.warning(
+                "%s[OTP] 提交后落到废号页：code=%s url=%s",
+                _log_prefix(driver), fail.get("error_code"), str(fail.get("url") or "")[:180],
+            )
+            return "account_unusable"
+        if fail.get("kind") == "rate_limit":
+            logger.warning(
+                "%s[OTP] 提交后落到限流页：code=%s url=%s",
+                _log_prefix(driver), fail.get("error_code"), str(fail.get("url") or "")[:180],
+            )
+            return "rate_limit"
         if _is_auth_route_error_page(driver):
             logger.warning(
                 "%s[OTP] 提交后落到 auth 路由错误页：%s",
@@ -1649,11 +1909,37 @@ def _wait_after_email_otp_submit(driver, timeout: int = 20) -> str:
         if _otp_flow_already_passed(driver):
             return "accepted"
         if not _is_email_verification_page(driver):
+            # 离开验证码页也可能是 Authentication Error（URL 仍可能含 email-verification）
+            fail2 = _inspect_auth_page_failure(driver)
+            if fail2.get("kind") == "account_unusable":
+                return "account_unusable"
+            if fail2.get("kind") == "rate_limit":
+                return "rate_limit"
             return "accepted"
         last = _email_otp_page_state(driver)
+        # 页面 body/errors 里可能直接写 error_code: account_deactivated
+        body_blob = " ".join([
+            str(last.get("title") or ""),
+            str(last.get("text") or ""),
+            " ".join(str(x) for x in (last.get("errors") or [])),
+        ])
+        try:
+            from core.openai_auth import detect_account_unusable_text, detect_rate_limit_text
+
+            if detect_account_unusable_text(body_blob):
+                return "account_unusable"
+            if detect_rate_limit_text(body_blob):
+                return "rate_limit"
+        except Exception:
+            pass
         invalid = any(str(i.get("ariaInvalid") or "").lower() == "true" for i in (last.get("inputs") or []))
         if invalid or (last.get("errors") or []):
             return "invalid"
+    fail = _inspect_auth_page_failure(driver)
+    if fail.get("kind") == "account_unusable":
+        return "account_unusable"
+    if fail.get("kind") == "rate_limit":
+        return "rate_limit"
     if _is_auth_route_error_page(driver):
         return "route_error"
     if _otp_flow_already_passed(driver) or not _is_email_verification_page(driver):
@@ -2051,6 +2337,11 @@ def _click_passwordless_signup_if_present(driver) -> dict:
     """
     新版注册/登录流在 password 页可能默认要求密码。
     如果页面提供“使用一次性验证码”按钮，优先点击进入邮箱 OTP 页面。
+
+    注意：必须在 JS 内完成 click，并只返回可 JSON 序列化字段。
+    Cloak/Playwright 适配层无法把 DOM Element 塞进 dict 再传回 Python
+    （evaluate_handle + json_value 会丢 button / 抛错），旧写法会导致
+    明明页面有「ワンタイムコードでログインする」却点不到。
     """
     try:
         result = driver.execute_script(r"""
@@ -2066,7 +2357,7 @@ def _click_passwordless_signup_if_present(driver) -> dict:
             el.id, name, value, el.getAttribute('aria-label'), el.getAttribute('title'),
             el.getAttribute('data-testid'), el.getAttribute('data-dd-action-name'), el.className, el.textContent
           ].join(' ').toLowerCase();
-          const text = norm(el.textContent || el.getAttribute('value') || '');
+          const text = norm(el.textContent || el.getAttribute('value') || el.getAttribute('aria-label') || '');
           return (
             (name === 'intent' && value.includes('passwordless') && value.includes('send_otp')) ||
             (name === 'intent' && value.includes('passwordless') && value.includes('otp')) ||
@@ -2084,6 +2375,7 @@ def _click_passwordless_signup_if_present(driver) -> dict:
             text.includes('一次性驗證碼') ||
             text.includes('メールでコード') ||
             text.includes('ワンタイムコード') ||
+            text.includes('ワンタイムコードでログイン') ||
             text.includes('認証コード') ||
             text.includes('useonetimeregistrationcode') ||
             text.includes('useaone-timecodetosignup') ||
@@ -2096,22 +2388,40 @@ def _click_passwordless_signup_if_present(driver) -> dict:
           );
         };
         const btn = candidates.find(isPasswordlessOtp);
-        if (!btn) return {ok:false, reason:'missing_passwordless_button'};
-        btn.scrollIntoView({block:'center'});
-        return {
+        if (!btn) {
+          return {
+            ok:false,
+            reason:'missing_passwordless_button',
+            buttons: candidates.slice(0, 12).map(el => (el.textContent || el.getAttribute('value') || '').trim().slice(0, 40))
+          };
+        }
+        btn.scrollIntoView({block:'center', inline:'nearest'});
+        const meta = {
           ok:true,
-          reason:'passwordless_send_otp_target',
-          button: btn,
+          reason:'clicked_passwordless_send_otp',
           name: btn.getAttribute('name') || '',
           value: btn.getAttribute('value') || '',
-          text: (btn.textContent || '').trim().slice(0, 80)
+          text: (btn.textContent || btn.getAttribute('value') || '').trim().slice(0, 80),
+          tag: (btn.tagName || '').toLowerCase()
         };
+        try {
+          btn.focus();
+          btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
+          btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+          if (typeof btn.click === 'function') btn.click();
+        } catch (e) {
+          const form = btn.closest('form');
+          if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);
+          else if (form) form.submit();
+          else return {ok:false, reason:'click_failed:' + String(e), text: meta.text};
+        }
+        return meta;
         """) or {"ok": False, "reason": "empty_result"}
-        if result.get("ok") and result.get("button"):
-            _human_click(driver, result.get("button"), label="passwordless_otp")
-            result["reason"] = "clicked_passwordless_send_otp"
-            result.pop("button", None)
-        return result
+        if isinstance(result, dict):
+            return result
+        return {"ok": False, "reason": f"bad_result_type:{type(result).__name__}"}
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
@@ -2150,13 +2460,31 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             return None
         password = _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
+        # 关键：必须在 JS 内完成填密 + 提交，只返回可 JSON 序列化字段。
+        # Cloak/Playwright 无法把 DOM Element 塞进 dict 再回传 Python（json_value 丢句柄），
+        # 旧写法 return {input, button} 后 _human_type/_human_click 会触发
+        # el.scrollIntoView is not a function。
         result = driver.execute_script(r"""
+        const password = String(arguments[0] || '');
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
           && !el.disabled && !el.readOnly;
+        const safeScroll = el => {
+          try {
+            if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({block:'center', inline:'nearest'});
+          } catch (e) {}
+        };
+        const setValue = (el, value) => {
+          const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) setter.call(el, value); else el.value = value;
+          el.dispatchEvent(new Event('input', {bubbles:true}));
+          el.dispatchEvent(new Event('change', {bubbles:true}));
+        };
         const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
           .find(visible);
         if (!input) return {ok:false, reason:'missing_password_input'};
+        if (!password) return {ok:false, reason:'empty_password'};
         const form = input.closest('form');
         const scope = form || document;
         const buttons = [...scope.querySelectorAll('button,input[type="submit"]')]
@@ -2169,15 +2497,45 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
           .filter(x => x.below)
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
-        buttons[0].el.scrollIntoView({block:'center'});
-        return {ok:true, reason:'password_targets', input, button: buttons[0].el};
-        """) or {}
+        const btn = buttons[0].el;
+        safeScroll(input);
+        try { input.focus(); } catch (e) {}
+        setValue(input, password);
+        const filled = String(input.value || '').length > 0;
+        if (!filled) return {ok:false, reason:'password_not_filled'};
+        safeScroll(btn);
+        let submitMethod = 'click';
+        try {
+          btn.focus();
+          btn.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
+          btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+          if (typeof btn.click === 'function') btn.click();
+        } catch (e) {
+          if (form && typeof form.requestSubmit === 'function') {
+            form.requestSubmit(btn);
+            submitMethod = 'requestSubmit';
+          } else if (form) {
+            form.submit();
+            submitMethod = 'form.submit';
+          } else {
+            return {ok:false, reason:'submit_failed:' + String(e)};
+          }
+        }
+        return {
+          ok:true,
+          reason:'password_filled_and_submitted',
+          submitMethod,
+          buttonText: (btn.innerText || btn.textContent || btn.value || '').trim().slice(0, 80),
+          passwordLen: password.length,
+          url: location.href
+        };
+        """, password) or {}
         if not result.get('ok'):
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
-        _human_type_text(driver, result.get("input"), password, clear=True)
         human_delay("form", minimum=0.4, maximum=1.4)
-        _human_click(driver, result.get("button"), label="password_submit")
-        logger.info("%s 已填写并提交密码页", _log_prefix(driver))
+        logger.info("%s 已填写并提交密码页：%s", _log_prefix(driver), result)
         # 提交密码后通常进入邮箱验证码页，最多等一段时间。
         wait_end = time.time() + 20
         while time.time() < wait_end:
@@ -2957,6 +3315,24 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
                 if outcome != "accepted":
                     logger.info("[Roxy注册][OTP] 等待结果=%s，但已离开验证码页，按通过处理", outcome)
                 break
+            if outcome == "account_unusable":
+                from core.openai_auth import AccountUnusableError
+
+                info = _inspect_auth_page_failure(driver)
+                code = info.get("error_code") or "account_deactivated"
+                raise AccountUnusableError(
+                    f"OTP 提交后账号已废 error_code={code} url={info.get('url') or getattr(driver, 'current_url', '')}",
+                    error_code=code,
+                )
+            if outcome == "rate_limit":
+                from core.openai_auth import RateLimitError
+
+                info = _inspect_auth_page_failure(driver)
+                code = info.get("error_code") or "rate_limit_exceeded"
+                raise RateLimitError(
+                    f"OTP 提交后 Auth 限流 error_code={code} url={info.get('url') or getattr(driver, 'current_url', '')}",
+                    error_code=code,
+                )
             if outcome == "route_error" or _is_auth_route_error_page(driver):
                 logger.warning(
                     "[Roxy注册][OTP] 提交后路由错误（%s/%s），尝试恢复 url=%s",
@@ -2981,6 +3357,10 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
             try:
                 resend = _click_resend_email_otp(driver, timeout=25)
             except Exception as resend_exc:
+                from core.openai_auth import AccountUnusableError, RateLimitError
+
+                if isinstance(resend_exc, (AccountUnusableError, RateLimitError)):
+                    raise
                 if "auth_route_error" in str(resend_exc) or _is_auth_route_error_page(driver):
                     logger.warning("[Roxy注册][OTP] 重发遇路由错误，重开邮箱登录：%s", str(resend_exc)[:160])
                     _restart_email_login_flow(driver, email)
@@ -3095,13 +3475,27 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
     except Exception as exc:
         logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Roxy注册] 失败详情", exc_info=True)
-        # 未确认创建前回收邮箱；确认后避免重复使用。
+        err_text = f"{type(exc).__name__}: {str(exc)[:300]}"
+        # 废号立即 disabled；可重试失败保持 used 供任务层重试；已创建则 failed。
         try:
             from core.email_provider import release_email
-            release_email(email, status="failed" if create_acknowledged else "available", note=f"Roxy注册失败: {str(exc)[:180]}")
+            from core.openai_auth import (
+                AccountUnusableError,
+                RateLimitError,
+                should_disable_registration_email_for_error,
+            )
+
+            if isinstance(exc, AccountUnusableError) or should_disable_registration_email_for_error(exc):
+                release_email(email, status="disabled", note=f"自动停用: {str(exc)[:180]}")
+            elif create_acknowledged:
+                release_email(email, status="failed", note=f"Roxy注册失败: {str(exc)[:180]}")
+            elif isinstance(exc, RateLimitError):
+                logger.info("[Roxy注册] 限流失败，保持邮箱 used 供任务重试：%s", email)
+            else:
+                logger.info("[Roxy注册] 可重试失败，保持邮箱 used：%s (%s)", email, type(exc).__name__)
         except Exception:
             pass
-        return {"success": False, "email": email, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        return {"success": False, "email": email, "error": err_text}
     finally:
         if driver and not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
             try:

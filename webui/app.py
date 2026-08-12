@@ -1538,6 +1538,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         支持格式（---- 或 ==== 或 |）：
           - 邮箱----取码地址
+          - 邮箱----MFA密钥----取码地址
           - 邮箱----密码----2FA密钥
           - 邮箱----密码----clientId----refreshToken   (Outlook)
         source 可选：auto / generic_api / password_totp / outlook
@@ -1563,8 +1564,9 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "error": (
                     "未解析到有效账号行。支持：\n"
                     "1) 邮箱----取码地址\n"
-                    "2) 邮箱----密码----2FA密钥\n"
-                    "3) 邮箱----密码----clientId----refreshToken\n"
+                    "2) 邮箱----MFA密钥----取码地址\n"
+                    "3) 邮箱----密码----2FA密钥\n"
+                    "4) 邮箱----密码----clientId----refreshToken\n"
                     + (("\n".join(parse_errors[:5])) if parse_errors else "")
                 ),
                 "parse_errors": parse_errors[:20],
@@ -2372,6 +2374,150 @@ def create_app(auth_code: str | None = None) -> Flask:
             "failed": len(results) - ok_n,
             "pool_deleted_count": deleted_n,
             "delete_pool": delete_pool,
+        })
+
+    # ---------- 号池管理 / 成品号入池 ----------
+    @app.get("/api/pool-admin/batches")
+    def api_pool_admin_batches():
+        from core import finished_batch_service as fbs
+        try:
+            limit = int(request.args.get("limit") or 100)
+        except Exception:
+            limit = 100
+        return jsonify({"ok": True, "items": fbs.list_batches(limit=limit)})
+
+    # ---------- SogouEdu 自动补池 ----------
+    @app.get("/api/pool-admin/sogou-restock")
+    def api_pool_admin_sogou_restock_status():
+        from core import sogouedu_restock as sr
+        sr.ensure_restock_monitor_started()
+        return jsonify({"ok": True, **sr.get_restock_status()})
+
+    @app.post("/api/pool-admin/sogou-restock/config")
+    def api_pool_admin_sogou_restock_config():
+        from core import sogouedu_restock as sr
+        data = request.get_json(silent=True) or {}
+        updates = data.get("config") if isinstance(data.get("config"), dict) else data
+        if not isinstance(updates, dict):
+            return jsonify({"ok": False, "error": "config 必须是对象"}), 400
+        try:
+            cfg = sr.save_restock_config(updates)
+            sr.ensure_restock_monitor_started()
+            return jsonify({"ok": True, "config": cfg, **sr.get_restock_status()})
+        except Exception as exc:
+            logger.exception("SogouEdu 补池配置保存失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/pool-admin/sogou-restock/run")
+    def api_pool_admin_sogou_restock_run():
+        from core import sogouedu_restock as sr
+        try:
+            return jsonify(sr.trigger_restock_run_now())
+        except Exception as exc:
+            logger.exception("SogouEdu 补池立即执行失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/pool-admin/sogou-restock/test-connection")
+    def api_pool_admin_sogou_restock_test_connection():
+        from core.sogouedu_client import SogouEduClient
+        try:
+            SogouEduClient().login()
+            return jsonify({"ok": True, "message": "SogouEdu 登录成功"})
+        except Exception as exc:
+            logger.exception("SogouEdu 连接测试失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/pool-admin/sogou-restock/orders")
+    def api_pool_admin_sogou_restock_orders():
+        from core import sogouedu_restock as sr
+        try:
+            limit = int(request.args.get("limit") or 20)
+        except Exception:
+            limit = 20
+        return jsonify({"ok": True, "items": sr.list_restock_orders(limit=limit)})
+
+    @app.get("/api/pool-admin/sogou-restock/logs")
+    def api_pool_admin_sogou_restock_logs():
+        from core import sogouedu_restock as sr
+        try:
+            lines = int(request.args.get("lines") or 80)
+        except Exception:
+            lines = 80
+        return jsonify({"ok": True, "items": sr.get_restock_log_tail(lines=lines)})
+
+    @app.get("/api/pool-admin/batches/<batch_id>")
+    def api_pool_admin_batch_get(batch_id: str):
+        from core import finished_batch_service as fbs
+        row = fbs.get_batch(batch_id)
+        if not row:
+            return jsonify({"ok": False, "error": "批次不存在"}), 404
+        # 附带账号列表
+        accounts = db.list_accounts_by_finished_batch(batch_id)
+        return jsonify({"ok": True, "batch": row, "accounts": accounts})
+
+    @app.post("/api/pool-admin/batches")
+    def api_pool_admin_batch_create():
+        """创建成品号批次并默认自动跑：导入→Codex→(可选)入池。
+
+        Body: {name, note?, text, auto_run?: true, auto_push?: true, codex_workers?: 3}
+        auto_push=false 时只导入+补跑 Codex，不推号池。
+        """
+        from core import finished_batch_service as fbs
+        data = request.get_json(silent=True) or {}
+        name = str(data.get("name") or "").strip()
+        note = str(data.get("note") or "").strip()
+        text = str(data.get("text") or data.get("lines") or "")
+        auto_run = bool(data.get("auto_run", True))
+        # 兼容缺省：未传时默认自动入池
+        if "auto_push" in data:
+            auto_push = bool(data.get("auto_push"))
+        else:
+            auto_push = True
+        try:
+            workers = int(data.get("codex_workers") or data.get("workers") or 3)
+        except Exception:
+            workers = 3
+        if not text.strip():
+            return jsonify({"ok": False, "error": "text 不能为空"}), 400
+        batch = fbs.create_batch(
+            name=name,
+            note=note,
+            text=text,
+            auto_run=auto_run,
+            auto_push=auto_push,
+            codex_workers=workers,
+        )
+        return jsonify({"ok": True, "batch": batch})
+
+    @app.post("/api/pool-admin/batches/<batch_id>/run")
+    def api_pool_admin_batch_run(batch_id: str):
+        """对已有批次重新/继续跑流水线。Body 可带 text 覆盖。"""
+        from core import finished_batch_service as fbs
+        data = request.get_json(silent=True) or {}
+        text = data.get("text")
+        result = fbs.start_batch_pipeline(batch_id, text=text if text is not None else None)
+        status = int(result.pop("status", 200) or 200)
+        return jsonify(result), status
+
+    @app.get("/api/pool-admin/batches/<batch_id>/logs")
+    def api_pool_admin_batch_logs(batch_id: str):
+        from core import finished_batch_service as fbs
+        row = fbs.get_batch(batch_id)
+        if not row:
+            return jsonify({"ok": False, "error": "批次不存在"}), 404
+        try:
+            limit = int(request.args.get("limit") or 200)
+        except Exception:
+            limit = 200
+        logs = list(row.get("logs") or [])[-max(1, min(1000, limit)):]
+        return jsonify({
+            "ok": True,
+            "batch_id": batch_id,
+            "status": row.get("status"),
+            "phase": row.get("phase"),
+            "summary": row.get("summary"),
+            "summary_text": row.get("summary_text"),
+            "logs": logs,
         })
 
     @app.post("/api/codex/push-sub2-pool-upload")

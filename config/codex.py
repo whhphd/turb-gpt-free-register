@@ -55,6 +55,12 @@ ENABLE_CODEX_AUTO: bool = False
 #   "same_as_registration" = 跟随 REGISTRATION_DRIVER
 CODEX_OAUTH_DRIVER: str = "roxy"
 
+# Codex 补跑失败后自动重试次数（不含首次）。总尝试 = 1 + CODEX_RETRY_MAX_RETRIES
+CODEX_RETRY_MAX_RETRIES: int = 3
+
+# Codex 补跑两次尝试之间的基础等待秒数（限流类错误会再拉长）
+CODEX_RETRY_DELAY: float = 2.0
+
 
 
 
@@ -127,6 +133,10 @@ SMS_MAX_PRICE: str = "0.35"
 
 # 最低单价（可选，留空/0=不限）。用于挡极端低价虚拟号，例如 0.004。
 SMS_MIN_PRICE: str = ""
+
+# 临时强制槽位（测试用）。格式 country:provider_id，例 12:3209 = 美国虚拟 + SMSBower 3209。
+# 非空时跳过 Top/权重/分桶等全部选号逻辑，只打这一档；测完务必清空。
+SMS_FORCE_SLOT: str = ""
 
 # 优先国家列表（逗号分隔）。同国先换供应商/价位，再换其它优先国。
 # 当 SMS_COUNTRY_WHITELIST 为空时，本列表同时作为硬白名单（默认不再乱扩到全世界）。
@@ -219,6 +229,8 @@ L_PHONE_PREFIX: str = ""
 apply_env_overrides(globals(), {
     'ENABLE_CODEX_AUTO': 'bool',
     'CODEX_OAUTH_DRIVER': 'str',
+    'CODEX_RETRY_MAX_RETRIES': 'int',
+    'CODEX_RETRY_DELAY': 'float',
     'CODEX_AUTH_URL_SOURCE': 'str',
     'CPA_MANAGEMENT_URL': 'str',
     'CPA_MANAGEMENT_KEY': 'str',
@@ -231,6 +243,7 @@ apply_env_overrides(globals(), {
     'SMS_SERVICE': 'str',
     'SMS_MAX_PRICE': 'str',
     'SMS_MIN_PRICE': 'str',
+    'SMS_FORCE_SLOT': 'str',
     'SMS_PREFERRED_COUNTRIES': 'str',
     'SMS_COUNTRY_WHITELIST': 'str',
     'SMS_ALLOW_OUTSIDE_WHITELIST': 'bool',

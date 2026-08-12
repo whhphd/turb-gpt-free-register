@@ -110,6 +110,29 @@ def run_cloak_registration(
                     logger.info("[Cloak注册][OTP] 等待结果=%s，但已离开验证码页，按通过处理 url=%s", outcome, getattr(driver, "current_url", ""))
                 break
 
+            # 废号：立刻终止，交给上层停用邮箱
+            if outcome == "account_unusable":
+                from core.openai_auth import AccountUnusableError
+                from core.roxy_registration import _inspect_auth_page_failure
+
+                info = _inspect_auth_page_failure(driver)
+                code = info.get("error_code") or "account_deactivated"
+                raise AccountUnusableError(
+                    f"OTP 提交后账号已废 error_code={code} url={info.get('url') or getattr(driver, 'current_url', '')}",
+                    error_code=code,
+                )
+            # 限流：抛给任务层退避 + 换出口重试（不降并发）
+            if outcome == "rate_limit":
+                from core.openai_auth import RateLimitError
+                from core.roxy_registration import _inspect_auth_page_failure
+
+                info = _inspect_auth_page_failure(driver)
+                code = info.get("error_code") or "rate_limit_exceeded"
+                raise RateLimitError(
+                    f"OTP 提交后 Auth 限流 error_code={code} url={info.get('url') or getattr(driver, 'current_url', '')}",
+                    error_code=code,
+                )
+
             # OpenAI Oops/Route Error：点 Try again；失败则重开登录页，不要死等 resend
             if outcome == "route_error" or _is_auth_route_error_page(driver):
                 logger.warning(
@@ -145,6 +168,10 @@ def run_cloak_registration(
             try:
                 resend = _click_resend_email_otp(driver, timeout=25)
             except Exception as resend_exc:
+                from core.openai_auth import AccountUnusableError, RateLimitError
+
+                if isinstance(resend_exc, (AccountUnusableError, RateLimitError)):
+                    raise
                 if "auth_route_error" in str(resend_exc) or _is_auth_route_error_page(driver):
                     logger.warning("[Cloak注册][OTP] 重发遇路由错误，重开邮箱登录：%s", str(resend_exc)[:160])
                     _restart_email_login_flow(driver, email)
@@ -276,12 +303,29 @@ def run_cloak_registration(
     except Exception as exc:
         logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Cloak注册] 失败详情", exc_info=True)
+        err_text = f"{type(exc).__name__}: {str(exc)[:300]}"
         try:
             from core.email_provider import release_email
-            release_email(email, status="failed" if create_acknowledged else "available", note=f"Cloak注册失败: {str(exc)[:180]}")
+            from core.openai_auth import (
+                AccountUnusableError,
+                RateLimitError,
+                should_disable_registration_email_for_error,
+            )
+
+            # 废号：立即 disabled，避免被其它 worker 再领
+            if isinstance(exc, AccountUnusableError) or should_disable_registration_email_for_error(exc):
+                release_email(email, status="disabled", note=f"自动停用: {str(exc)[:180]}")
+            elif create_acknowledged:
+                release_email(email, status="failed", note=f"Cloak注册失败: {str(exc)[:180]}")
+            elif isinstance(exc, RateLimitError):
+                # 限流可重试：保持 used，交给 registration_service 退避后换出口重试
+                logger.info("[Cloak注册] 限流失败，保持邮箱 used 供任务重试：%s", email)
+            else:
+                # 其它可重试失败也保持 used，避免中途被其它任务抢走
+                logger.info("[Cloak注册] 可重试失败，保持邮箱 used：%s (%s)", email, type(exc).__name__)
         except Exception:
             pass
-        return {"success": False, "email": email, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        return {"success": False, "email": email, "error": err_text}
     finally:
         # hold_browser：调用方接管 driver；全局 CLOAK_KEEP_BROWSER_OPEN 仍保留旧行为
         if driver is not None and not hold_browser and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):

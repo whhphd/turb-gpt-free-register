@@ -38,6 +38,18 @@ class AccountUnusableError(Exception):
         self.error_code = error_code
 
 
+class RateLimitError(RuntimeError):
+    """
+    OpenAI Auth 限流（rate_limit_exceeded）。
+
+    邮箱素材本身未必坏；应换出口/退避后重试，不要降并发配置。
+    """
+
+    def __init__(self, message: str, error_code: str = "rate_limit_exceeded"):
+        super().__init__(message)
+        self.error_code = error_code or "rate_limit_exceeded"
+
+
 # 远端返回这些 error code 时，判定邮箱素材已废，不再重试。
 _ACCOUNT_DEAD_CODES = frozenset({
     "account_deactivated",   # 账号已删除/停用
@@ -60,28 +72,181 @@ _ACCOUNT_DEAD_TEXT_MARKERS = (
     "your account has been deleted",
     "your account was deactivated",
     "your account was deleted",
+    "you do not have an account because it has been deleted or deactivated",
+    "authentication error",
     "账号已停用",
     "账号已禁用",
     "账号已删除",
     "账户已停用",
     "账户已禁用",
     "账户已删除",
+    # 日文废号页
+    "削除または無効化",
+    "無効化されている",
+    "ご利用いただけません",
+    "アカウントは削除",
+    "アカウントは無効",
 )
+
+# 仅 “Authentication Error” 标题不足以判废（可能是其它 auth 错误），需配合死号文案。
+_ACCOUNT_DEAD_STRONG_MARKERS = (
+    "account_deactivated",
+    "account_deleted",
+    "account_banned",
+    "account deactivated",
+    "account deleted",
+    "account banned",
+    "has been deleted or deactivated",
+    "has been deactivated",
+    "has been deleted",
+    "was deactivated",
+    "was deleted",
+    "you do not have an account because it has been deleted or deactivated",
+    "账号已停用",
+    "账号已禁用",
+    "账号已删除",
+    "账户已停用",
+    "账户已禁用",
+    "账户已删除",
+    "削除または無効化",
+    "無効化されている",
+    "アカウントは削除",
+    "アカウントは無効",
+)
+
+_RATE_LIMIT_CODES = frozenset({
+    "rate_limit_exceeded",
+    "too_many_requests",
+})
 
 
 def detect_account_unusable_text(text: str) -> str:
     """从浏览器页面/异常文本里识别账号已废，返回规范 error_code；未命中返回空串。"""
-    low = str(text or "").lower()
+    raw = str(text or "")
+    low = raw.lower()
     for code in _ACCOUNT_DEAD_CODES:
         if code in low:
             return code
-    if any(marker in low for marker in _ACCOUNT_DEAD_TEXT_MARKERS):
-        if "delete" in low or "删除" in low:
+    # error_code: account_deactivated 常见于页面 body
+    m = re.search(r"error_code\s*[:=]\s*([a-z0-9_]+)", low)
+    if m and m.group(1) in _ACCOUNT_DEAD_CODES:
+        return m.group(1)
+    if any(marker in low for marker in _ACCOUNT_DEAD_STRONG_MARKERS):
+        if "delete" in low or "删除" in low or "削除" in low:
             return "account_deleted"
         if "ban" in low or "封" in low:
             return "account_banned"
         return "account_deactivated"
+    # 弱信号：Authentication Error 标题 + 删除/停用相关词
+    if "authentication error" in low and any(
+        k in low for k in ("deactivat", "deleted", "停用", "删除", "無効", "削除")
+    ):
+        return "account_deactivated"
     return ""
+
+
+def _detect_rate_limit_plain(text: str) -> str:
+    """仅明文匹配限流（不解码 payload，避免递归）。"""
+    raw = str(text or "")
+    if not raw:
+        return ""
+    low = raw.lower()
+    for code in _RATE_LIMIT_CODES:
+        if code in low:
+            return code if code != "too_many_requests" else "rate_limit_exceeded"
+    if "rate limit exceeded" in low or "rate-limit-exceeded" in low:
+        return "rate_limit_exceeded"
+    compact = low.replace(" ", "")
+    if "errorcode" in compact and "rate_limit" in low:
+        return "rate_limit_exceeded"
+    if '"errorcode":"rate_limit' in compact or "'errorcode':'rate_limit" in compact:
+        return "rate_limit_exceeded"
+    return ""
+
+
+def detect_rate_limit_text(text: str) -> str:
+    """从 URL/页面/异常文本识别 Auth 限流，返回规范 error_code；未命中返回空串。"""
+    raw = str(text or "")
+    hit = _detect_rate_limit_plain(raw)
+    if hit:
+        return hit
+    # URL 里 error?payload= 常为 base64，明文搜不到 rate_limit，需要解码
+    if "payload=" in raw.lower() or "auth.openai.com/error" in raw.lower():
+        payload = decode_auth_error_payload(raw)
+        if payload:
+            err_code = str(
+                payload.get("errorCode")
+                or payload.get("error_code")
+                or payload.get("code")
+                or ""
+            ).strip()
+            if err_code in _RATE_LIMIT_CODES or _detect_rate_limit_plain(json.dumps(payload, ensure_ascii=False)):
+                return err_code if err_code in _RATE_LIMIT_CODES else "rate_limit_exceeded"
+            if err_code == "rate_limit_exceeded" or "rate_limit" in err_code.lower():
+                return "rate_limit_exceeded"
+    return ""
+
+
+def decode_auth_error_payload(url_or_text: str) -> dict:
+    """从 auth.openai.com/error?payload=... 解出 JSON（失败返回空 dict）。"""
+    raw = str(url_or_text or "")
+    if not raw:
+        return {}
+    m = re.search(r"(?:[?&]payload=|/error\?payload=)([A-Za-z0-9_\-%=]+)", raw)
+    if not m:
+        # 允许直接传入 base64 payload
+        if re.fullmatch(r"[A-Za-z0-9_\-%]+={0,2}", raw.strip()):
+            token = raw.strip()
+        else:
+            return {}
+    else:
+        token = m.group(1)
+    try:
+        from urllib.parse import unquote
+
+        token = unquote(token)
+    except Exception:
+        pass
+    pad = "=" * (-len(token) % 4)
+    try:
+        decoded = __import__("base64").urlsafe_b64decode(token + pad)
+        payload = json.loads(decoded.decode("utf-8", errors="ignore"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def detect_auth_failure_from_url(url: str) -> tuple[str, str]:
+    """
+    从 auth 错误 URL 识别失败类型。
+
+    返回 (kind, error_code)：
+      kind: rate_limit / account_unusable / ""
+    """
+    payload = decode_auth_error_payload(url)
+    if not payload:
+        # 有时 error_code 直接出现在 query（明文）
+        code = _detect_rate_limit_plain(url) or detect_account_unusable_text(url)
+        if code in _RATE_LIMIT_CODES or code == "rate_limit_exceeded":
+            return "rate_limit", "rate_limit_exceeded"
+        if code:
+            return "account_unusable", code
+        return "", ""
+    err_code = str(
+        payload.get("errorCode")
+        or payload.get("error_code")
+        or payload.get("code")
+        or ""
+    ).strip()
+    kind = str(payload.get("kind") or "")
+    blob = json.dumps(payload, ensure_ascii=False)
+    if err_code in _RATE_LIMIT_CODES or _detect_rate_limit_plain(blob):
+        return "rate_limit", (err_code if err_code in _RATE_LIMIT_CODES else "rate_limit_exceeded")
+    if err_code in _ACCOUNT_DEAD_CODES or detect_account_unusable_text(blob):
+        return "account_unusable", err_code or detect_account_unusable_text(blob) or "account_deactivated"
+    if kind == "AuthApiFailure" and "rate" in err_code.lower():
+        return "rate_limit", err_code or "rate_limit_exceeded"
+    return "", err_code
 
 
 def detect_account_unusable_response_body(body: str) -> str:
@@ -102,6 +267,34 @@ def detect_account_unusable_response_body(body: str) -> str:
     elif isinstance(payload, dict):
         code = str(payload.get("code") or payload.get("error_code") or "")
     return code if code in _ACCOUNT_DEAD_CODES else ""
+
+
+def should_disable_registration_email_for_error(error: object) -> bool:
+    """注册失败后是否应永久停用该邮箱（废号/已注册等）。"""
+    text = str(error or "")
+    if not text:
+        return False
+    if isinstance(error, AccountUnusableError):
+        return True
+    if detect_account_unusable_text(text):
+        return True
+    low = text.lower()
+    markers = (
+        "accountunusableerror",
+        "邮箱提交后进入登录密码页",
+        "auth.openai.com/log-in/password",
+        "/log-in/password",
+        "按已注册/不可用邮箱处理",
+        "账号已废",
+        "authentication error",
+    )
+    if any(m in text or m in low for m in markers):
+        # authentication error 单独出现时仍要求强标记，避免误伤
+        if "authentication error" in low and not detect_account_unusable_text(text):
+            if "deactivat" not in low and "deleted" not in low and "停用" not in text and "删除" not in text:
+                return False
+        return True
+    return False
 
 
 def _extract_error_code(resp) -> str:

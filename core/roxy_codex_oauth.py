@@ -12,7 +12,11 @@ from config import roxybrowser as _roxy_cfg
 from core.email_provider import wait_for_otp
 from core.humanize import delay as human_delay
 from core import sms_provider
-from core.openai_auth import AccountUnusableError, detect_account_unusable_response_body
+from core.openai_auth import (
+    AccountUnusableError,
+    detect_account_unusable_response_body,
+    detect_account_unusable_text,
+)
 from core.roxybrowser_client import RoxyBrowserClient
 from core.roxy_registration import (
     _build_driver,
@@ -31,6 +35,7 @@ from core.roxy_registration import (
     _is_email_verification_page,
     _is_login_password_page,
     _click_passwordless_signup_if_present,
+    _password_page_state,
 )
 from core.totp_login import (
     generate_totp_code,
@@ -201,13 +206,162 @@ def _account_password(email: str) -> str:
         return ""
 
 
-def _fill_login_password_if_present(driver, email: str, *, timeout: int = 12) -> bool:
-    """若当前是登录密码页且账号有密码，则填写并提交。成功离开密码页返回 True。"""
+def _page_unusable_error_code(driver, extra: str | dict | None = None) -> str:
+    """从当前页面/诊断信息识别账号已废，返回 error_code；未命中返回空串。"""
+    chunks: list[str] = []
+    if extra is not None:
+        if isinstance(extra, dict):
+            for key in ("text", "errors", "error", "reason", "url", "title"):
+                val = extra.get(key)
+                if isinstance(val, (list, tuple)):
+                    chunks.extend(str(x) for x in val if x)
+                elif val:
+                    chunks.append(str(val))
+            chunks.append(str(extra))
+        else:
+            chunks.append(str(extra))
+    try:
+        chunks.append(str(getattr(driver, "current_url", "") or ""))
+    except Exception:
+        pass
+    try:
+        title = driver.execute_script("return document.title || '';") or ""
+        chunks.append(str(title))
+    except Exception:
+        pass
+    try:
+        state = _email_otp_page_state(driver)
+        if isinstance(state, dict):
+            chunks.append(str(state.get("text") or ""))
+            chunks.append(str(state.get("url") or ""))
+            for err in (state.get("errors") or []):
+                chunks.append(str(err))
+    except Exception:
+        pass
+    try:
+        body = driver.execute_script(
+            "return (document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 2500);"
+        ) or ""
+        chunks.append(str(body))
+    except Exception:
+        pass
+    blob = "\n".join(chunks)
+    code = detect_account_unusable_text(blob)
+    if code:
+        return code
+    # 日文废号页常见文案（detect 里若无 account_deactivated 字样时兜底）
+    low = blob.lower()
+    if any(x in blob for x in ("削除または無効化", "無効化されている", "ご利用いただけません")):
+        return "account_deactivated"
+    if "account_deactivated" in low or "error_code: account_deactivated" in low:
+        return "account_deactivated"
+    return ""
+
+
+def _raise_if_account_unusable(driver, extra: str | dict | None = None, *, where: str = "") -> None:
+    code = _page_unusable_error_code(driver, extra)
+    if not code:
+        return
+    where_s = f"（{where}）" if where else ""
+    logger.warning("[Codex][Browser] 识别到账号已废%s：error_code=%s", where_s, code)
+    raise AccountUnusableError(f"账号已废（{code}）", error_code=code)
+
+
+def _submit_login_password_form(driver) -> dict:
+    """
+    在 /log-in/password 点击主提交按钮。
+
+    必须在 JS 内完成 click，并只返回可序列化字段（兼容 Cloak）。
+    优先 続行/Continue，排除 ワンタイムコード / サインアップ / 編集 等干扰按钮。
+    """
+    try:
+        result = driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+          && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
+        const norm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
+        const pwd = [...document.querySelectorAll('input[type="password"],input[autocomplete="current-password"]')]
+          .find(visible);
+        if (!pwd) return {ok:false, reason:'no_password_input'};
+        const form = pwd.closest('form') || document;
+        const candidates = [...form.querySelectorAll('button,input[type="submit"],[role="button"]')].filter(visible);
+        const scoreOf = (el) => {
+          const text = norm(el.textContent || el.value || el.getAttribute('aria-label') || '');
+          const type = String(el.getAttribute('type') || '').toLowerCase();
+          const name = String(el.getAttribute('name') || '').toLowerCase();
+          const value = String(el.getAttribute('value') || '').toLowerCase();
+          const blob = [text, name, value].join(' ');
+          let s = 0;
+          if (type === 'submit') s += 35;
+          if (name === 'intent' && /(password|login|continue|submit)/.test(value)) s += 45;
+          if (/(continue|next|submit|sign.?in|log.?in|続行|次へ|送信|登录|登入|繼續)/.test(text)) s += 90;
+          // 干扰项：一次性验证码 / 注册 / 忘记密码 / 编辑邮箱
+          if (/(one[-_]?time|passwordless|ワンタイム|一次性|signup|sign.?up|サインアップ|登録|forgot|忘れ|編集|edit|apple|google|microsoft)/.test(blob)) {
+            s -= 140;
+          }
+          const r = el.getBoundingClientRect();
+          const pr = pwd.getBoundingClientRect();
+          if (r.top >= pr.bottom - 10) s += 25;
+          return s;
+        };
+        let best = null;
+        let bestScore = -999;
+        const scored = [];
+        for (const el of candidates) {
+          const sc = scoreOf(el);
+          scored.push({text: (el.textContent || el.value || '').trim().slice(0, 40), score: sc, type: el.getAttribute('type') || '', name: el.getAttribute('name') || ''});
+          if (sc > bestScore) {
+            best = el;
+            bestScore = sc;
+          }
+        }
+        if (!best || bestScore < 30) {
+          return {ok:false, reason:'no_submit_button', bestScore, candidates: scored.slice(0, 10)};
+        }
+        best.scrollIntoView({block:'center', inline:'nearest'});
+        const meta = {
+          ok: true,
+          reason: 'clicked_password_submit',
+          text: (best.textContent || best.value || '').trim().slice(0, 60),
+          score: bestScore,
+          tag: (best.tagName || '').toLowerCase(),
+          type: best.getAttribute('type') || '',
+          name: best.getAttribute('name') || '',
+          value: best.getAttribute('value') || ''
+        };
+        try {
+          best.focus();
+          best.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
+          best.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+          best.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+          best.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+          if (typeof best.click === 'function') best.click();
+        } catch (e) {
+          const f = best.closest('form');
+          if (f && typeof f.requestSubmit === 'function') f.requestSubmit(best);
+          else if (f) f.submit();
+          else return {ok:false, reason:'click_failed:' + String(e), text: meta.text};
+        }
+        return meta;
+        """) or {"ok": False, "reason": "empty_result"}
+        return result if isinstance(result, dict) else {"ok": False, "reason": f"bad_result:{type(result).__name__}"}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _fill_login_password_if_present(driver, email: str, *, timeout: int = 18) -> bool:
+    """若当前是登录密码页且账号有密码，则填写并提交。成功离开密码页返回 True。
+
+    填写用 JS setter（已验证不是问题根源）；提交优先点 続行/Continue。
+    失败时输出诊断，并识别 account_deactivated 等废号页。
+    """
     password = _account_password(email)
     if not password:
         return False
-    end = time.time() + max(2, int(timeout))
-    while time.time() < end:
+    end = time.time() + max(6, int(timeout))
+    attempts = 0
+    last_diag: dict = {}
+    while time.time() < end and attempts < 3:
         if not _is_login_password_page(driver):
             if (
                 _is_email_verification_page(driver)
@@ -217,11 +371,17 @@ def _fill_login_password_if_present(driver, email: str, *, timeout: int = 12) ->
                 return True
             time.sleep(0.3)
             continue
+
+        attempts += 1
+        # 废号后常停在「認証エラー」页：URL 仍像 password，但已无密码框
+        _raise_if_account_unusable(driver, where="password_page_before_fill")
         try:
             filled = driver.execute_script(
                 r"""
                 const pwd = String(arguments[0] || '');
-                const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+                  && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+                  && !el.disabled && !el.readOnly;
                 const inputs = [...document.querySelectorAll('input')].filter(visible);
                 const box = inputs.find(el => (el.type || '').toLowerCase() === 'password')
                   || inputs.find(el => (el.autocomplete || '').toLowerCase() === 'current-password')
@@ -240,47 +400,111 @@ def _fill_login_password_if_present(driver, email: str, *, timeout: int = 12) ->
             ) or {}
         except Exception as exc:
             filled = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
         if not filled.get("ok"):
-            time.sleep(0.4)
+            last_diag = {"reason": str(filled.get("reason") or "fill_failed"), "state": _password_page_state(driver), "attempt": attempts}
+            _raise_if_account_unusable(driver, last_diag, where="password_input_missing")
+            time.sleep(0.45)
             continue
-        logger.info("[Codex][Browser] 已填写登录密码（导入账号密码），准备提交")
+
+        value_len = int(filled.get("valueLen") or 0)
+        logger.info(
+            "[Codex][Browser] 已填写登录密码（导入账号密码）attempt=%s valueLen=%s，准备提交",
+            attempts,
+            value_len,
+        )
+        if value_len <= 0:
+            last_diag = {"reason": "password_not_in_dom", "valueLen": value_len, "attempt": attempts}
+            logger.warning("[Codex][Browser] 密码填写后 DOM value 仍为空：%s", last_diag)
+            time.sleep(0.5)
+            continue
+
         human_delay("form")
-        if not _submit_code_form(driver):
-            try:
-                driver.execute_script(
-                    r"""
-                    const form = document.querySelector('form');
-                    if (!form) return false;
-                    if (typeof form.requestSubmit === 'function') form.requestSubmit();
-                    else form.submit();
-                    return true;
-                    """
-                )
-            except Exception:
-                pass
-        wait_end = time.time() + 12
+        submit_info = _submit_login_password_form(driver)
+        if not submit_info.get("ok"):
+            # 回退旧选择器（含 続行）
+            if _submit_code_form(driver):
+                submit_info = {"ok": True, "reason": "legacy_submit_code_form"}
+            else:
+                try:
+                    ok = bool(
+                        driver.execute_script(
+                            r"""
+                            const form = document.querySelector('form');
+                            if (!form) return false;
+                            if (typeof form.requestSubmit === 'function') form.requestSubmit();
+                            else form.submit();
+                            return true;
+                            """
+                        )
+                    )
+                    submit_info = {
+                        "ok": ok,
+                        "reason": "form_request_submit_fallback" if ok else "form_submit_missing",
+                    }
+                except Exception as exc:
+                    submit_info = {"ok": False, "reason": f"form_fallback_failed:{type(exc).__name__}: {exc}"}
+        logger.info("[Codex][Browser] 密码提交动作：%s", submit_info)
+
+        wait_end = time.time() + 14
         while time.time() < wait_end:
+            # 密码提交后若弹出废号/认证错误页，立刻终止，禁止继续邮箱 OTP 重试
+            _raise_if_account_unusable(driver, where="after_password_submit")
+            if is_totp_page_driver(driver):
+                logger.info(
+                    "[Codex][Browser] 密码提交后进入 TOTP 页：url=%s",
+                    str(getattr(driver, "current_url", "") or "-")[:180],
+                )
+                return True
             if not _is_login_password_page(driver):
+                _raise_if_account_unusable(driver, where="left_password_page")
                 logger.info(
                     "[Codex][Browser] 密码提交后页面：url=%s",
                     str(getattr(driver, "current_url", "") or "-")[:180],
                 )
                 return True
-            time.sleep(0.4)
-        logger.warning("[Codex][Browser] 密码提交后仍停在密码页")
-        return False
+            time.sleep(0.35)
+
+        # 仍停在密码页：抓诊断；若已是废号则抛 AccountUnusableError
+        try:
+            page_state = _email_otp_page_state(driver)
+        except Exception:
+            page_state = _password_page_state(driver)
+        last_diag = {
+            "reason": "still_on_password_page",
+            "attempt": attempts,
+            "valueLen": value_len,
+            "submit": submit_info,
+            "url": str(getattr(driver, "current_url", "") or ""),
+            "buttons": [
+                (b.get("text") if isinstance(b, dict) else str(b))[:40]
+                for b in ((page_state or {}).get("buttons") or [])
+            ][:10],
+            "errors": (page_state or {}).get("errors") if isinstance(page_state, dict) else None,
+            "text": str((page_state or {}).get("text") or "")[:280],
+        }
+        logger.warning("[Codex][Browser] 密码提交后仍停在密码页 diag=%s", last_diag)
+        _raise_if_account_unusable(driver, last_diag, where="password_page_stuck")
+        time.sleep(0.7)
+
+    if last_diag:
+        _raise_if_account_unusable(driver, last_diag, where="password_login_final")
+        logger.warning("[Codex][Browser] 登录密码填写/提交最终失败 email=%s last=%s", email, last_diag)
     return False
 
 
-def _maybe_click_passwordless_after_email(driver, email: str, timeout: int = 18) -> None:
+def _maybe_click_passwordless_after_email(driver, email: str, timeout: int = 22) -> None:
     """
-    Codex OAuth 提交邮箱后也可能跳到 /log-in/password 或 /create-account/password。
-    - 账号有导入密码：优先填密码登录（再走 TOTP）
-    - 否则点“使用一次性验证码”进入邮箱 OTP
+    Codex OAuth 提交邮箱后也常跳到 /log-in/password。
+    当前 OpenAI 默认先出密码页，并提供「ワンタイムコードでログインする /
+    使用一次性验证码」入口；补跑应优先点它进入邮箱 OTP（触发发码），
+    密码登录仅作回退（导入 password/totp 账号）。
     """
     end = time.time() + timeout
     last_url = ""
     clicked = False
+    password_tried = False
+    last_pl_reason = ""
     while time.time() < end:
         try:
             if _is_email_verification_page(driver) or is_totp_page_driver(driver):
@@ -294,53 +518,86 @@ def _maybe_click_passwordless_after_email(driver, email: str, timeout: int = 18)
             lower = url.lower()
             if any(x in lower for x in ("phone", "workspace", "consent", "localhost:1455")):
                 return
-            # 有密码：优先密码登录
-            if _is_login_password_page(driver) and _account_password(email):
-                if _fill_login_password_if_present(driver, email, timeout=10):
-                    # 密码后常见 TOTP
-                    _fill_totp_if_present(driver, email, timeout=10)
-                    return
-            if "/password" in lower or "auth.openai.com" in lower:
-                if _account_password(email) and _is_login_password_page(driver):
-                    continue
+            on_password = _is_login_password_page(driver) or ("/password" in lower)
+            if on_password or "auth.openai.com" in lower:
+                # 1) 优先一次性验证码（触发邮箱 OTP 邮件）
                 result = _click_passwordless_signup_if_present(driver)
                 if result.get("ok"):
                     clicked = True
-                    logger.info("[Codex][Browser] 已点击一次性验证码入口：email=%s detail=%s", email, result)
+                    last_pl_reason = ""
+                    logger.info(
+                        "[Codex][Browser] 已点击一次性验证码入口：email=%s detail=%s",
+                        email,
+                        {k: result.get(k) for k in ("reason", "text", "name", "value", "tag") if result.get(k) is not None},
+                    )
                     human_delay("form")
                     continue
+                last_pl_reason = str(result.get("reason") or "unknown")
+                # 2) 回退：账号库有密码时再试密码登录
+                if not password_tried and _account_password(email) and _is_login_password_page(driver):
+                    password_tried = True
+                    logger.info(
+                        "[Codex][Browser] 一次性验证码入口未命中（%s），回退尝试导入密码登录：%s",
+                        last_pl_reason,
+                        email,
+                    )
+                    if _fill_login_password_if_present(driver, email, timeout=10):
+                        _fill_totp_if_present(driver, email, timeout=10)
+                        return
         except Exception as exc:
             logger.debug("[Codex][Browser] 密码页一次性验证码入口探测失败：%s", str(exc)[:140])
-        time.sleep(0.5)
+        time.sleep(0.45)
     if clicked:
         logger.info("[Codex][Browser] 已点击一次性验证码入口，未立即检测到 OTP 页，继续后续 OTP 轮询")
+    elif last_pl_reason:
+        logger.warning(
+            "[Codex][Browser] 密码页未能切入邮箱 OTP：passwordless=%s has_password=%s email=%s",
+            last_pl_reason,
+            bool(_account_password(email)),
+            email,
+        )
 
 
-def _wait_for_otp_input(driver, timeout: int = 30, email: str | None = None) -> None:
+def _wait_for_otp_input(driver, timeout: int = 40, email: str | None = None) -> None:
     """验证码已收到但 OTP 输入框可能尚未出现（点完一次性验证码后常有中间页/延迟渲染）。
 
     等待期间若仍停留在登录密码页：
-      - 有导入密码 → 填密码
-      - 否则补点一次性验证码入口（最多 2 次、间隔 6s）
+      1) 反复补点一次性验证码入口
+      2) 失败后再回退导入密码
     """
     end = time.time() + timeout
     passwordless_retries = 0
+    password_tried = False
     while time.time() < end:
         if _is_email_verification_page(driver) or is_totp_page_driver(driver):
             return
         if _is_login_password_page(driver):
-            if email and _account_password(email):
+            result = _click_passwordless_signup_if_present(driver)
+            if result.get("ok"):
+                passwordless_retries += 1
+                logger.info(
+                    "[Codex][Browser] 仍停留登录密码页，补点一次性验证码入口：%s",
+                    result.get("text") or result.get("reason"),
+                )
+                human_delay("form")
+                time.sleep(1.2)
+                continue
+            passwordless_retries += 1
+            if passwordless_retries <= 4:
+                logger.info(
+                    "[Codex][Browser] 密码页补点一次性验证码未成功（%s/%s）：%s buttons=%s",
+                    passwordless_retries,
+                    4,
+                    result.get("reason"),
+                    result.get("buttons") or [],
+                )
+            if email and (not password_tried) and _account_password(email):
+                password_tried = True
                 if _fill_login_password_if_present(driver, email, timeout=8):
                     return
-            if passwordless_retries < 2:
-                passwordless_retries += 1
-                result = _click_passwordless_signup_if_present(driver)
-                if result.get("ok"):
-                    logger.info("[Codex][Browser] 仍停留登录密码页，补点一次性验证码入口：%s", result.get("reason"))
-                    human_delay("form")
-                time.sleep(6)
-                continue
-        time.sleep(0.8)
+            time.sleep(1.0)
+            continue
+        time.sleep(0.5)
     state = _email_otp_page_state(driver)
     logger.warning(
         "[Codex][Browser] 等待 OTP 输入框超时，页面 url=%s inputs=%s buttons=%s 文本前300字=%s",
@@ -480,11 +737,15 @@ def _submit_code_form(driver) -> bool:
     return bool(_click_if_present(driver, [
         "button[type='submit']",
         "//button[contains(., 'Continue')]",
+        "//button[contains(., '続行')]",
+        "//button[contains(., '次へ')]",
+        "//button[contains(., '送信')]",
         "//button[contains(., '继续')]",
         "//button[contains(., 'Verify')]",
         "//button[contains(., '验证')]",
         "//button[contains(., 'Confirm')]",
         "//button[contains(., '确认')]",
+        "//button[contains(., '確認')]",
     ], timeout=8))
 
 
@@ -637,13 +898,33 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str, totp_se
     if _fill_totp_if_present(driver, email, totp_secret=totp_secret, timeout=4):
         return
 
-    # 密码+2FA 账号：密码页填密码后常直接到 TOTP，无需邮箱 OTP
-    if _account_password(email) and _is_login_password_page(driver):
-        if _fill_login_password_if_present(driver, email, timeout=12):
-            if _fill_totp_if_present(driver, email, totp_secret=totp_secret, timeout=15):
-                return
-            if _codex_page_past_email_login(driver) and not _is_email_verification_page(driver):
-                return
+    # 提交邮箱后若仍在 /log-in/password：再强制点一次一次性验证码。
+    # 该点击通常才会真正触发邮箱 OTP 邮件；成功后刷新 after_ts 避免吃到旧/占位码。
+    if _is_login_password_page(driver):
+        result = _click_passwordless_signup_if_present(driver)
+        if result.get("ok"):
+            otp_after_ts = time.time()
+            logger.info(
+                "[Codex][Browser] 密码页再次点击一次性验证码入口：%s",
+                result.get("text") or result.get("reason"),
+            )
+            human_delay("form")
+            # 给页面时间切到 email-verification
+            wait_pl = time.time() + 8
+            while time.time() < wait_pl:
+                if _is_email_verification_page(driver) or is_totp_page_driver(driver):
+                    break
+                if not _is_login_password_page(driver):
+                    break
+                time.sleep(0.4)
+        elif _account_password(email):
+            # 无一次性验证码入口时，才回退导入密码（+ 可能的 TOTP）
+            logger.info("[Codex][Browser] 密码页无一次性验证码入口，回退导入密码：%s", result.get("reason"))
+            if _fill_login_password_if_present(driver, email, timeout=12):
+                if _fill_totp_if_present(driver, email, totp_secret=totp_secret, timeout=15):
+                    return
+                if _codex_page_past_email_login(driver) and not _is_email_verification_page(driver):
+                    return
 
     # 若邮箱提交后已直接到 consent/callback（少数会话），不再等 OTP。
     if (
@@ -770,11 +1051,15 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str, totp_se
 
 
 
+# 取码接口偶发返回的占位/脏码，不能当真实邮箱 OTP 提交
+_PLACEHOLDER_EMAIL_OTPS = frozenset({"000000", "00000", "0000", "111111", "123456"})
+
+
 def _wait_for_fresh_email_otp(otp_provider, email: str, after_ts: float, used_codes: set[str] | None = None, timeout: int = 90) -> str:
     """获取一个未提交过的邮箱 OTP。
 
-    通用 API 邮箱的取码接口有时会先返回缓存旧码；验证码错误后重发时，
-    这里会拒绝复用已失败的 code，持续轮询直到出现新 code 或超时。
+    通用 API 邮箱的取码接口有时会先返回缓存旧码或占位码（如 000000）；
+    验证码错误后重发时，这里会拒绝复用已失败/占位 code，持续轮询直到出现新 code 或超时。
     """
     used_codes = {str(x) for x in (used_codes or set()) if x}
     end = time.time() + timeout
@@ -782,6 +1067,18 @@ def _wait_for_fresh_email_otp(otp_provider, email: str, after_ts: float, used_co
     while True:
         code = str(otp_provider(email, after_ts=after_ts) or "").strip()
         if code and code not in used_codes:
+            if code in _PLACEHOLDER_EMAIL_OTPS:
+                last_code = code
+                remaining = int(end - time.time())
+                if remaining <= 0:
+                    break
+                logger.warning(
+                    "[Codex][Browser] 忽略占位/脏 OTP=%s，继续等待真实邮箱验证码（剩余 %ss）",
+                    code,
+                    remaining,
+                )
+                time.sleep(min(3, max(1, remaining)))
+                continue
             return code
         last_code = code or last_code
         remaining = int(end - time.time())
@@ -2828,12 +3125,19 @@ def _run_roxy_codex_oauth_once(
                 message=f"{_codex_driver_name()}: {msg}",
             )
 
+        # 强制复用浏览器实际代理：Cloak/Roxy 可能在 opened.raw 里已固定 SID，
+        # 若仍传 proxy=None，BrowserSession 会再从池里抽一条，导致“浏览器通、换 token 挂”。
+        token_proxy = proto.resolve_browser_proxy_for_token_exchange(proxy=proxy, opened=opened)
+        logger.info(
+            "[Codex][Browser] 捕获 code 后换 token，复用浏览器代理：%s",
+            proto._mask_proxy_for_log(token_proxy),
+        )
         done = proto.complete_local_codex_oauth(
             email=email,
             code=code,
             code_verifier=code_verifier or "",
             callback_url=callback_url,
-            proxy=proxy,
+            proxy=token_proxy,
         )
         return proto._codex_result(
             status="success",

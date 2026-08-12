@@ -261,6 +261,9 @@ def build_pool_account_from_codex_json(
     priority: int | None = None,
     load_factor: int | None = None,
     rate_multiplier: float | None = None,
+    model_whitelist: list[str] | None = None,
+    extra_patch: dict[str, Any] | None = None,
+    auto_pause_on_expired: bool | None = None,
 ) -> dict:
     """把 codex / CPA / 已展平的凭证 dict 转成 sub2api CreateAccountRequest。
 
@@ -359,6 +362,13 @@ def build_pool_account_from_codex_json(
     ):
         if isinstance(val, str) and val.strip():
             credentials[key] = val.strip()
+    if model_whitelist is not None:
+        models = []
+        for model in model_whitelist:
+            value = str(model or "").strip()
+            if value and value not in models:
+                models.append(value)
+        credentials["model_mapping"] = {model: model for model in models}
 
     # 号池参数：只用保存配置 / 调用方入参，绝不读 content 里的 concurrency/group_ids 等
     gid = int(group_id if group_id is not None else getattr(_cfg, "SUB2API_POOL_GROUP_ID", 8) or 8)
@@ -370,7 +380,11 @@ def build_pool_account_from_codex_json(
         if rate_multiplier is not None
         else getattr(_cfg, "SUB2API_POOL_RATE_MULTIPLIER", 1.0) or 1.0
     )
-    auto_pause = bool(getattr(_cfg, "SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED", True))
+    auto_pause = bool(
+        auto_pause_on_expired
+        if auto_pause_on_expired is not None
+        else getattr(_cfg, "SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED", True)
+    )
 
     account: dict[str, Any] = {
         "name": name,
@@ -389,6 +403,8 @@ def build_pool_account_from_codex_json(
         "rate_multiplier": rate,
         "auto_pause_on_expired": auto_pause,
     }
+    if isinstance(extra_patch, dict):
+        account["extra"].update(extra_patch)
     if exp_unix:
         account["expires_at"] = int(exp_unix)
     return account
@@ -546,6 +562,24 @@ def _dispatch_pool_batches(
                 })
 
     return success, failed
+
+
+def push_prepared_accounts_to_pool(
+    prepared: list[tuple[str, dict]],
+    *,
+    mark_exported: bool = False,
+) -> dict:
+    """推送已经构造好的 sub2api 账号，供自动补池等编排服务复用。"""
+    items = list(prepared or [])
+    results: list[dict] = []
+    success, failed = _dispatch_pool_batches(items, results=results, mark_exported=mark_exported)
+    return {
+        "ok": failed == 0 and success == len(items),
+        "success": success,
+        "failed": failed,
+        "total": len(items),
+        "results": results,
+    }
 
 
 def parse_upload_json_text(raw: bytes | str, *, filename: str = "") -> Any:

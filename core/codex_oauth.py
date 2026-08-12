@@ -29,7 +29,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode, urlparse, parse_qs, quote
+from urllib.parse import urlencode, urlparse, parse_qs, quote, unquote, urlunparse
 
 # 用模块属性方式访问 config，支持 WebUI 热加载（config.reload_all()）。
 # 协议级常量（CLIENT_ID/URL/SCOPE/OUTPUT_DIRNAME）虽然不会改，统一从 _cfg 读，
@@ -1254,6 +1254,60 @@ def build_codex_storage(token_resp: dict, id_claims: dict) -> dict:
     }
 
 
+def _mask_proxy_for_log(proxy: str | None) -> str:
+    """日志里隐藏代理密码，仅保留 scheme/user/host/port 与 sid 片段。"""
+    text = "" if proxy is None else str(proxy).strip()
+    if proxy is None:
+        return "未指定(将从代理池重抽)"
+    if not text:
+        return "直连"
+    try:
+        parsed = urlparse(text)
+        if not parsed.scheme and not parsed.hostname:
+            return text[:48] + ("..." if len(text) > 48 else "")
+        user = unquote(parsed.username) if parsed.username else ""
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        # 保留 sid 便于对照浏览器启动日志，不回显密码。
+        if user:
+            netloc = f"{user}:***@{host}{port}"
+        else:
+            netloc = f"{host}{port}"
+        return urlunparse((parsed.scheme, netloc, "", "", "", ""))
+    except Exception:
+        return text[:48] + ("..." if len(text) > 48 else "")
+
+
+def resolve_browser_proxy_for_token_exchange(
+    proxy: str | None = None,
+    opened=None,
+) -> str | None:
+    """换 token 时尽量复用浏览器实际代理，避免 BrowserSession(proxy=None) 另抽一条 SID。
+
+    语义与 BrowserSession 对齐：
+      - 非空字符串：使用该代理
+      - ""：显式直连
+      - None：无浏览器代理信息时的兜底，由 BrowserSession 自行从池抽取
+    """
+    if proxy is not None:
+        return proxy
+
+    raw = getattr(opened, "raw", None)
+    if not isinstance(raw, dict):
+        return None
+
+    # Cloak: raw["proxy"]；其它驱动可能写 proxy_url / proxy_used
+    for key in ("proxy", "proxy_url", "proxyUrl", "proxy_used"):
+        if key not in raw:
+            continue
+        val = raw.get(key)
+        if val is None:
+            return ""
+        text = str(val).strip()
+        return text if text else ""
+    return None
+
+
 def complete_local_codex_oauth(
     *,
     email: str,
@@ -1272,17 +1326,40 @@ def complete_local_codex_oauth(
     if not code:
         raise RuntimeError("[Codex] local 模式缺少 authorization code")
 
-    session = BrowserSession(proxy=proxy)
-    try:
-        token_resp = exchange_codex_token(session, code, code_verifier)
-    finally:
+    def _close_session(sess) -> None:
+        if not sess:
+            return
         try:
-            # BrowserSession 可能没有 close；忽略
-            closer = getattr(session, "close", None)
+            closer = getattr(sess, "close", None)
             if callable(closer):
                 closer()
         except Exception:
             pass
+
+    logger.info("[Codex] 换 token 使用代理：%s", _mask_proxy_for_log(proxy))
+    session = None
+    try:
+        # 短请求：有显式代理时仍探测出口，便于日志对照；失败路径会降级。
+        session = BrowserSession(proxy=proxy, detect_exit_geo=bool(proxy))
+        try:
+            token_resp = exchange_codex_token(session, code, code_verifier)
+        except Exception as exc:
+            # 浏览器能走通 1024proxy socks5，但 curl_cffi 偶发 TLS 失败。
+            # OAuth code 换 token 不绑定浏览器出口 IP，代理 SSL 失败时改直连兜底。
+            if proxy not in (None, "") and _is_transient_network_error(exc):
+                logger.warning(
+                    "[Codex] 经代理换 token 失败，改直连重试：%s: %s",
+                    type(exc).__name__,
+                    str(exc)[:180],
+                )
+                _close_session(session)
+                session = BrowserSession(proxy="", detect_exit_geo=False)
+                logger.info("[Codex] 换 token 使用代理：直连(SSL 兜底)")
+                token_resp = exchange_codex_token(session, code, code_verifier)
+            else:
+                raise
+    finally:
+        _close_session(session)
 
     id_claims = _parse_id_token(token_resp.get("id_token", ""))
     effective_email = str(id_claims.get("email") or email or "").strip() or email
@@ -1840,11 +1917,18 @@ def run_codex_oauth(
             from core.cloakbrowser_driver import build_cloak_driver
             from core.roxy_codex_oauth import run_roxy_codex_oauth
             driver, opened = build_cloak_driver(proxy=proxy)
+            # build_cloak_driver 在 proxy=None 时会自己抽代理；这里强制把实际代理回传，
+            # 避免后续 complete_local_codex_oauth 再抽一条不同 SID。
+            browser_proxy = resolve_browser_proxy_for_token_exchange(proxy=proxy, opened=opened)
+            logger.info(
+                "[Codex][Cloak] 浏览器实际代理将用于换 token：%s",
+                _mask_proxy_for_log(browser_proxy),
+            )
             try:
                 return run_roxy_codex_oauth(
                     email,
                     otp_provider=otp_provider,
-                    proxy=proxy,
+                    proxy=browser_proxy,
                     force=True,
                     existing_driver=driver,
                     existing_opened=opened,

@@ -38,6 +38,27 @@ class AuthRouteErrorRecoverTests(unittest.TestCase):
         # no .text attribute on spec
         self.assertEqual(reg._safe_element_text(el), "Try again")
 
+    def test_dom_element_handle_rejects_json_value_dict(self):
+        # Cloak 把 DOM 塞进 dict 回传后，json_value 得到普通对象，不能再当元素点
+        self.assertFalse(reg._is_dom_element_handle(None))
+        self.assertFalse(reg._is_dom_element_handle({"ok": True, "input": {}}))
+        self.assertFalse(reg._is_dom_element_handle({}))
+        self.assertFalse(reg._is_dom_element_handle("button"))
+
+        class CloakElement:
+            pass
+
+        self.assertTrue(reg._is_dom_element_handle(CloakElement()))
+
+    def test_human_click_rejects_non_element(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            reg._human_click(MagicMock(), {"fake": True}, label="password_submit")
+        self.assertIn("非 DOM 元素", str(ctx.exception))
+
+    def test_human_scroll_to_ignores_non_element(self):
+        # 不应抛错
+        reg._human_scroll_to(MagicMock(), {"fake": True})
+
 
 if __name__ == "__main__":
     unittest.main()

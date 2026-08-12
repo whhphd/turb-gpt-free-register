@@ -167,6 +167,9 @@ def run_registration(
     proxy: str = None,
     otp_code: str = None,
     batch_dir=None,
+    *,
+    keep_browser: bool = False,
+    skip_codex: bool = False,
 ):
     """
     执行完整的 ChatGPT 注册流程（OTP-only，无密码）。
@@ -181,6 +184,8 @@ def run_registration(
         birthday: 生日，格式 YYYY-MM-DD
         proxy: 代理地址（不传则从 PROXY_POOL 随机抽）
         otp_code: 邮箱验证码（如果为None，会等待手动输入）
+        keep_browser: 仅 cloak 驱动生效；成功后保留浏览器给调用方（GCash 提链等）
+        skip_codex: 强制跳过注册后 Codex OAuth（GCash 保活会话等）
     """
     # 可选注册驱动：
     #   protocol     = 原有纯协议（curl_cffi）
@@ -190,6 +195,8 @@ def run_registration(
     #   skyvern      = Skyvern Browser Sessions + Playwright
     driver_mode = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
     if driver_mode in ("roxy", "roxybrowser", "fingerprint", "browser"):
+        if keep_browser:
+            raise RuntimeError("keep_browser 目前仅支持 REGISTRATION_DRIVER=cloak")
         from core.roxy_registration import run_roxy_registration
         return run_roxy_registration(
             email=email,
@@ -208,6 +215,8 @@ def run_registration(
             proxy=proxy,
             otp_code=otp_code,
             batch_dir=batch_dir,
+            keep_browser=keep_browser,
+            skip_codex=skip_codex,
         )
     if driver_mode in ("browser_use", "browseruse", "browser-use", "bu"):
         from core.browser_use_registration import run_browser_use_registration

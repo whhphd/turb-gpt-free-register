@@ -588,6 +588,32 @@ EDITABLE_FIELDS = [
         "key": "SUB2API_POOL_BATCH_SIZE", "file": "sub2api.py", "type": "int", "group": "Codex",
         "label": "号池批次大小", "help": "accounts/batch 单次打包条数，默认 50",
     },
+    {
+        "key": "SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED", "file": "sub2api.py", "type": "bool", "group": "Codex",
+        "label": "号池过期自动暂停", "help": "账号到期后自动暂停调度，推池和自动补池共用",
+    },
+    {
+        "key": "SOGOUEDU_API_BASE", "file": "sub2api.py", "type": "str", "group": "SogouEdu 补池",
+        "label": "SogouEdu API 地址", "help": "默认 https://sogouedu.cc",
+    },
+    {
+        "key": "SOGOUEDU_USERNAME", "file": "sub2api.py", "type": "str", "group": "SogouEdu 补池",
+        "label": "SogouEdu 用户名", "help": "只保存到 .env；前端只显示是否已配置，留空提交会保留原值",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "SOGOUEDU_PASSWORD", "file": "sub2api.py", "type": "str", "group": "SogouEdu 补池",
+        "label": "SogouEdu 密码", "help": "只保存到 .env；前端不回显，留空提交会保留原值",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "SOGOUEDU_API_TIMEOUT", "file": "sub2api.py", "type": "int", "group": "SogouEdu 补池",
+        "label": "SogouEdu 请求超时", "help": "供应商 API 单次请求超时秒数",
+    },
+    {
+        "key": "SOGOUEDU_MAX_RETRIES", "file": "sub2api.py", "type": "int", "group": "SogouEdu 补池",
+        "label": "SogouEdu 最大重试", "help": "GET/状态查询及带幂等键下单的网络重试次数",
+    },
     # ---- 接码平台 ----
     # ---- Codex：基础 / CPA / sub2api 配置 ----
     {
@@ -913,7 +939,12 @@ def get_config() -> list[dict]:
             value = _normalize_config_value(value, field["type"])
         item = dict(field)
         item["storage"] = "env"
-        item["value"] = value
+        if field.get("secret"):
+            # 密钥永远不通过 Web API 返回；前端只可看到 configured 状态。
+            item["configured"] = bool(value)
+            item["value"] = "" if field["type"] == "str" else []
+        else:
+            item["value"] = value
         out.append(item)
     return out
 
@@ -1057,6 +1088,9 @@ def update_config(updates: dict) -> dict:
         field = _FIELD_BY_KEY.get(key)
         if field is None:
             ignored.append(key)
+            continue
+        if field.get("secret") and (value is None or str(value).strip() == ""):
+            # 脱敏表单会带回空值；空值表示保持当前密钥，不允许误清空。
             continue
         env_updates[key] = _format_env_value(value, field["type"])
         updated.append(key)

@@ -171,8 +171,11 @@ def _wait_for_callback(context, page, timeout: int | None = None) -> str:
     raise RuntimeError(f"等待 Codex callback 超时，最后 URL={last_url}")
 
 
+_PLACEHOLDER_EMAIL_OTPS = frozenset({"000000", "00000", "0000", "111111", "123456"})
+
+
 def _wait_for_fresh_email_otp(otp_provider, email: str, after_ts: float, used_codes: set[str] | None = None, timeout: int = 90) -> str:
-    """获取一个未提交过的邮箱 OTP，避免重发后复用旧码。"""
+    """获取一个未提交过的邮箱 OTP，避免重发后复用旧码/占位码。"""
     used_codes = {str(x) for x in (used_codes or set()) if x}
     end = time.time() + timeout
     last_code = ""
@@ -180,11 +183,13 @@ def _wait_for_fresh_email_otp(otp_provider, email: str, after_ts: float, used_co
         code = str(otp_provider(email, after_ts=after_ts) or "").strip()
         if code:
             last_code = code
-            if code not in used_codes:
+            if code in _PLACEHOLDER_EMAIL_OTPS:
+                logger.warning("[Codex][BrowserUse] 忽略占位/脏 OTP=%s，继续等待真码", code)
+            elif code not in used_codes:
                 return code
         time.sleep(1 if _fast_mode() else 2)
     if last_code:
-        raise RuntimeError(f"等待邮箱 OTP 超时，最后只拿到已使用验证码：{last_code}")
+        raise RuntimeError(f"等待邮箱 OTP 超时，最后只拿到已使用/占位验证码：{last_code}")
     raise RuntimeError("等待邮箱 OTP 超时")
 
 
