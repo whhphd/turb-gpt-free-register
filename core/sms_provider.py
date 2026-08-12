@@ -2760,9 +2760,26 @@ def acquire_number(
                 break
 
             # 样本库分桶：平价/探索/兜底/垃圾；前 3 次锁平价，第 4 次起开兜底
+            all_candidates = list(candidates)
             candidates = order_candidates_for_acquire(
-                candidates, attempt_index=attempt_i,
+                all_candidates, attempt_index=attempt_i,
             )
+            if attempt_i <= int(_BUDGET_PHASE_ATTEMPTS):
+                # 成本阶段仍先打 value/explore；若这些槽位临时无号，必须能轮换到
+                # 尚未尝试的 fallback，否则一次 NO_NUMBERS 就会提前结束整次取号。
+                preferred_slots = {
+                    _slot_key(str(row.get("country") or ""), str(row.get("provider_id") or ""))
+                    for row in candidates
+                }
+                fallback_order = order_candidates_for_acquire(
+                    all_candidates,
+                    attempt_index=int(_BUDGET_PHASE_ATTEMPTS) + 1,
+                )
+                candidates.extend(
+                    row for row in fallback_order
+                    if _slot_key(str(row.get("country") or ""), str(row.get("provider_id") or ""))
+                    not in preferred_slots
+                )
             bucket_counts: dict[str, int] = {}
             for c in candidates:
                 t = str(c.get("bucket") or c.get("tier_name") or "?")

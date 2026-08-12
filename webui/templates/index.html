@@ -2501,6 +2501,90 @@
       :root { --sticky-email-w: 140px; }
     }
 
+    /* =========================================================
+       2026 运维控制台视觉层
+       页面壳层统一覆盖旧版组件细节，业务 ID 与脚本保持不变。
+       ========================================================= */
+    :root {
+      --bg: #f3f5f8; --surface: #ffffff; --soft: #f8fafc; --text: #172033;
+      --muted: #667085; --line: #e2e7ef; --line-strong: #cfd7e3;
+      --blue: #2f65d9; --blue-soft: #edf3ff; --green: #18864b;
+      --amber: #aa7412; --red: #c2413a; --sidebar-width: 248px;
+      --page-gutter: 28px; --radius: 6px;
+    }
+    html { background: var(--bg); }
+    body { background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.45; }
+    .app-sidebar { width: var(--sidebar-width); background: #111827; border-right: 1px solid #1f2a3b; box-shadow: 8px 0 24px rgba(15,23,42,.08); }
+    .sidebar-brand { height: 68px; padding: 0 20px; border-bottom-color: #243144; }
+    .sidebar-brand-icon { width: 30px; height: 32px; }
+    .sidebar-brand-title { color: #f8fafc; font-size: 14px; letter-spacing: .02em; }
+    .sidebar-nav { padding: 18px 12px 24px; gap: 4px; }
+    .app-sidebar .sidebar-nav button,
+    .app-sidebar .sidebar-nav button.sidebar-item { min-height: 42px; border-radius: var(--radius); color: #aebbd0; padding: 10px 13px; font-size: 13px; font-weight: 600; }
+    .app-sidebar .sidebar-nav button:hover { color: #fff; background: #1b2739; }
+    .app-sidebar .sidebar-nav button.active { color: #fff; background: #2458c4; box-shadow: inset 3px 0 0 #8cb4ff; }
+    .sidebar-item-icon { width: 17px; height: 17px; }
+    .sidebar-footer { padding: 12px; border-top-color: #243144; }
+    .sidebar-footer a, .sidebar-logout button { border-radius: var(--radius); color: #8998af; font-size: 12px; }
+    .sidebar-footer a:hover { color: #dce8ff; background: #1b2739; }
+    .sidebar-logout button:hover { color: #ffb4ae; background: #3a2027; }
+    .workspace-context { min-height: 66px; margin: 0 var(--page-gutter); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+    .workspace-context-copy { min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+    .workspace-context-eyebrow { color: #8994a6; font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .workspace-context-title { color: #101828; font-size: 17px; font-weight: 750; }
+    .workspace-context-meta, .workspace-context-mark { color: #8994a6; font-size: 12px; white-space: nowrap; }
+    .workspace-context-mark { display: inline-flex; align-items: center; gap: 7px; }
+    .workspace-context-mark i { width: 7px; height: 7px; border-radius: 50%; background: #2eb875; box-shadow: 0 0 0 3px rgba(46,184,117,.12); }
+    main { width: calc(100% - var(--page-gutter) * 2); margin: 18px var(--page-gutter) 44px; gap: 16px; }
+    main > div:not(.hidden) { width: 100%; max-width: 100%; gap: 16px; min-width: 0; grid-template-columns: minmax(0, 1fr); }
+    main > div:not(.hidden) > *,
+    main section, main article, main .acc-v2-btn-group { min-width: 0; max-width: 100%; }
+    .register-title { margin-bottom: 14px; color: #101828; font-size: 24px; font-weight: 750; letter-spacing: -.015em; }
+    section.card, .jobs-panel-v2, .accounts-panel-v2, .codex-panel-v2, .outlook-panel-v2,
+    .pool-monitor-panel, .config-panel-v2, .finished-batch-panel, .sogou-restock-panel,
+    .stat, .codex-stat-card { border-color: var(--line); border-radius: var(--radius); box-shadow: 0 1px 2px rgba(15,23,42,.03); }
+    .stat { padding: 16px; }
+    .stat strong { color: #101828; font-size: 22px; }
+    .stat-top span { color: #7a8799; font-size: 11px; font-weight: 700; letter-spacing: .02em; }
+    .head, .jobs-toolbar-v2, .accounts-filter-v2, .codex-filter-v2, .outlook-filter-v2,
+    .pool-monitor-head, .config-overview-v2 { background: #fbfcfe; border-color: var(--line); }
+    .jobs-toolbar-v2, .accounts-filter-v2, .codex-filter-v2, .outlook-filter-v2 { padding: 12px 14px; }
+    .jobs-toolbar-v2 .jobs-tb-btn, .accounts-filter-v2 .jobs-tb-btn, .codex-filter-v2 .jobs-tb-btn,
+    .outlook-filter-v2 .jobs-tb-btn, .jobs-toolbar-v2 button, .jobs-tb-btn { min-height: 34px; border-radius: var(--radius); border-color: var(--line-strong); background: #fff; color: #344054; font-size: 12px; font-weight: 650; box-shadow: none; }
+    .jobs-tb-btn:hover:not(:disabled) { border-color: #8eace4; background: var(--blue-soft); color: #2458c4; }
+    .jobs-tb-btn--primary { border-color: var(--blue) !important; background: var(--blue) !important; color: #fff !important; }
+    .jobs-tb-btn--good { border-color: #a9d9bf !important; background: #f2fbf5 !important; color: #167044 !important; }
+    .jobs-tb-btn--danger { border-color: #e7b0ac !important; background: #fff7f6 !important; color: #b3261e !important; }
+    input, textarea, select { border-color: var(--line-strong); border-radius: var(--radius); color: #1d2939; background: #fff; }
+    input:focus, textarea:focus, select:focus, button:focus-visible, a:focus-visible { outline: 3px solid rgba(47,101,217,.18); outline-offset: 1px; border-color: #6f98e6; }
+    .table-wrap, .jobs-table-v2-wrap, .accounts-table-v2-wrap, .codex-table-v2-wrap, .outlook-table-v2-wrap { border-top-color: var(--line); }
+    table { font-size: 12px; }
+    th, td { padding: 9px 11px; border-bottom-color: #edf0f4; }
+    th { background: #f8fafc !important; color: #667085; font-size: 11px; font-weight: 750; }
+    tr:hover td { background: #f8fbff; }
+    .pill { border-radius: 4px; padding: 3px 7px; font-size: 11px; font-weight: 750; }
+    .codex-excel-filters { padding: 8px 14px 0; }
+    .codex-col-filter-btn { min-height: 28px; border-radius: 4px; border-color: var(--line-strong); font-size: 11px; }
+    .codex-col-filter-btn.has-filter { color: #2458c4; border-color: #6f98e6; background: var(--blue-soft); }
+    .pool-monitor-summary, .pool-monitor-auto-stats { gap: 8px; padding: 10px 14px; }
+    .pool-monitor-summary .pm-chip { border-radius: 4px; border-color: var(--line); background: #fafbfd; padding: 9px 10px; }
+    .pool-monitor-summary .pm-chip strong { font-size: 17px; }
+    .pool-monitor-toolbar { padding: 9px 14px; border-color: var(--line); }
+    .pool-monitor-table th, .pool-monitor-table td { padding: 8px 10px; }
+    .pool-monitor-auto, .sogou-restock-log-section { border-color: var(--line); border-radius: var(--radius); }
+    .pool-monitor-auto { background: #fbfcfe; }
+    .sogou-restock-log { border-color: var(--line-strong); background: #111827; color: #d8e1ef; }
+    .jobs-v2-pager, .accounts-pager-v2, .codex-pager-v2, .outlook-pager-v2 { border-top-color: var(--line); background: #fbfcfe; }
+    .muted { color: #7a8799; }
+    .log { border: 1px solid #263449; background: #111827 !important; color: #d8e1ef; }
+    @media (max-width: 900px) {
+      :root { --page-gutter: 12px; }
+      .workspace-context { display: none; }
+      main { margin-top: 12px; }
+      main > div:not(.hidden) { width: 100%; min-width: 0; }
+      .register-title { font-size: 21px; margin-bottom: 10px; }
+    }
+
   </style>
 </head>
 <body>
@@ -2602,6 +2686,15 @@
     </form>
   </div>
 </aside>
+
+<div class="workspace-context" aria-label="当前工作区">
+  <div class="workspace-context-copy">
+    <span class="workspace-context-eyebrow">WORKSPACE</span>
+    <strong class="workspace-context-title" id="workspaceContextTitle">注册</strong>
+    <span class="workspace-context-meta" id="workspaceContextMeta">任务与账号工作流</span>
+  </div>
+  <span class="workspace-context-mark"><i aria-hidden="true"></i>控制台在线</span>
+</div>
 
 <main>
   <!-- ============ 注册 ============ -->
@@ -3604,9 +3697,23 @@ const TAB_TITLES = {
   'pool-admin': '号池管理',
   config: '配置',
 };
+const TAB_CONTEXT = {
+  register: '任务与账号工作流',
+  accounts: '注册账号与批量操作',
+  codex: '授权凭证与号池推送',
+  'pool-admin': '健康巡检与自动补池',
+  outlook: '邮箱资源与导入池',
+  config: '运行参数与服务配置',
+};
 function setMobileTopbarTitle(tab) {
   const el = $('#mobileTopbarTitle');
   if (el) el.textContent = TAB_TITLES[tab] || '控制台';
+}
+function setWorkspaceContext(tab) {
+  const title = $('#workspaceContextTitle');
+  const meta = $('#workspaceContextMeta');
+  if (title) title.textContent = TAB_TITLES[tab] || '控制台';
+  if (meta) meta.textContent = TAB_CONTEXT[tab] || '运营工作区';
 }
 function setSidebarOpen(open) {
   const btn = $('#mobileMenuBtn');
@@ -3625,6 +3732,7 @@ function activateTab(tab, persist=true) {
     if (el) el.classList.toggle('hidden', t !== tab);
   });
   setMobileTopbarTitle(tab);
+  setWorkspaceContext(tab);
   setSidebarOpen(false);
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
   if (tab === 'accounts') loadAccounts();
