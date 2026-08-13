@@ -549,7 +549,13 @@ def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: d
         if status not in {"ready", "completed", "success", "available", "fulfilled", "done"}:
             order["updated_at"] = _now()
             _save_state(state)
-            waiting = {"handled": True, "action": "waiting", "order_id": order_id, "status": status}
+            waiting = {
+                "handled": True,
+                "action": "waiting",
+                "order_id": order_id,
+                "status": status,
+                "reserved": reserved,
+            }
             if order.get("partial_ready_since"):
                 waiting["partial_ready_since"] = order["partial_ready_since"]
             return waiting

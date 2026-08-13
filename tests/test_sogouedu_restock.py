@@ -204,6 +204,7 @@ class SogouRestockTests(unittest.TestCase):
             result = restock.run_restock_cycle(client=fake)
 
         self.assertEqual(result["action"], "waiting")
+        self.assertEqual(result["reserved"], 5)
         self.assertEqual(fake.finalize_calls, [])
         self.assertEqual(restock._load_state()["current_order"]["partial_ready_since"], 900)
 
@@ -225,6 +226,7 @@ class SogouRestockTests(unittest.TestCase):
             result = restock.run_restock_cycle(client=fake)
 
         self.assertEqual(result["action"], "waiting")
+        self.assertEqual(result["reserved"], 5)
         self.assertEqual(fake.finalize_calls, [])
         self.assertEqual(restock._load_state()["current_order"]["partial_ready_since"], 900)
 
