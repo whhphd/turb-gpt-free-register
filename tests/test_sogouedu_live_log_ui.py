@@ -26,6 +26,17 @@ class SogouRestockLiveLogUiTests(unittest.TestCase):
         self.assertIn("document.addEventListener('visibilitychange', syncSogouRestockLogPolling)", self.source)
         self.assertIn("window.addEventListener('pagehide', stopSogouRestockLogPolling)", self.source)
 
+    def test_log_formatter_exposes_partial_settlement_and_countdown(self) -> None:
+        self.assertIn("partial_finalized: '部分结算完成'", self.source)
+        self.assertIn("function formatSogouRestockDuration(seconds)", self.source)
+        self.assertIn("部分备货已等 ${formatSogouRestockDuration(elapsed)}", self.source)
+        self.assertIn("距结算 ${formatSogouRestockDuration(Math.max(0, 300 - elapsed))}", self.source)
+        self.assertIn("已预留 ${row.reserved}", self.source)
+
+    def test_log_formatter_exposes_push_and_recovery_totals(self) -> None:
+        self.assertIn("推池成功 ${result.success || 0} / 失败 ${result.failed || 0}", self.source)
+        self.assertIn("补发原位修复 ${recovery.repaired || 0} / 新建 ${recovery.recreated || 0}", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

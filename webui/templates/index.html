@@ -8011,10 +8011,16 @@ async function codexUploadPushPoolOnFiles(ev) {
     if (Number.isNaN(parsed.getTime())) return String(value);
     return parsed.toLocaleString('zh-CN', { hour12: false });
   }
+  function formatSogouRestockDuration(seconds) {
+    const value = Math.max(0, Math.floor(Number(seconds) || 0));
+    const minutes = Math.floor(value / 60);
+    return `${minutes}分${String(value % 60).padStart(2, '0')}秒`;
+  }
   function formatSogouRestockLog(row) {
     const actionLabels = {
       inventory_ok: '库存充足', ordered: '订单已创建', waiting: '等待订单', taken: '取货完成',
-      pushed: '推池完成', push_retry: '推池待重试', push_waiting: '等待有效账号', order_failed: '订单失败',
+      partial_finalized: '部分结算完成', pushed: '推池完成', push_retry: '推池待重试',
+      push_waiting: '等待有效账号', order_failed: '订单失败',
     };
     const parts = [`[${formatSogouRestockLogTime(row.finished_at || row.started_at)}]`];
     parts.push(row.ok === false ? '失败' : (row.skipped ? '跳过' : '成功'));
@@ -8025,8 +8031,24 @@ async function codexUploadPushPoolOnFiles(ev) {
     if (row.quantity != null) parts.push(`计划补入 ${row.quantity}`);
     if (row.order_id) parts.push(`订单 ${row.order_id}`);
     if (row.status) parts.push(`状态 ${row.status}`);
+    if (row.reserved != null) parts.push(`已预留 ${row.reserved}`);
+    if (row.partial_ready_since) {
+      const started = new Date(row.partial_ready_since).getTime();
+      if (!Number.isNaN(started)) {
+        const elapsed = Math.max(0, (Date.now() - started) / 1000);
+        parts.push(`部分备货已等 ${formatSogouRestockDuration(elapsed)}`);
+        parts.push(`距结算 ${formatSogouRestockDuration(Math.max(0, 300 - elapsed))}`);
+      }
+    }
+    if (row.action === 'partial_finalized' && row.reserved != null) parts.push(`结算 ${row.reserved} 个`);
+    const result = row.result || {};
+    if (row.action === 'pushed' || result.success != null || result.failed != null) {
+      parts.push(`推池成功 ${result.success || 0} / 失败 ${result.failed || 0}`);
+    }
     const recovery = row.recovery || {};
-    if (recovery.repaired || recovery.recreated) parts.push(`修复 ${recovery.repaired || 0} / 重建 ${recovery.recreated || 0}`);
+    if (recovery.repaired || recovery.recreated || recovery.scanned) {
+      parts.push(`补发原位修复 ${recovery.repaired || 0} / 新建 ${recovery.recreated || 0}`);
+    }
     if (row.error) parts.push(`错误 ${row.error}`);
     return parts.join(' · ');
   }
