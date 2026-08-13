@@ -152,6 +152,43 @@ class SogouRestockTests(unittest.TestCase):
             "checked_at": result["started_at"],
         })
 
+    def test_cycle_counts_active_accounts_after_recovery_before_ordering(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "min_healthy": 5,
+            "target_healthy": 10,
+            "max_purchase_per_order": 10,
+        })
+        fake = FakeClient()
+        all_rows = [{"id": 1, "status": "error", "schedulable": False}]
+        active_after_recovery = [
+            {"id": index, "status": "active", "schedulable": True}
+            for index in range(1, 11)
+        ]
+        events = []
+
+        def fetch_accounts(**kwargs):
+            events.append("active_query" if kwargs.get("status") == "active" else "all_query")
+            return active_after_recovery if kwargs.get("status") == "active" else all_rows
+
+        def process_recoveries(*args, **kwargs):
+            events.append("recoveries")
+            return {"scanned": True, "repaired": 1, "recreated": 0}
+
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", side_effect=fetch_accounts), patch.object(
+            restock, "_process_recoveries", side_effect=process_recoveries
+        ):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "inventory_ok")
+        self.assertEqual(result["healthy"], 10)
+        self.assertEqual(result["quantity"], 0)
+        self.assertEqual(result["recovery"]["repaired"], 1)
+        self.assertEqual(events, ["all_query", "recoveries", "active_query"])
+        self.assertEqual(fake.inventory_calls, [])
+        self.assertEqual(fake.created, [])
+
     def test_prepared_payload_applies_model_whitelist_and_pool_settings(self):
         cfg = restock.normalize_restock_config({
             "push_group_id": 12,

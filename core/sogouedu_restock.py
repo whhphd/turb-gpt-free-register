@@ -688,6 +688,7 @@ def run_restock_cycle(*, force: bool = False, client: SogouEduClient | None = No
             result["ok"] = True
             return result
         accounts = _pool_monitor.fetch_pool_accounts(group_id=cfg["monitor_group_id"], platform="openai", account_type="oauth")
+        result["recovery"] = _process_recoveries(api, cfg, state, accounts)
         active_accounts = _pool_monitor.fetch_pool_accounts(
             group_id=cfg["monitor_group_id"],
             platform="openai",
@@ -703,7 +704,6 @@ def run_restock_cycle(*, force: bool = False, client: SogouEduClient | None = No
             "checked_at": _now(),
         }
         _save_state(state)
-        result["recovery"] = _process_recoveries(api, cfg, state, accounts)
         quantity = calculate_purchase_quantity(healthy, cfg)
         result["quantity"] = quantity
         if quantity <= 0:
