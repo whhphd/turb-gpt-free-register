@@ -20,6 +20,7 @@ class FakeClient:
         self.created = []
         self.inventory_calls = []
         self.balance_calls = 0
+        self.take_calls = 0
 
     def balance(self):
         self.balance_calls += 1
@@ -37,6 +38,7 @@ class FakeClient:
         return {"data": {"order_id": order_id, "status": "ready"}}
 
     def take_order(self, order_id, *, take_url=None):
+        self.take_calls += 1
         return {"data": {"accounts": [{"email": "sogou@example.com", "access_token": _jwt()}]}}
 
     def list_recoveries(self, *, before_id=None, limit=100):
@@ -178,6 +180,59 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(fake.created, [])
         pushed.assert_called_once()
         self.assertIsNone(restock._load_state()["current_order"])
+
+    def test_nested_pickup_payload_is_unwrapped_and_pushed(self):
+        restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
+        state = restock._load_state()
+        state["current_order"] = {"order_id": "67600", "quantity": 1, "status": "pending"}
+        restock._save_state(state)
+        fake = FakeClient()
+        nested_response = {
+            "data": {
+                "order": {"id": 67600, "status": "completed"},
+                "payload": {
+                    "type": "sub2api",
+                    "accounts": [{"email": "nested@example.com", "access_token": _jwt("nested@example.com")}],
+                },
+                "status": "completed",
+            }
+        }
+        with patch.object(fake, "take_order", return_value=nested_response), patch.object(
+            restock._pool_monitor, "fetch_pool_accounts", return_value=[]
+        ), patch.object(
+            restock, "push_prepared_accounts_to_pool", return_value={"success": 1, "failed": 0}
+        ) as pushed:
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["action"], "pushed")
+        self.assertEqual(pushed.call_args.args[0][0][1]["credentials"]["email"], "nested@example.com")
+        self.assertIsNone(restock._load_state()["current_order"])
+
+    def test_empty_pickup_payload_is_cleared_for_next_retry(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "min_healthy": 0,
+            "target_healthy": 0,
+            "order_poll_interval_sec": 1,
+        })
+        state = restock._load_state()
+        state["current_order"] = {"order_id": "empty-order", "quantity": 1, "status": "pending"}
+        restock._save_state(state)
+        fake = FakeClient()
+        empty_response = {"data": {"status": "completed", "payload": {"accounts": []}}}
+        with patch.object(fake, "take_order", return_value=empty_response) as take, patch.object(
+            restock._pool_monitor, "fetch_pool_accounts", return_value=[]
+        ), patch.object(restock, "push_prepared_accounts_to_pool") as pushed:
+            first = restock.run_restock_cycle(client=fake)
+            second = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(first["action"], "push_waiting")
+        self.assertEqual(second["action"], "push_waiting")
+        self.assertEqual(take.call_count, 2)
+        pushed.assert_not_called()
+        current = restock._load_state()["current_order"]
+        self.assertEqual(current["status"], "ready")
+        self.assertNotIn("payload", current)
 
     def test_orphan_recovery_recreates_with_source_marker(self):
         restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})

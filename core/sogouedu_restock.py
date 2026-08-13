@@ -301,19 +301,33 @@ def _order_status(body: Any) -> str:
     return str(_value(body, "status", "state", "order_status", "orderStatus") or "").strip().lower()
 
 
-def _payload_accounts(body: Any) -> list[dict]:
-    for value in (
-        body,
-        _extract_data(body),
-        _value(body, "payload", "result", "accounts", "items"),
-    ):
-        if isinstance(value, dict):
-            for key in ("accounts", "items", "data"):
-                if isinstance(value.get(key), list):
-                    return [item for item in value[key] if isinstance(item, dict)]
-        elif isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-    return []
+def _delivery_payload(body: Any) -> Any:
+    """解开取货接口包装层，返回真正包含 accounts 的交付载荷。"""
+    value = body
+    seen: set[int] = set()
+    for _ in range(6):
+        if isinstance(value, list):
+            return value
+        if not isinstance(value, dict):
+            return value
+        if isinstance(value.get("accounts"), list):
+            return value
+        marker = id(value)
+        if marker in seen:
+            break
+        seen.add(marker)
+        nested = next(
+            (
+                value.get(key)
+                for key in ("data", "payload", "result")
+                if isinstance(value.get(key), (dict, list))
+            ),
+            None,
+        )
+        if nested is None:
+            break
+        value = nested
+    return value
 
 
 def _pool_extra(account: dict[str, Any]) -> dict[str, Any]:
@@ -411,15 +425,21 @@ def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: d
             _save_state(state)
             return {"handled": True, "action": "waiting", "order_id": order_id, "status": status}
         response = client.take_order(order_id, take_url=order.get("take_url"))
-        payload = response.get("data") if isinstance(response, dict) and isinstance(response.get("data"), (dict, list)) else response
-        order["payload"] = payload
+        order["payload"] = _delivery_payload(response)
         order["status"] = "taken"
         order["updated_at"] = _now()
         _save_state(state)
 
-    prepared = _build_prepared(order.get("payload"), order_cfg, order_id=order_id)
+    payload = _delivery_payload(order.get("payload"))
+    if payload is not order.get("payload"):
+        order["payload"] = payload
+    prepared = _build_prepared(payload, order_cfg, order_id=order_id)
     if not prepared:
         order["last_error"] = "取货响应未包含有效 OAuth 账号"
+        order.pop("payload", None)
+        order.pop("last_polled_at", None)
+        order["status"] = "ready"
+        order["updated_at"] = _now()
         _save_state(state)
         return {"handled": True, "action": "push_waiting", "order_id": order_id}
     result = push_prepared_accounts_to_pool(prepared)
