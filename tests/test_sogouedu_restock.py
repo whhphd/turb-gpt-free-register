@@ -250,6 +250,67 @@ class SogouRestockTests(unittest.TestCase):
         self.assertTrue(payload["extra"]["recreated"])
         self.assertEqual(payload["extra"]["replacement_of_pool_id"], "missing-1")
 
+    def test_nested_recovery_claim_repairs_existing_account(self):
+        restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
+        fake = FakeClient()
+        recovery = {"id": "r-nested", "pool_id": "42", "delivery_status": "claimable", "claim_url": "/signed/claim"}
+        claim_response = {
+            "data": {
+                "payload": {
+                    "accounts": [{"email": "fixed@example.com", "access_token": _jwt("fixed@example.com")}]
+                }
+            }
+        }
+        existing = [{
+            "id": 42,
+            "status": "error",
+            "extra": {"import_source": "sogouedu_auto_restock"},
+            "credentials": {"email": "fixed@example.com"},
+        }]
+        with patch.object(fake, "list_recoveries", return_value={"data": {
+            "items": [recovery], "next_before_id": "page-2"
+        }}) as listed, patch.object(
+            fake, "claim_recovery", return_value=claim_response
+        ), patch.object(
+            restock._pool_monitor, "fetch_pool_accounts", side_effect=[existing, []]
+        ), patch.object(restock._pool_monitor, "_update_pool_credentials") as updated:
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["recovery"]["repaired"], 1)
+        updated.assert_called_once()
+        self.assertEqual(updated.call_args.args[0], 42)
+        self.assertIsNone(listed.call_args.kwargs["before_id"])
+        self.assertEqual(restock._load_state()["recovery_cursor"], "page-2")
+
+    def test_delivered_recovery_is_skipped_without_claim(self):
+        restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
+        fake = FakeClient()
+        with patch.object(fake, "list_recoveries", return_value={"data": {"items": [
+            {"id": "r-delivered", "delivery_status": "delivered"}
+        ]}}), patch.object(fake, "claim_recovery") as claim, patch.object(
+            restock._pool_monitor, "fetch_pool_accounts", side_effect=[[], []]
+        ):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["recovery"]["repaired"], 0)
+        self.assertEqual(result["recovery"]["recreated"], 0)
+        claim.assert_not_called()
+
+    def test_empty_nested_recovery_claim_is_not_marked_processed(self):
+        restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
+        fake = FakeClient()
+        recovery = {"id": "r-empty", "delivery_status": "claimable"}
+        with patch.object(fake, "list_recoveries", return_value={"data": {"items": [recovery]}}), patch.object(
+            fake, "claim_recovery", return_value={"data": {"payload": {"accounts": []}}}
+        ), patch.object(restock._pool_monitor, "fetch_pool_accounts", side_effect=[[], []]):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["recovery"]["repaired"], 0)
+        saved = restock._read_json(restock.RECOVERIES_PATH, [])
+        row = next(x for x in saved if x.get("id") == "r-empty")
+        self.assertIsNone(row.get("processed_at"))
+        self.assertIn("有效 OAuth", row.get("last_error", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

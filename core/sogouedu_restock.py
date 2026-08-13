@@ -330,6 +330,30 @@ def _delivery_payload(body: Any) -> Any:
     return value
 
 
+def _recovery_page_cursor(body: Any) -> Any:
+    """读取供应商分页游标，仅用于展示/审计，不作为新记录扫描起点。"""
+    data = _extract_data(body)
+    if isinstance(data, dict):
+        return data.get("next_before_id") or data.get("nextBeforeId")
+    return None
+
+
+def _recovery_key(row: dict[str, Any]) -> str:
+    return str(row.get("id") or row.get("recovery_id") or "").strip()
+
+
+def _merge_recovery_items(current: list[dict], stored: list[dict]) -> list[dict]:
+    """合并最新 API 页和本地待处理记录，API 的字段优先。"""
+    merged: dict[str, dict] = {}
+    for row in stored + current:
+        key = _recovery_key(row)
+        if not key:
+            continue
+        old = merged.get(key) or {}
+        merged[key] = {**old, **row}
+    return list(merged.values())
+
+
 def _pool_extra(account: dict[str, Any]) -> dict[str, Any]:
     return account.get("extra") if isinstance(account.get("extra"), dict) else {}
 
@@ -458,35 +482,49 @@ def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict
     last = _parse_time(state.get("last_recovery_scan_at"))
     if last and now - last < cfg["recovery_poll_interval_sec"]:
         return {"scanned": False, "repaired": 0, "recreated": 0}
-    body = client.list_recoveries(before_id=state.get("recovery_cursor"), limit=100)
-    items = _extract_items(body, "items", "recoveries", "records")
+    # before_id 是向更旧记录翻页的游标，不能作为下一轮轮询的起点，否则新
+    # 产生的补发记录会永远落在游标之后。每轮从最新页开始，并合并本地失败
+    # 记录，保证 claimable 记录即使暂时不在最新页也能重试。
+    body = client.list_recoveries(before_id=None, limit=100)
+    latest_items = _extract_items(body, "items", "recoveries", "records")
+    stored_items = _read_json(RECOVERIES_PATH, [])
+    if not isinstance(stored_items, list):
+        stored_items = []
+    items = _merge_recovery_items(latest_items, [row for row in stored_items if isinstance(row, dict)])
     repaired = recreated = 0
-    newest = state.get("recovery_cursor")
+    newest = _recovery_page_cursor(body)
     for recovery in items:
         rid = recovery.get("id") or recovery.get("recovery_id")
         if rid in (None, ""):
             continue
-        newest = rid
-        status = str(recovery.get("status") or recovery.get("delivery_status") or "").lower()
+        status = str(recovery.get("status") or recovery.get("delivery_status") or "").strip().lower()
         if status in {"recovered", "claimed", "completed", "success", "repaired"}:
+            continue
+        if status not in {"claimable", "ready", "available"} and not recovery.get("claim_url"):
+            # delivered/pending 等状态没有可领取票据，不应反复调用 claim。
+            recovery["skip_reason"] = f"status_not_claimable:{status or 'unknown'}"
             continue
         try:
             claim = client.claim_recovery(rid, claim_url=recovery.get("claim_url"), ticket=recovery.get("ticket"))
-            payload = claim.get("data") if isinstance(claim, dict) and isinstance(claim.get("data"), (dict, list)) else claim
+            payload = _delivery_payload(claim)
             matched = _match_sogou_account(accounts, recovery)
             if matched:
                 entries = normalize_upload_json_to_codex_entries(payload, filename=f"sogou-recovery-{rid}.json")
-                if entries:
-                    account_payload = build_pool_account_from_codex_json(entries[0], filename=f"sogou-recovery-{rid}.json")
-                    pool_id = matched.get("id") or matched.get("account_id")
-                    _pool_monitor._update_pool_credentials(int(pool_id), account_payload)
-                    repaired += 1
+                if not entries:
+                    raise ValueError("补发认领响应未包含有效 OAuth 账号")
+                account_payload = build_pool_account_from_codex_json(entries[0], filename=f"sogou-recovery-{rid}.json")
+                pool_id = matched.get("id") or matched.get("account_id")
+                _pool_monitor._update_pool_credentials(int(pool_id), account_payload)
+                repaired += 1
             else:
                 replacement = recovery.get("pool_id") or recovery.get("account_id")
                 prepared = _build_prepared(payload, cfg, order_id=f"recovery-{rid}", recreated=True, replacement_of_pool_id=replacement)
+                if not prepared:
+                    raise ValueError("补发认领响应未包含有效 OAuth 账号")
                 result = push_prepared_accounts_to_pool(prepared)
-                if result.get("failed", 0) == 0 and prepared:
-                    recreated += result.get("success", 0)
+                if result.get("failed", 0):
+                    raise RuntimeError(f"补发推池失败: {result.get('failed')} 个账号")
+                recreated += result.get("success", 0)
             recovery["processed_at"] = _now()
             recovery["result"] = "repaired" if matched else "recreated"
         except Exception as exc:
