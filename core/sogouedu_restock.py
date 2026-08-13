@@ -395,6 +395,52 @@ def _match_sogou_account(accounts: list[dict], recovery: dict[str, Any]) -> dict
     return None
 
 
+def _order_items(body: Any) -> list[dict[str, Any]]:
+    data = _extract_data(body)
+    candidates = [data]
+    if body is not data:
+        candidates.append(body)
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        nested = candidate.get("order") or candidate.get("pickup_order")
+        for value in (nested, candidate):
+            if isinstance(value, dict) and isinstance(value.get("items"), list):
+                return [item for item in value["items"] if isinstance(item, dict)]
+    return []
+
+
+def _recovery_order_email(recovery: dict[str, Any], order_body: Any) -> str:
+    recovery_id = str(recovery.get("id") or recovery.get("recovery_id") or "").strip()
+    inventory_id = str(
+        recovery.get("inventory_id")
+        or recovery.get("inventory_account_id")
+        or ""
+    ).strip()
+    for item in _order_items(order_body):
+        item_recovery_id = str(item.get("recovery_id") or "").strip()
+        item_inventory_id = str(
+            item.get("inventory_account_id") or item.get("inventory_id") or ""
+        ).strip()
+        if (
+            recovery_id and item_recovery_id == recovery_id
+        ) or (
+            inventory_id and item_inventory_id == inventory_id
+        ):
+            return str(item.get("email") or item.get("username") or "").strip().lower()
+    return ""
+
+
+def _payload_email(payload: Any, *, recovery_id: Any = "") -> str:
+    entries = normalize_upload_json_to_codex_entries(
+        payload,
+        filename=f"sogou-recovery-{recovery_id or 'unknown'}.json",
+    )
+    if not entries:
+        return ""
+    return str(entries[0].get("email") or "").strip().lower()
+
+
 def _build_prepared(payload: Any, cfg: dict[str, Any], *, order_id: str = "", recreated: bool = False, replacement_of_pool_id: Any = None) -> list[tuple[str, dict]]:
     entries = normalize_upload_json_to_codex_entries(payload, filename=f"sogou-{order_id or 'recovery'}.json")
     prepared: list[tuple[str, dict]] = []
@@ -554,6 +600,7 @@ def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict
     items = _merge_recovery_items(latest_items, [row for row in stored_items if isinstance(row, dict)])
     repaired = recreated = 0
     newest = _recovery_page_cursor(body)
+    source_orders: dict[str, Any] = {}
     for recovery in items:
         rid = recovery.get("id") or recovery.get("recovery_id")
         if rid in (None, ""):
@@ -566,9 +613,25 @@ def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict
             recovery["skip_reason"] = f"status_not_claimable:{status or 'unknown'}"
             continue
         try:
+            source_order_id = str(
+                recovery.get("source_order_id") or recovery.get("order_id") or ""
+            ).strip()
+            if not recovery.get("email") and source_order_id:
+                if source_order_id not in source_orders:
+                    source_orders[source_order_id] = client.order_status(source_order_id)
+                resolved_email = _recovery_order_email(recovery, source_orders[source_order_id])
+                if resolved_email:
+                    recovery["email"] = resolved_email
+                    recovery["matched_by"] = "source_order"
+            matched = _match_sogou_account(accounts, recovery)
             claim = client.claim_recovery(rid, claim_url=recovery.get("claim_url"), ticket=recovery.get("ticket"))
             payload = _delivery_payload(claim)
-            matched = _match_sogou_account(accounts, recovery)
+            if not matched:
+                claimed_email = _payload_email(payload, recovery_id=rid)
+                if claimed_email:
+                    recovery["email"] = claimed_email
+                    recovery["matched_by"] = "claim_payload"
+                    matched = _match_sogou_account(accounts, recovery)
             if matched:
                 entries = normalize_upload_json_to_codex_entries(payload, filename=f"sogou-recovery-{rid}.json")
                 if not entries:

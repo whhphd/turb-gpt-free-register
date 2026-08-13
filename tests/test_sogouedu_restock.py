@@ -354,6 +354,101 @@ class SogouRestockTests(unittest.TestCase):
         self.assertIsNone(listed.call_args.kwargs["before_id"])
         self.assertEqual(restock._load_state()["recovery_cursor"], "page-2")
 
+    def test_recovery_matches_original_account_through_source_order(self):
+        restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
+        fake = FakeClient()
+        recovery = {
+            "id": 27727,
+            "inventory_id": 145291,
+            "source_order_id": 68525,
+            "delivery_status": "claimable",
+            "claim_url": "/signed/claim",
+        }
+        order_detail = {"order": {"id": 68525, "items": [{
+            "inventory_account_id": 145291,
+            "recovery_id": 27727,
+            "email": "original@example.com",
+        }]}}
+        claim_response = {"data": {"payload": {"accounts": [{
+            "email": "original@example.com",
+            "access_token": _jwt("original@example.com"),
+        }]}}}
+        existing = [{
+            "id": 81,
+            "name": "original@example.com",
+            "status": "error",
+            "extra": {
+                "import_source": "sogouedu_auto_restock",
+                "sogou_order_id": "68525",
+            },
+        }]
+        with patch.object(fake, "list_recoveries", return_value={"data": {"items": [recovery]}}), patch.object(
+            fake, "order_status", return_value=order_detail
+        ) as order_status, patch.object(
+            fake, "claim_recovery", return_value=claim_response
+        ), patch.object(
+            restock._pool_monitor, "fetch_pool_accounts", side_effect=[existing, []]
+        ), patch.object(
+            restock._pool_monitor, "_update_pool_credentials"
+        ) as updated, patch.object(
+            restock, "push_prepared_accounts_to_pool"
+        ) as pushed:
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["recovery"]["repaired"], 1)
+        self.assertEqual(result["recovery"]["recreated"], 0)
+        order_status.assert_called_once_with("68525")
+        updated.assert_called_once()
+        self.assertEqual(updated.call_args.args[0], 81)
+        pushed.assert_not_called()
+        saved = restock._read_json(restock.RECOVERIES_PATH, [])
+        row = next(x for x in saved if str(x.get("id")) == "27727")
+        self.assertEqual(row["email"], "original@example.com")
+        self.assertEqual(row["matched_by"], "source_order")
+
+    def test_recovery_claim_email_is_fallback_for_original_account(self):
+        restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
+        fake = FakeClient()
+        recovery = {"id": "r-email", "delivery_status": "claimable"}
+        claim_response = {"data": {"payload": {"accounts": [{
+            "email": "fallback@example.com",
+            "access_token": _jwt("fallback@example.com"),
+        }]}}}
+        existing = [{
+            "id": 82,
+            "name": "fallback@example.com",
+            "status": "error",
+            "extra": {"import_source": "sogouedu_auto_restock"},
+        }]
+        with patch.object(fake, "list_recoveries", return_value={"data": {"items": [recovery]}}), patch.object(
+            fake, "claim_recovery", return_value=claim_response
+        ), patch.object(
+            restock._pool_monitor, "fetch_pool_accounts", side_effect=[existing, []]
+        ), patch.object(
+            restock._pool_monitor, "_update_pool_credentials"
+        ) as updated, patch.object(
+            restock, "push_prepared_accounts_to_pool"
+        ) as pushed:
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["recovery"]["repaired"], 1)
+        updated.assert_called_once()
+        self.assertEqual(updated.call_args.args[0], 82)
+        pushed.assert_not_called()
+
+    def test_recovery_order_email_falls_back_to_inventory_id(self):
+        recovery = {"id": "different", "inventory_id": 145291}
+        order_detail = {"order": {"items": [{
+            "inventory_account_id": 145291,
+            "recovery_id": 27727,
+            "email": "inventory-match@example.com",
+        }]}}
+
+        self.assertEqual(
+            restock._recovery_order_email(recovery, order_detail),
+            "inventory-match@example.com",
+        )
+
     def test_delivered_recovery_is_skipped_without_claim(self):
         restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
         fake = FakeClient()
