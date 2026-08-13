@@ -39,6 +39,8 @@ _RUNNING = False
 _STOP = threading.Event()
 _WAKE = threading.Event()
 _WORKER: threading.Thread | None = None
+_PARTIAL_FINALIZE_WAIT_SEC = 300
+_PARTIAL_FINALIZE_RETRY_SEC = 30
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
@@ -298,7 +300,26 @@ def _order_id(body: Any) -> str:
 
 
 def _order_status(body: Any) -> str:
-    return str(_value(body, "status", "state", "order_status", "orderStatus") or "").strip().lower()
+    return str(_order_value(body, "status", "state", "order_status", "orderStatus") or "").strip().lower()
+
+
+def _order_value(body: Any, *keys: str) -> Any:
+    data = _extract_data(body)
+    candidates = [data]
+    if body is not data:
+        candidates.append(body)
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in keys:
+            if candidate.get(key) not in (None, ""):
+                return candidate.get(key)
+        nested = candidate.get("order") or candidate.get("pickup_order")
+        if isinstance(nested, dict):
+            for key in keys:
+                if nested.get(key) not in (None, ""):
+                    return nested.get(key)
+    return None
 
 
 def _delivery_payload(body: Any) -> Any:
@@ -439,15 +460,55 @@ def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: d
         order["status"] = _order_status(response) or order.get("status") or "pending"
         order["last_polled_at"] = _now()
         status = order["status"]
+        try:
+            reserved = max(0, int(_order_value(response, "reserved", "reserved_count") or 0))
+        except (TypeError, ValueError):
+            reserved = 0
+        order["reserved"] = reserved
         if status in {"failed", "cancelled", "canceled", "refunded", "error"}:
             order["last_error"] = str(_value(response, "message", "error") or status)
             state["current_order"] = None
             _save_state(state)
             return {"handled": True, "action": "order_failed", "order_id": order_id}
+        if reserved <= 0:
+            order.pop("partial_ready_since", None)
+            order.pop("partial_finalize_last_attempt_at", None)
+        if status == "ready_partial" and reserved > 0:
+            partial_since = _parse_time(order.get("partial_ready_since"))
+            if partial_since is None:
+                order["partial_ready_since"] = _now()
+                partial_since = _parse_time(order["partial_ready_since"])
+            elapsed = max(0.0, time.time() - (partial_since or time.time()))
+            last_attempt = _parse_time(order.get("partial_finalize_last_attempt_at"))
+            retry_ready = last_attempt is None or time.time() - last_attempt >= _PARTIAL_FINALIZE_RETRY_SEC
+            if elapsed >= _PARTIAL_FINALIZE_WAIT_SEC and retry_ready:
+                order["partial_finalize_last_attempt_at"] = _now()
+                order["updated_at"] = _now()
+                _save_state(state)
+                finalized = client.finalize_order(order_id)
+                order["status"] = _order_status(finalized) or "finalizing"
+                order["partial_finalized_at"] = _now()
+                order.pop("partial_ready_since", None)
+                order.pop("partial_finalize_last_attempt_at", None)
+                order.pop("last_polled_at", None)
+                order["updated_at"] = _now()
+                _save_state(state)
+                return {
+                    "handled": True,
+                    "action": "partial_finalized",
+                    "order_id": order_id,
+                    "reserved": reserved,
+                    "status": order["status"],
+                }
         if status not in {"ready", "completed", "success", "available", "fulfilled", "done"}:
             order["updated_at"] = _now()
             _save_state(state)
-            return {"handled": True, "action": "waiting", "order_id": order_id, "status": status}
+            waiting = {"handled": True, "action": "waiting", "order_id": order_id, "status": status}
+            if order.get("partial_ready_since"):
+                waiting["partial_ready_since"] = order["partial_ready_since"]
+            return waiting
+        order.pop("partial_ready_since", None)
+        order.pop("partial_finalize_last_attempt_at", None)
         response = client.take_order(order_id, take_url=order.get("take_url"))
         order["payload"] = _delivery_payload(response)
         order["status"] = "taken"

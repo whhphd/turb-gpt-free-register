@@ -21,6 +21,7 @@ class FakeClient:
         self.inventory_calls = []
         self.balance_calls = 0
         self.take_calls = 0
+        self.finalize_calls = []
 
     def balance(self):
         self.balance_calls += 1
@@ -40,6 +41,10 @@ class FakeClient:
     def take_order(self, order_id, *, take_url=None):
         self.take_calls += 1
         return {"data": {"accounts": [{"email": "sogou@example.com", "access_token": _jwt()}]}}
+
+    def finalize_order(self, order_id):
+        self.finalize_calls.append(order_id)
+        return {"order": {"id": order_id, "status": "completed"}, "status": "completed"}
 
     def list_recoveries(self, *, before_id=None, limit=100):
         return {"data": {"items": []}}
@@ -180,6 +185,73 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(fake.created, [])
         pushed.assert_called_once()
         self.assertIsNone(restock._load_state()["current_order"])
+
+    def test_partial_order_waits_five_minutes_before_finalize(self):
+        restock.save_restock_config({"enabled": True, "order_poll_interval_sec": 1})
+        state = restock._load_state()
+        state["current_order"] = {
+            "order_id": "partial-1",
+            "quantity": 10,
+            "status": "ready_partial",
+            "partial_ready_since": 900,
+        }
+        restock._save_state(state)
+        fake = FakeClient()
+        with patch.object(fake, "order_status", return_value={
+            "order": {"id": "partial-1", "status": "ready_partial", "reserved": 5},
+            "status": "ready_partial",
+        }), patch.object(restock.time, "time", return_value=1199):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["action"], "waiting")
+        self.assertEqual(fake.finalize_calls, [])
+        self.assertEqual(restock._load_state()["current_order"]["partial_ready_since"], 900)
+
+    def test_partial_timer_survives_waiting_inventory_with_reservations(self):
+        restock.save_restock_config({"enabled": True, "order_poll_interval_sec": 1})
+        state = restock._load_state()
+        state["current_order"] = {
+            "order_id": "partial-2",
+            "quantity": 10,
+            "status": "ready_partial",
+            "partial_ready_since": 900,
+        }
+        restock._save_state(state)
+        fake = FakeClient()
+        with patch.object(fake, "order_status", return_value={
+            "order": {"id": "partial-2", "status": "waiting_inventory", "reserved": 5},
+            "status": "waiting_inventory",
+        }), patch.object(restock.time, "time", return_value=1300):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["action"], "waiting")
+        self.assertEqual(fake.finalize_calls, [])
+        self.assertEqual(restock._load_state()["current_order"]["partial_ready_since"], 900)
+
+    def test_partial_order_finalizes_after_five_minutes(self):
+        restock.save_restock_config({"enabled": True, "order_poll_interval_sec": 1})
+        state = restock._load_state()
+        state["current_order"] = {
+            "order_id": "partial-3",
+            "quantity": 10,
+            "status": "ready_partial",
+            "partial_ready_since": 900,
+        }
+        restock._save_state(state)
+        fake = FakeClient()
+        with patch.object(fake, "order_status", return_value={
+            "order": {"id": "partial-3", "status": "ready_partial", "reserved": 5},
+            "status": "ready_partial",
+        }), patch.object(restock.time, "time", return_value=1200):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["action"], "partial_finalized")
+        self.assertEqual(result["reserved"], 5)
+        self.assertEqual(fake.finalize_calls, ["partial-3"])
+        self.assertEqual(fake.take_calls, 0)
+        current = restock._load_state()["current_order"]
+        self.assertEqual(current["status"], "completed")
+        self.assertNotIn("partial_ready_since", current)
 
     def test_nested_pickup_payload_is_unwrapped_and_pushed(self):
         restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
