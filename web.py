@@ -88,6 +88,15 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+def _start_background_workers() -> None:
+    """启动必须随 WebUI 常驻的后台任务。"""
+    try:
+        from core import sogouedu_restock
+        sogouedu_restock.ensure_restock_monitor_started()
+    except Exception:
+        logging.getLogger(__name__).exception("SogouEdu 自动补池 worker 启动失败")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="GPT 注册 WebUI 控制台")
     parser.add_argument("--host", default="127.0.0.1", help="绑定地址，默认仅本地 127.0.0.1")
@@ -110,6 +119,7 @@ def main() -> None:
         raise SystemExit(2) from exc
 
     app = create_app(auth_code=args.auth_code)
+    _start_background_workers()
     url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
     logger.info(f"WebUI 已启动：{url}")
     if is_generated_code():
