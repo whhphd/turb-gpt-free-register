@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import subprocess
 from collections import Counter
 from pathlib import Path
+
+# systemd 直接执行 tools/ 下的脚本时，Python 默认不会把项目根目录加入
+# sys.path；显式加入，确保能读取与 WebUI 相同的业务状态模块。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from core import sogouedu_restock as restock
 
