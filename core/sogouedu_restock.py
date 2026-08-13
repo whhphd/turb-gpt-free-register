@@ -642,7 +642,11 @@ def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict
                 entries = normalize_upload_json_to_codex_entries(payload, filename=f"sogou-recovery-{rid}.json")
                 if not entries:
                     raise ValueError("补发认领响应未包含有效 OAuth 账号")
-                account_payload = build_pool_account_from_codex_json(entries[0], filename=f"sogou-recovery-{rid}.json")
+                account_payload = build_pool_account_from_codex_json(
+                    entries[0],
+                    filename=f"sogou-recovery-{rid}.json",
+                    model_whitelist=cfg["model_whitelist"],
+                )
                 pool_id = matched.get("id") or matched.get("account_id")
                 _pool_monitor._update_pool_credentials(int(pool_id), account_payload)
                 repaired += 1

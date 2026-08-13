@@ -362,7 +362,12 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(payload["extra"]["replacement_of_pool_id"], "missing-1")
 
     def test_nested_recovery_claim_repairs_existing_account(self):
-        restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
+        restock.save_restock_config({
+            "enabled": True,
+            "min_healthy": 0,
+            "target_healthy": 0,
+            "model_whitelist": ["gpt-5.5", "gpt-5.6-sol"],
+        })
         fake = FakeClient()
         recovery = {"id": "r-nested", "pool_id": "42", "delivery_status": "claimable", "claim_url": "/signed/claim"}
         claim_response = {
@@ -390,6 +395,10 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(result["recovery"]["repaired"], 1)
         updated.assert_called_once()
         self.assertEqual(updated.call_args.args[0], 42)
+        self.assertEqual(updated.call_args.args[1]["credentials"]["model_mapping"], {
+            "gpt-5.5": "gpt-5.5",
+            "gpt-5.6-sol": "gpt-5.6-sol",
+        })
         self.assertIsNone(listed.call_args.kwargs["before_id"])
         self.assertEqual(restock._load_state()["recovery_cursor"], "page-2")
 
