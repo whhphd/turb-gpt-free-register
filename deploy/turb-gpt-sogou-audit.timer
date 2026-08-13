@@ -1,0 +1,11 @@
+[Unit]
+Description=Run SogouEdu restock audit every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=turb-gpt-sogou-audit.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

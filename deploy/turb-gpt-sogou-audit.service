@@ -1,0 +1,12 @@
+[Unit]
+Description=Read-only SogouEdu restock audit
+After=turb-gpt-webui.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/turb-gpt-free-register
+ExecStart=/opt/turb-gpt-free-register/.venv/bin/python /opt/turb-gpt-free-register/tools/sogou_restock_audit.py
+User=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+
