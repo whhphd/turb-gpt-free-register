@@ -261,6 +261,12 @@ class SogouEduClient:
         body = self._request_json("POST", path, retry_network=False)
         return body if isinstance(body, dict) else {"data": body}
 
+    def finalize_order(self, order_id: str) -> dict[str, Any]:
+        """结算手动/API 提货订单当前已预留的账号。"""
+        path = f"/api/customer/manual/orders/{order_id}/finalize"
+        body = self._request_json("POST", path, retry_network=False)
+        return body if isinstance(body, dict) else {"data": body}
+
     def list_recoveries(self, *, before_id: Any = None, limit: int = 100) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": max(1, min(100, int(limit or 100)))}
         if before_id not in (None, "", 0, "0"):
@@ -295,4 +301,3 @@ class SogouEduClient:
         path = f"/api/customer/recoveries/{recovery_id}/claim"
         params = {"ticket": ticket} if ticket else None
         return self._request_json("POST", path, params=params, retry_network=False, allow_relogin=True)
-

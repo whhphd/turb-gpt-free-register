@@ -101,6 +101,22 @@ class SogouEduClientTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 402)
         self.assertEqual(ctx.exception.body["error"], "insufficient balance")
 
+    def test_finalize_order_uses_manual_finalize_endpoint_without_network_retry(self):
+        self.session.request.side_effect = [
+            _response(200, {"token": "tok"}),
+            _response(200, {"order": {"id": "o-2", "status": "completed"}}),
+        ]
+        self.client.login()
+
+        body = self.client.finalize_order("o-2")
+
+        self.assertEqual(body["order"]["status"], "completed")
+        self.assertEqual(
+            self.session.request.call_args.args[1],
+            "https://sogou.example/api/customer/manual/orders/o-2/finalize",
+        )
+        self.assertEqual(self.session.request.call_args.args[0], "POST")
+
     def test_claim_uses_signed_claim_url(self):
         self.session.request.side_effect = [
             _response(200, {"token": "tok"}),
