@@ -2925,6 +2925,7 @@
           <span class="acc-v2-btn-group-title">批量</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnNoteSelectedAccountsV2" disabled title="给选中的账号统一设置备注，留空可清空备注">备注</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLinesV2" disabled title="复制选中账号的完整整行，每个账号一行">复制行</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedTokensV2" disabled title="复制选中账号的 Token，每个账号一行">复制Token</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopySelectedDirectCardV2" disabled title="复制选中账号 Token（每行一个），并把直卡开通标为已用">复制直卡</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedEmailsV2" disabled title="复制选中账号的邮箱，每个账号一行">复制邮箱</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载TXT</button>
@@ -4860,7 +4861,8 @@ function _tokenCellV2(r) {
     ? `<div class="acc-v2-direct-inline is-used" title="直卡开通：已用">直卡:已用</div>`
     : `<div class="acc-v2-direct-inline is-unused" title="直卡开通：未用">直卡:未用</div>`;
   let liveHtml = '';
-  if (live === 'live') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}">查活: 正常</div>`;
+  const liveFp = r.live_check_fingerprint_text || '';
+  if (live === 'live') liveHtml = `<div class="acc-v2-sub" title="${esc([liveAt, liveFp].filter(Boolean).join('\n'))}">查活: 正常${liveFp ? ` · ${esc(liveFp)}` : ''}</div>`;
   else if (live === 'queued') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}" style="color:#e6a23c">查活: 排队</div>`;
   else if (live === 'running') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}" style="color:#e6a23c">查活: 运行中</div>`;
   else if (live === 'deactivated') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#f56c6c">查活: 已废</div>`;
@@ -4961,8 +4963,8 @@ function updateAccountSelectionUi(pageRows = null) {
     'btnCheckSelectedPlansV2', 'btnExtractSelectedLinksV2',
     'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
-    'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedDirectCardV2',
-    'btnCopySelectedEmailsV2',
+    'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2',
+    'btnCopySelectedDirectCardV2', 'btnCopySelectedEmailsV2',
     'btnDownloadSelectedTxtV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
   ];
   v2Ids.forEach(id => {
@@ -5408,6 +5410,17 @@ async function copySelectedAccountLines() {
     if (!lines.length) { showToast('选中账号没有可复制整行'); return; }
     copyText(lines.join('\n'));
     showToast(`已复制 ${lines.length} 行`);
+  } catch(err) { showToast('复制失败: ' + err.message); }
+}
+
+async function copySelectedAccountTokens() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  try {
+    const lines = await fetchAccountSecrets(ids, 'access_token');
+    if (!lines.length) { showToast('选中账号没有可复制 Token'); return; }
+    copyText(lines.join('\n'));
+    showToast(`已复制 ${lines.length} 个 Token`);
   } catch(err) { showToast('复制失败: ' + err.message); }
 }
 
@@ -6135,16 +6148,6 @@ async function copyCurrentPageLines() {
   if (!ids.length) { showToast('当前页没有账号'); return; }
   try { copyText((await fetchAccountSecrets(ids, 'copy_line')).join('\n')); } catch(e) { showToast('复制失败: ' + e.message); }
 }
-async function copySelectedAccountTokens() {
-  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
-  if (!ids.length) { showToast('请先选择账号'); return; }
-  try {
-    const lines = await fetchAccountSecrets(ids, 'access_token');
-    if (!lines.length) { showToast('选中账号没有可复制 Token'); return; }
-    copyText(lines.join('\n'));
-    showToast(`已复制 ${lines.length} 个 Token`);
-  } catch(e) { showToast('复制失败: ' + e.message); }
-}
 
 async function copyDirectCardForIds(ids, btn) {
   const list = (ids || []).map(Number).filter(Boolean);
@@ -6205,6 +6208,7 @@ async function copyCurrentPageDirectCards() {
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
   bind('btnNoteSelectedAccountsV2', noteSelectedAccounts);
   bind('btnCopySelectedLinesV2', copySelectedAccountLines);
+  bind('btnCopySelectedTokensV2', copySelectedAccountTokens);
   bind('btnCopySelectedDirectCardV2', copySelectedDirectCards);
   bind('btnCopySelectedEmailsV2', copySelectedAccountEmails);
   bind('btnCopyAllTokensV2', copyCurrentPageTokens);
@@ -8554,6 +8558,15 @@ function getRegistrationDriverValue() {
   const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
   return String(fv == null ? 'protocol' : fv).trim().toLowerCase() || 'protocol';
 }
+function getAutoPlanCheckField() {
+  return (CONFIG || []).find(f => f.key === 'AUTO_PLAN_CHECK_AFTER_REGISTER') || null;
+}
+function getAutoPlanCheckValue() {
+  const f = getAutoPlanCheckField();
+  if (!f) return false;
+  const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
+  return !!fv;
+}
 function registrationDriverLabel(value) {
   const cur = String(value || '').trim().toLowerCase();
   const hit = registrationDriverChoices().find(c => String(c.value) === cur);
@@ -8608,7 +8621,7 @@ function renderRegistrationDriverCard() {
     labelEl.textContent = label;
     labelEl.classList.toggle('is-placeholder', !label || label === '—');
   }
-  if (hintEl) hintEl.textContent = `驱动标识: ${cur}`;
+  if (hintEl) hintEl.textContent = `驱动标识: ${cur} · 自动查套餐: ${getAutoPlanCheckValue() ? '开' : '关'}`;
 }
 function renderRegistrationDriverField(f) {
   return `
@@ -8617,6 +8630,16 @@ function renderRegistrationDriverField(f) {
       <span class="hint">选择注册所用的自动化方式</span>
       <div class="config-ep-select" id="configRegistrationSelectV2"></div>
     </label>
+  `;
+}
+function renderRegistrationSettingsSection(fields) {
+  const driver = fields.find(f => f.key === 'REGISTRATION_DRIVER') || fields[0];
+  const autoPlan = fields.find(f => f.key === 'AUTO_PLAN_CHECK_AFTER_REGISTER');
+  return `
+    <div class="config-section-v2-body config-section-v2-body--single">
+      ${driver ? renderRegistrationDriverField(driver) : '<div class="banner warn">未找到注册方式配置项</div>'}
+    </div>
+    ${autoPlan ? `<div class="config-switches-v2" style="margin-top:14px;">${renderFeatureSwitchField(autoPlan, { withIcon: false })}</div>` : ''}
   `;
 }
 function renderFeatureSwitchField(f, opts = {}) {
@@ -9098,13 +9121,10 @@ function renderConfigSectionV2(name, fields) {
     `;
   }
   if (name === '注册方式') {
-    const field = fields.find(f => f.key === 'REGISTRATION_DRIVER') || fields[0];
     return `
       <section class="config-section-v2" id="${esc(slug)}" data-config-section="${esc(name)}">
         ${renderConfigSectionHead(name, configSectionIntro(name))}
-        <div class="config-section-v2-body config-section-v2-body--single">
-          ${field ? renderRegistrationDriverField(field) : '<div class="banner warn">未找到注册方式配置项</div>'}
-        </div>
+        ${renderRegistrationSettingsSection(fields)}
         <div class="config-section-v2-actions">
           <button type="button" class="btn primary" data-save-config-v2>保存</button>
         </div>
@@ -9337,6 +9357,7 @@ function trackConfigFieldChange(e) {
   const f = CONFIG.find(x => x.key === el.dataset.key);
   if (!f) return;
   CONFIG_PENDING_UPDATES[f.key] = readConfigElementValue(el, f);
+  if (f.key === 'AUTO_PLAN_CHECK_AFTER_REGISTER') renderRegistrationDriverCard();
 }
 $('#tab-config').addEventListener('input', trackConfigFieldChange);
 $('#tab-config').addEventListener('change', trackConfigFieldChange);
