@@ -260,7 +260,17 @@ def count_healthy_accounts(accounts: list[dict[str, Any]], *, now: float | None 
     return sum(1 for account in (accounts or []) if is_healthy_pool_account(account, now=now))
 
 
-def calculate_purchase_quantity(healthy: int, cfg: dict[str, Any]) -> int:
+def next_replenishing_state(healthy: int, cfg: dict[str, Any], current: bool) -> bool:
+    if int(healthy) < int(cfg["min_healthy"]):
+        return True
+    if int(healthy) >= int(cfg["target_healthy"]):
+        return False
+    return bool(current)
+
+
+def calculate_purchase_quantity(healthy: int, cfg: dict[str, Any], *, replenishing: bool) -> int:
+    if not replenishing:
+        return 0
     gap = max(0, int(cfg["target_healthy"]) - int(healthy))
     return min(gap, max(1, int(cfg["max_purchase_per_order"])))
 
@@ -279,6 +289,7 @@ def get_restock_status() -> dict[str, Any]:
         "running": bool(_RUNNING),
         "current_order": _safe_order(state.get("current_order")),
         "last_run": state.get("last_run"),
+        "replenishing": bool(state.get("replenishing")),
         "inventory": state.get("inventory"),
         "last_recovery_scan_at": state.get("last_recovery_scan_at"),
         "recovery_cursor": state.get("recovery_cursor"),
@@ -734,15 +745,18 @@ def run_restock_cycle(*, force: bool = False, client: SogouEduClient | None = No
             status="active",
         )
         healthy = len(active_accounts)
+        replenishing = next_replenishing_state(healthy, cfg, bool(state.get("replenishing")))
         result["healthy"] = healthy
         result["total"] = len(accounts)
+        result["replenishing"] = replenishing
+        state["replenishing"] = replenishing
         state["inventory"] = {
             "healthy": healthy,
             "total": len(accounts),
             "checked_at": _now(),
         }
         _save_state(state)
-        quantity = calculate_purchase_quantity(healthy, cfg)
+        quantity = calculate_purchase_quantity(healthy, cfg, replenishing=replenishing)
         result["quantity"] = quantity
         if quantity <= 0:
             result.update({"ok": True, "action": "inventory_ok"})

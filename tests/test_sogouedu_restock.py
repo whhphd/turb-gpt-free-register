@@ -120,6 +120,64 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(fake.inventory_calls, [("oauth_7d", 3)])
         self.assertEqual(fake.created[0][1], 3)
         self.assertTrue(fake.created[0][2].startswith("sogou-restock-"))
+        self.assertTrue(restock._load_state()["replenishing"])
+
+    def test_cycle_does_not_order_between_minimum_and_target_before_trigger(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "min_healthy": 5,
+            "target_healthy": 10,
+            "max_purchase_per_order": 10,
+        })
+        fake = FakeClient()
+        rows = [{"status": "active", "schedulable": True} for _ in range(7)]
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", return_value=rows):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["action"], "inventory_ok")
+        self.assertEqual(result["quantity"], 0)
+        self.assertFalse(result["replenishing"])
+        self.assertEqual(fake.created, [])
+
+    def test_cycle_continues_replenishing_between_minimum_and_target(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "min_healthy": 5,
+            "target_healthy": 10,
+            "max_purchase_per_order": 10,
+        })
+        state = restock._load_state()
+        state["replenishing"] = True
+        restock._save_state(state)
+        fake = FakeClient()
+        rows = [{"status": "active", "schedulable": True} for _ in range(7)]
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", return_value=rows):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["action"], "ordered")
+        self.assertEqual(result["quantity"], 3)
+        self.assertTrue(result["replenishing"])
+        self.assertEqual(fake.created[0][1], 3)
+
+    def test_cycle_stops_replenishing_at_target(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "min_healthy": 5,
+            "target_healthy": 10,
+        })
+        state = restock._load_state()
+        state["replenishing"] = True
+        restock._save_state(state)
+        fake = FakeClient()
+        rows = [{"status": "active", "schedulable": True} for _ in range(10)]
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", return_value=rows):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["action"], "inventory_ok")
+        self.assertEqual(result["quantity"], 0)
+        self.assertFalse(result["replenishing"])
+        self.assertFalse(restock._load_state()["replenishing"])
+        self.assertEqual(fake.created, [])
 
     def test_cycle_uses_sub2api_current_active_filter_for_health(self):
         restock.save_restock_config({
