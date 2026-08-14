@@ -591,7 +591,15 @@ def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: d
                 "reserved": reserved,
                 "reason": "部分结算后无可交付账号",
             }
-        if status not in {"ready", "completed", "success", "available", "fulfilled", "done"}:
+        # Sogou 部分结算完成后仍返回 partial；只要响应带有预留账号，
+        # 该状态也已经可以取货。否则会在 partial 状态下无限等待。
+        partial_settled_ready = bool(
+            order.get("partial_finalized_at")
+            and status == "partial"
+            and reserved > 0
+            and _order_items(response)
+        )
+        if status not in {"ready", "completed", "success", "available", "fulfilled", "done"} and not partial_settled_ready:
             order["updated_at"] = _now()
             _save_state(state)
             waiting = {

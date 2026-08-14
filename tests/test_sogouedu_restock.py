@@ -387,7 +387,7 @@ class SogouRestockTests(unittest.TestCase):
         self.assertIsNone(restock._load_state()["current_order"])
         self.assertEqual(fake.take_calls, 0)
 
-    def test_partial_finalized_order_with_normal_item_is_not_cleared(self):
+    def test_partial_finalized_order_with_normal_item_is_taken_and_pushed(self):
         restock.save_restock_config({"enabled": True, "order_poll_interval_sec": 1})
         state = restock._load_state()
         state["current_order"] = {
@@ -407,12 +407,15 @@ class SogouRestockTests(unittest.TestCase):
                 "items": [{"health_status": "live_team"}],
             },
             "status": "partial",
-        }):
+        }), patch.object(
+            restock, "push_prepared_accounts_to_pool", return_value={"success": 1, "failed": 0}
+        ) as pushed:
             result = restock.run_restock_cycle(client=fake)
 
-        self.assertEqual(result["action"], "waiting")
-        self.assertEqual(result["status"], "partial")
-        self.assertIsNotNone(restock._load_state()["current_order"])
+        self.assertEqual(result["action"], "pushed")
+        self.assertEqual(fake.take_calls, 1)
+        pushed.assert_called_once()
+        self.assertIsNone(restock._load_state()["current_order"])
 
     def test_nested_pickup_payload_is_unwrapped_and_pushed(self):
         restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
