@@ -410,6 +410,25 @@ def _order_items(body: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _partial_order_is_exhausted(body: Any) -> bool:
+    """判断部分结算后是否所有已预留账号都已失败且无可交付项。"""
+    items = _order_items(body)
+    if not items:
+        return False
+    failure_values = {"failed", "error", "deactivated", "refunded", "cancelled", "canceled"}
+    for item in items:
+        health = str(item.get("health_status") or "").strip().lower()
+        reauthorization = str(item.get("reauthorization_status") or "").strip().lower()
+        replacement = str(item.get("replacement_status") or "").strip().lower()
+        if replacement in failure_values:
+            continue
+        if not replacement and health in failure_values and reauthorization in failure_values:
+            continue
+        if replacement not in failure_values:
+            return False
+    return True
+
+
 def _recovery_order_email(recovery: dict[str, Any], order_body: Any) -> str:
     recovery_id = str(recovery.get("id") or recovery.get("recovery_id") or "").strip()
     inventory_id = str(
@@ -546,6 +565,21 @@ def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: d
                     "reserved": reserved,
                     "status": order["status"],
                 }
+        if (
+            order.get("partial_finalized_at")
+            and status == "partial"
+            and _partial_order_is_exhausted(response)
+        ):
+            state["current_order"] = None
+            _save_state(state)
+            return {
+                "handled": True,
+                "action": "order_failed",
+                "order_id": order_id,
+                "status": "partial_exhausted",
+                "reserved": reserved,
+                "reason": "部分结算后无可交付账号",
+            }
         if status not in {"ready", "completed", "success", "available", "fulfilled", "done"}:
             order["updated_at"] = _now()
             _save_state(state)
