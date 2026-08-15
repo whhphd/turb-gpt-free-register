@@ -3177,25 +3177,29 @@
       </div>
     </section>
 
-    <section id="poolAdminRestockSection" class="hidden" aria-label="SogouEdu 自动补池">
+    <section id="poolAdminRestockSection" class="hidden" aria-label="多供应商自动补池">
       <div class="pool-monitor-panel" style="display:block">
         <div class="pool-monitor-head">
-          <h2>SogouEdu 自动补池</h2>
+          <h2>自动补池 · 多供应商</h2>
           <span class="pool-monitor-meta" id="sogouRestockStatusV2">尚未加载</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSogouRestockRunV2">立即补池</button>
-          <button type="button" class="jobs-tb-btn" id="btnSogouRestockConnectionV2">测试 SogouEdu 连接</button>
+          <button type="button" class="jobs-tb-btn" id="btnSogouRestockConnectionV2">测试供应商连接</button>
         </div>
         <div class="pool-monitor-summary" id="sogouRestockSummaryV2">
           <div class="pm-chip"><span>健康号数</span><strong id="sogouRestockHealthyV2">-</strong></div>
           <div class="pm-chip"><span>号池总数</span><strong id="sogouRestockTotalV2">-</strong></div>
           <div class="pm-chip is-good"><span>补池状态</span><strong id="sogouRestockOrderV2">无未完成订单</strong></div>
           <div class="pm-chip"><span>SogouEdu 凭据</span><strong id="sogouRestockCredentialV2">未配置</strong></div>
+          <div class="pm-chip"><span>BugTeam Token</span><strong id="bugteamRestockCredentialV2">未配置</strong></div>
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:12px 0">
           <label class="fld">启用自动补池<input type="checkbox" id="sogouRestockEnabledV2"></label>
           <label class="fld">监测分组 ID<input type="number" min="1" id="sogouRestockMonitorGroupV2"></label>
           <label class="fld">推池分组 ID<input type="number" min="1" id="sogouRestockPushGroupV2"></label>
           <label class="fld">购买产品<select id="sogouRestockProductV2"><option value="oauth_7d">OAuth 7 天</option><option value="oauth_30d">OAuth 30 天</option></select></label>
+          <label class="fld">供应商优先级<select id="restockProviderPriorityV2"><option value="sogou,bugteam">SogouEdu → BugTeam</option><option value="bugteam,sogou">BugTeam → SogouEdu</option></select></label>
+          <label class="fld">BugTeam 商品<input type="text" id="bugteamRestockProductV2" placeholder="team_1h"></label>
+          <label class="fld">同供应商补足重试<input type="number" min="0" max="5" id="restockPartialRetryLimitV2"></label>
           <label class="fld">最低健康库存<input type="number" min="0" id="sogouRestockMinV2"></label>
           <label class="fld">目标健康库存<input type="number" min="0" id="sogouRestockTargetV2"></label>
           <label class="fld">单次最大购买<input type="number" min="1" id="sogouRestockMaxOrderV2"></label>
@@ -7972,8 +7976,12 @@ async function codexUploadPushPoolOnFiles(ev) {
     _sogouInput('#sogouRestockRateV2', cfg.rate_multiplier);
     toggle('#sogouRestockPauseExpiredV2', cfg.auto_pause_on_expired);
     _sogouInput('#sogouRestockModelsV2', (cfg.model_whitelist || []).join('\n'));
+    _sogouInput('#restockProviderPriorityV2', (cfg.provider_priority || ['sogou', 'bugteam']).join(','));
+    _sogouInput('#bugteamRestockProductV2', cfg.bugteam_product || 'team_1h');
+    _sogouInput('#restockPartialRetryLimitV2', cfg.partial_retry_limit == null ? 2 : cfg.partial_retry_limit);
     set('#sogouRestockStatusV2', cfg.enabled ? (status.running ? '自动补池运行中' : '自动补池已开启') : '自动补池关闭');
     set('#sogouRestockCredentialV2', status.credentials_configured ? '已配置' : '未配置');
+    set('#bugteamRestockCredentialV2', status.providers && status.providers.bugteam ? '已配置' : '未配置');
     const order = status.current_order;
     set('#sogouRestockOrderV2', order ? `${order.order_id || '创建中'} · ${order.status || 'pending'}` : '无未完成订单');
     const last = status.last_run || {};
@@ -8024,7 +8032,8 @@ async function codexUploadPushPoolOnFiles(ev) {
     const actionLabels = {
       inventory_ok: '库存充足', ordered: '订单已创建', waiting: '等待订单', taken: '取货完成',
       partial_finalized: '部分结算完成', pushed: '推池完成', push_retry: '推池待重试',
-      push_waiting: '等待有效账号', order_failed: '订单失败',
+      push_waiting: '等待有效账号', order_failed: '订单失败', provider_retry_scheduled: '同供应商重试',
+      provider_fallback_scheduled: '切换兜底供应商',
     };
     const parts = [`[${formatSogouRestockLogTime(row.finished_at || row.started_at)}]`];
     parts.push(row.ok === false ? '失败' : (row.skipped ? '跳过' : '成功'));
@@ -8034,6 +8043,8 @@ async function codexUploadPushPoolOnFiles(ev) {
     if (row.healthy != null || row.total != null) parts.push(`健康 ${row.healthy ?? '-'} / 总数 ${row.total ?? '-'}`);
     if (row.quantity != null) parts.push(`计划补入 ${row.quantity}`);
     if (row.order_id) parts.push(`订单 ${row.order_id}`);
+    if (row.provider) parts.push(`供应商 ${row.provider}`);
+    if (row.provider_retry_count != null) parts.push(`同源重试 ${row.provider_retry_count}`);
     if (row.status) parts.push(`状态 ${row.status}`);
     if (row.reserved != null) parts.push(`已预留 ${row.reserved}`);
     if (row.partial_ready_since) {
@@ -8120,6 +8131,9 @@ async function codexUploadPushPoolOnFiles(ev) {
       concurrency: num('#sogouRestockConcurrencyV2'), priority: num('#sogouRestockPriorityV2'), load_factor: num('#sogouRestockLoadV2'),
       rate_multiplier: num('#sogouRestockRateV2'), auto_pause_on_expired: !!($('#sogouRestockPauseExpiredV2') && $('#sogouRestockPauseExpiredV2').checked),
       model_whitelist: value('#sogouRestockModelsV2').split(/\r?\n|,/).map(x => x.trim()).filter(Boolean),
+      provider_priority: value('#restockProviderPriorityV2').split(',').map(x => x.trim()).filter(Boolean),
+      bugteam_product: value('#bugteamRestockProductV2').trim() || 'team_1h',
+      partial_retry_limit: num('#restockPartialRetryLimitV2'),
     };
   }
   async function saveSogouRestock() {
@@ -8140,8 +8154,11 @@ async function codexUploadPushPoolOnFiles(ev) {
     finally { if (btn) btn.disabled = false; }
   }
   async function testSogouRestockConnection() {
-    try { const r = await api('/api/pool-admin/sogou-restock/test-connection', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); showToast(r.message || '连接成功'); }
-    catch (err) { showToast('SogouEdu 连接失败: ' + err.message); }
+    try {
+      const r = await api('/api/pool-admin/sogou-restock/test-connection', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+      const rows = Object.entries(r.providers || {}).map(([name, item]) => `${name}: ${item.ok ? '成功' : (item.error || '未配置')}`);
+      showToast(rows.join('；') || r.message || '连接测试完成');
+    } catch (err) { showToast('供应商连接测试失败: ' + err.message); }
   }
   bind('btnSogouRestockSaveV2', saveSogouRestock);
   bind('btnSogouRestockRunV2', runSogouRestock);
@@ -8400,6 +8417,9 @@ function smsConfigSectionForKey(key) {
 }
 
 function codexConfigSectionForKey(key) {
+  if (key.startsWith('BUGTEAM_')) {
+    return ['BugTeam 补池', 'BugTeam 客户取货 API 连接参数；Token 只在服务端 .env 保存，前端不回显'];
+  }
   if (key.startsWith('SOGOUEDU_') || key === 'SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED') {
     return ['SogouEdu 补池', 'SogouEdu 购号 API 连接参数；自动补池业务参数在「号池管理 → 自动补池」单独配置'];
   }

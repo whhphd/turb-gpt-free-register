@@ -618,6 +618,27 @@ EDITABLE_FIELDS = [
         "key": "SOGOUEDU_MAX_RETRIES", "file": "sub2api.py", "type": "int", "group": "SogouEdu 补池",
         "label": "SogouEdu 最大重试", "help": "GET/状态查询及带幂等键下单的网络重试次数",
     },
+    {
+        "key": "BUGTEAM_API_BASE", "file": "sub2api.py", "type": "str", "group": "BugTeam 补池",
+        "label": "BugTeam API 地址", "help": "默认 https://bugteam.team",
+    },
+    {
+        "key": "BUGTEAM_API_TOKEN", "file": "sub2api.py", "type": "str", "group": "BugTeam 补池",
+        "label": "BugTeam 客户 Token", "help": "只保存到 .env；前端不回显，留空提交会保留原值",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "BUGTEAM_API_TIMEOUT", "file": "sub2api.py", "type": "int", "group": "BugTeam 补池",
+        "label": "BugTeam 请求超时", "help": "供应商 API 单次请求超时秒数",
+    },
+    {
+        "key": "BUGTEAM_MAX_RETRIES", "file": "sub2api.py", "type": "int", "group": "BugTeam 补池",
+        "label": "BugTeam 最大重试", "help": "GET/状态查询及带幂等键下单的网络重试次数",
+    },
+    {
+        "key": "BUGTEAM_PRODUCT", "file": "sub2api.py", "type": "str", "group": "BugTeam 补池",
+        "label": "BugTeam 默认商品", "help": "当前客户商品编码，例如 team_1h",
+    },
     # ---- 接码平台 ----
     # ---- Codex：基础 / CPA / sub2api 配置 ----
     {

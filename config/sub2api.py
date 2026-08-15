@@ -71,6 +71,16 @@ SOGOUEDU_PASSWORD: str = ""
 SOGOUEDU_API_TIMEOUT: int = 30
 SOGOUEDU_MAX_RETRIES: int = 2
 
+# ============================================================
+# BugTeam 自动补池（token 只从 .env / 服务端环境读取）
+# ============================================================
+
+BUGTEAM_API_BASE: str = "https://bugteam.team"
+BUGTEAM_API_TOKEN: str = ""
+BUGTEAM_API_TIMEOUT: int = 30
+BUGTEAM_MAX_RETRIES: int = 2
+BUGTEAM_PRODUCT: str = "team_1h"
+
 
 # ============================================================
 # Codex OAuth 授权对接 sub2
@@ -126,6 +136,11 @@ apply_env_overrides(globals(), {
     'SOGOUEDU_PASSWORD': 'str',
     'SOGOUEDU_API_TIMEOUT': 'int',
     'SOGOUEDU_MAX_RETRIES': 'int',
+    'BUGTEAM_API_BASE': 'str',
+    'BUGTEAM_API_TOKEN': 'str',
+    'BUGTEAM_API_TIMEOUT': 'int',
+    'BUGTEAM_MAX_RETRIES': 'int',
+    'BUGTEAM_PRODUCT': 'str',
     'SUB2_CODEX_API_BASE': 'str',
     'SUB2_CODEX_AUTH_URL_PATH': 'str',
     'SUB2_CODEX_CALLBACK_PATH': 'str',

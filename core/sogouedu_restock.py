@@ -18,6 +18,7 @@ from typing import Any
 
 from config import sub2api as _cfg
 from core import sub2api_pool_monitor as _pool_monitor
+from core.bugteam_client import BugTeamClient, BugTeamError
 from core.sogouedu_client import SogouEduClient, SogouEduError
 from core.sub2api_pool_push import (
     build_pool_account_from_codex_json,
@@ -50,6 +51,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "min_healthy": 5,
     "target_healthy": 10,
     "max_purchase_per_order": 5,
+    "provider_priority": ["sogou", "bugteam"],
+    "bugteam_product": str(getattr(_cfg, "BUGTEAM_PRODUCT", "team_1h") or "team_1h"),
+    "partial_retry_limit": 2,
     "monitor_interval_sec": 60,
     "order_poll_interval_sec": 3,
     "recovery_poll_interval_sec": 30,
@@ -96,6 +100,7 @@ def _config_defaults() -> dict[str, Any]:
     defaults["load_factor"] = int(getattr(_cfg, "SUB2API_POOL_LOAD_FACTOR", defaults["load_factor"]) or defaults["load_factor"])
     defaults["rate_multiplier"] = float(getattr(_cfg, "SUB2API_POOL_RATE_MULTIPLIER", defaults["rate_multiplier"]) or defaults["rate_multiplier"])
     defaults["auto_pause_on_expired"] = bool(getattr(_cfg, "SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED", defaults["auto_pause_on_expired"]))
+    defaults["bugteam_product"] = str(getattr(_cfg, "BUGTEAM_PRODUCT", defaults["bugteam_product"]) or defaults["bugteam_product"])
     return defaults
 
 
@@ -104,7 +109,7 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(raw, dict):
         cfg.update({key: raw[key] for key in _CONFIG_KEYS if key in raw})
     cfg["enabled"] = bool(cfg.get("enabled", False))
-    for key in ("monitor_group_id", "push_group_id", "min_healthy", "target_healthy", "max_purchase_per_order", "concurrency", "priority", "load_factor"):
+    for key in ("monitor_group_id", "push_group_id", "min_healthy", "target_healthy", "max_purchase_per_order", "partial_retry_limit", "concurrency", "priority", "load_factor"):
         try:
             cfg[key] = int(cfg.get(key) or 0)
         except (TypeError, ValueError):
@@ -114,6 +119,7 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     cfg["min_healthy"] = max(0, cfg["min_healthy"])
     cfg["target_healthy"] = max(cfg["min_healthy"], cfg["target_healthy"])
     cfg["max_purchase_per_order"] = max(1, cfg["max_purchase_per_order"])
+    cfg["partial_retry_limit"] = max(0, min(5, cfg["partial_retry_limit"]))
     for key in ("monitor_interval_sec", "order_poll_interval_sec", "recovery_poll_interval_sec"):
         try:
             cfg[key] = max(1, int(cfg.get(key) or 1))
@@ -127,6 +133,12 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     cfg["product"] = str(cfg.get("product") or "oauth_7d").strip()
     if cfg["product"] not in {"oauth_7d", "oauth_30d"}:
         cfg["product"] = "oauth_7d"
+    cfg["bugteam_product"] = str(cfg.get("bugteam_product") or getattr(_cfg, "BUGTEAM_PRODUCT", "team_1h") or "team_1h").strip()
+    priority = cfg.get("provider_priority")
+    if not isinstance(priority, list):
+        priority = ["sogou", "bugteam"]
+    priority = [str(item).strip().lower() for item in priority if str(item).strip().lower() in {"sogou", "bugteam"}]
+    cfg["provider_priority"] = list(dict.fromkeys(priority)) or ["sogou", "bugteam"]
     models = cfg.get("model_whitelist")
     if not isinstance(models, list):
         models = []
@@ -275,6 +287,64 @@ def calculate_purchase_quantity(healthy: int, cfg: dict[str, Any], *, replenishi
     return min(gap, max(1, int(cfg["max_purchase_per_order"])))
 
 
+def _provider_names(cfg: dict[str, Any]) -> list[str]:
+    values = cfg.get("provider_priority") if isinstance(cfg, dict) else None
+    if not isinstance(values, list):
+        values = ["sogou", "bugteam"]
+    names = [str(value).strip().lower() for value in values if str(value).strip().lower() in {"sogou", "bugteam"}]
+    return list(dict.fromkeys(names)) or ["sogou", "bugteam"]
+
+
+def _provider_configured(provider: str, *, injected_client: Any = None) -> bool:
+    provider = str(provider or "").strip().lower()
+    if provider == "sogou":
+        return injected_client is not None or bool(
+            getattr(_cfg, "SOGOUEDU_USERNAME", "") and getattr(_cfg, "SOGOUEDU_PASSWORD", "")
+        )
+    if provider == "bugteam":
+        return bool(getattr(_cfg, "BUGTEAM_API_TOKEN", ""))
+    return False
+
+
+def _new_provider_client(provider: str, *, injected_client: Any = None) -> Any:
+    provider = str(provider or "").strip().lower()
+    if provider == "sogou":
+        return injected_client or SogouEduClient()
+    if provider == "bugteam":
+        return BugTeamClient()
+    raise ValueError(f"未知补池供应商: {provider}")
+
+
+def _provider_product(provider: str, cfg: dict[str, Any], order: dict[str, Any] | None = None) -> str:
+    if isinstance(order, dict) and order.get("product"):
+        return str(order["product"]).strip()
+    return str(cfg.get("product") if provider == "sogou" else cfg.get("bugteam_product") or "team_1h").strip()
+
+
+def _provider_source(provider: str) -> str:
+    return "bugteam_auto_restock" if str(provider).strip().lower() == "bugteam" else "sogouedu_auto_restock"
+
+
+def _provider_order_field(provider: str) -> str:
+    return "bugteam_order_id" if str(provider).strip().lower() == "bugteam" else "sogou_order_id"
+
+
+def _provider_order_key(provider: str) -> str:
+    return "bugteam-restock" if str(provider).strip().lower() == "bugteam" else "sogou-restock"
+
+
+def _inventory_available(body: Any) -> int | None:
+    value = _value(body, "available", "available_quantity", "stock", "quantity")
+    try:
+        return max(0, int(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _provider_error(exc: Exception) -> tuple[str, int | None]:
+    return str(exc), getattr(exc, "status_code", None)
+
+
 def _safe_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(order, dict):
         return None
@@ -294,7 +364,50 @@ def get_restock_status() -> dict[str, Any]:
         "last_recovery_scan_at": state.get("last_recovery_scan_at"),
         "recovery_cursor": state.get("recovery_cursor"),
         "credentials_configured": bool(getattr(_cfg, "SOGOUEDU_USERNAME", "") and getattr(_cfg, "SOGOUEDU_PASSWORD", "")),
+        "providers": {
+            "sogou": bool(getattr(_cfg, "SOGOUEDU_USERNAME", "") and getattr(_cfg, "SOGOUEDU_PASSWORD", "")),
+            "bugteam": bool(getattr(_cfg, "BUGTEAM_API_TOKEN", "")),
+        },
     }
+
+
+def test_provider_connections() -> dict[str, Any]:
+    """测试已配置供应商连接，只返回脱敏的连通性和商品摘要。"""
+    cfg = load_restock_config()
+    output: dict[str, Any] = {}
+    for provider in _provider_names(cfg):
+        if not _provider_configured(provider):
+            output[provider] = {"configured": False, "ok": False, "error": "未配置供应商凭据"}
+            continue
+        try:
+            client = _new_provider_client(provider)
+            if provider == "sogou":
+                client.login()
+                output[provider] = {"configured": True, "ok": True, "message": "SogouEdu 登录成功"}
+            else:
+                dashboard = client.dashboard()
+                products = dashboard.get("products") if isinstance(dashboard, dict) else []
+                safe_products = [
+                    {"code": item.get("code"), "name": item.get("name")}
+                    for item in products
+                    if isinstance(item, dict) and item.get("code")
+                ]
+                output[provider] = {
+                    "configured": True,
+                    "ok": True,
+                    "message": "BugTeam 连接成功",
+                    "products": safe_products,
+                }
+        except (SogouEduError, BugTeamError) as exc:
+            output[provider] = {
+                "configured": True,
+                "ok": False,
+                "error": str(exc),
+                "status_code": getattr(exc, "status_code", None),
+            }
+        except Exception as exc:
+            output[provider] = {"configured": True, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return output
 
 
 def _order_id(body: Any) -> str:
@@ -390,12 +503,12 @@ def _pool_extra(account: dict[str, Any]) -> dict[str, Any]:
     return account.get("extra") if isinstance(account.get("extra"), dict) else {}
 
 
-def _match_sogou_account(accounts: list[dict], recovery: dict[str, Any]) -> dict[str, Any] | None:
+def _match_provider_account(accounts: list[dict], recovery: dict[str, Any], provider: str = "sogou") -> dict[str, Any] | None:
     recovery_pool_id = str(recovery.get("pool_id") or recovery.get("account_id") or "").strip()
     email = str(recovery.get("email") or recovery.get("username") or "").strip().lower()
     for account in accounts:
         extra = _pool_extra(account)
-        if extra.get("import_source") != "sogouedu_auto_restock":
+        if extra.get("import_source") != _provider_source(provider):
             continue
         if recovery_pool_id and str(account.get("id") or account.get("account_id") or "") == recovery_pool_id:
             return account
@@ -404,6 +517,11 @@ def _match_sogou_account(accounts: list[dict], recovery: dict[str, Any]) -> dict
         if email and email == account_email:
             return account
     return None
+
+
+def _match_sogou_account(accounts: list[dict], recovery: dict[str, Any]) -> dict[str, Any] | None:
+    """兼容旧测试和外部调用的 Sogou 修复账号匹配入口。"""
+    return _match_provider_account(accounts, recovery, "sogou")
 
 
 def _order_items(body: Any) -> list[dict[str, Any]]:
@@ -471,15 +589,25 @@ def _payload_email(payload: Any, *, recovery_id: Any = "") -> str:
     return str(entries[0].get("email") or "").strip().lower()
 
 
-def _build_prepared(payload: Any, cfg: dict[str, Any], *, order_id: str = "", recreated: bool = False, replacement_of_pool_id: Any = None) -> list[tuple[str, dict]]:
-    entries = normalize_upload_json_to_codex_entries(payload, filename=f"sogou-{order_id or 'recovery'}.json")
+def _build_prepared(
+    payload: Any,
+    cfg: dict[str, Any],
+    *,
+    order_id: str = "",
+    provider: str = "sogou",
+    recreated: bool = False,
+    replacement_of_pool_id: Any = None,
+) -> list[tuple[str, dict]]:
+    provider = str(provider or "sogou").strip().lower()
+    prefix = "bugteam" if provider == "bugteam" else "sogou"
+    entries = normalize_upload_json_to_codex_entries(payload, filename=f"{prefix}-{order_id or 'recovery'}.json")
     prepared: list[tuple[str, dict]] = []
     for index, entry in enumerate(entries):
-        label = str(entry.get("email") or f"sogou-{order_id or 'recovery'}#{index}")
+        label = str(entry.get("email") or f"{prefix}-{order_id or 'recovery'}#{index}")
         extra = {
-            "import_source": "sogouedu_auto_restock",
-            "sogou_order_id": order_id,
-            "sogou_product": cfg["product"],
+            "import_source": _provider_source(provider),
+            _provider_order_field(provider): order_id,
+            f"{provider}_product": _provider_product(provider, cfg),
         }
         if recreated:
             extra["recreated"] = True
@@ -487,7 +615,7 @@ def _build_prepared(payload: Any, cfg: dict[str, Any], *, order_id: str = "", re
                 extra["replacement_of_pool_id"] = replacement_of_pool_id
         account = build_pool_account_from_codex_json(
             entry,
-            filename=f"sogou-{order_id or 'recovery'}.json",
+            filename=f"{prefix}-{order_id or 'recovery'}.json",
             group_id=cfg["push_group_id"],
             concurrency=cfg["concurrency"],
             priority=cfg["priority"],
@@ -501,32 +629,110 @@ def _build_prepared(payload: Any, cfg: dict[str, Any], *, order_id: str = "", re
     return prepared
 
 
-def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+def _schedule_followup_order(
+    order: dict[str, Any],
+    cfg: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    remaining: int,
+    reason: str,
+) -> dict[str, Any] | None:
+    """为少交付/终态失败订单安排同供应商重试或下一个供应商。
+
+    ``provider`` 缺失表示升级前的旧状态，保留原有清理行为，避免改变正在
+    处理的历史 Sogou 订单。新建订单始终写入 provider 字段。
+    """
+    if not order.get("provider"):
+        return None
+    remaining = max(0, int(remaining or 0))
+    if remaining <= 0:
+        return None
+    previous_order_id = str(order.get("order_id") or "")
+    provider = str(order.get("provider") or "sogou").strip().lower()
+    providers = _provider_names(cfg)
+    try:
+        provider_index = providers.index(provider)
+    except ValueError:
+        provider_index = max(0, int(order.get("provider_index") or 0))
+    retry_count = max(0, int(order.get("provider_retry_count") or 0))
+    retry_limit = max(0, int(cfg.get("partial_retry_limit") or 0))
+    if retry_count < retry_limit:
+        next_provider = provider
+        next_retry_count = retry_count + 1
+        next_index = provider_index
+        action = "provider_retry_scheduled"
+    else:
+        next_index = provider_index + 1
+        if next_index >= len(providers):
+            state["current_order"] = None
+            _save_state(state)
+            return {
+                "handled": True,
+                "action": "order_failed",
+                "order_id": str(order.get("order_id") or ""),
+                "status": "provider_exhausted",
+                "remaining": remaining,
+                "reason": reason,
+            }
+        next_provider = providers[next_index]
+        next_retry_count = 0
+        action = "provider_fallback_scheduled"
+
+    order["provider"] = next_provider
+    order["provider_index"] = next_index
+    order["provider_retry_count"] = next_retry_count
+    order["product"] = _provider_product(next_provider, cfg)
+    order["quantity"] = remaining
+    order["remaining_quantity"] = remaining
+    order["last_transition_reason"] = reason
+    order["updated_at"] = _now()
+    for key in ("order_id", "payload", "last_polled_at", "partial_ready_since", "partial_finalize_last_attempt_at", "partial_finalized_at"):
+        order.pop(key, None)
+    order["status"] = "creating"
+    order["idempotency_key"] = f"{_provider_order_key(next_provider)}-{uuid.uuid4().hex}"
+    state["current_order"] = order
+    _save_state(state)
+    return {
+        "handled": True,
+        "action": action,
+        "provider": next_provider,
+        "order_id": previous_order_id,
+        "remaining": remaining,
+        "provider_retry_count": next_retry_count,
+        "reason": reason,
+    }
+
+
+def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     order = state.get("current_order")
     if not isinstance(order, dict):
         return {"handled": False}
     snapshot = order.get("config_snapshot") if isinstance(order.get("config_snapshot"), dict) else {}
     order_cfg = normalize_restock_config({**cfg, **snapshot})
+    provider = str(order.get("provider") or "sogou").strip().lower()
     order_id = str(order.get("order_id") or "").strip()
     if not order_id:
         key = str(order.get("idempotency_key") or "").strip()
         if not key:
-            key = f"sogou-restock-{uuid.uuid4().hex}"
+            key = f"{_provider_order_key(provider)}-{uuid.uuid4().hex}"
             order["idempotency_key"] = key
             state["current_order"] = order
             _save_state(state)
-        response = client.create_order(order.get("product") or order_cfg["product"], int(order["quantity"]), idempotency_key=key)
+        product = _provider_product(provider, order_cfg, order)
+        response = client.create_order(product, int(order["quantity"]), idempotency_key=key)
         order_id = _order_id(response)
         if not order_id:
             order["last_error"] = "订单响应缺少 order_id"
             _save_state(state)
             raise RuntimeError(order["last_error"])
         order["order_id"] = order_id
+        order["provider"] = provider
+        order["product"] = product
         order["status"] = _order_status(response) or "pending"
         order["updated_at"] = _now()
         _write_json(ORDERS_PATH, _read_json(ORDERS_PATH, []) + [_safe_order(order)])
         _save_state(state)
-        return {"handled": True, "action": "ordered", "order_id": order_id}
+        return {"handled": True, "action": "ordered", "order_id": order_id, "provider": provider}
 
     if not order.get("payload"):
         last_polled = _parse_time(order.get("last_polled_at"))
@@ -537,19 +743,28 @@ def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: d
         order["last_polled_at"] = _now()
         status = order["status"]
         try:
-            reserved = max(0, int(_order_value(response, "reserved", "reserved_count") or 0))
+            reserved = max(0, int(_order_value(response, "reserved", "reserved_count", "delivered_quantity", "delivered") or 0))
         except (TypeError, ValueError):
             reserved = 0
         order["reserved"] = reserved
         if status in {"failed", "cancelled", "canceled", "refunded", "error"}:
             order["last_error"] = str(_value(response, "message", "error") or status)
+            followup = _schedule_followup_order(
+                order,
+                order_cfg,
+                state,
+                remaining=max(1, int(order.get("quantity") or 0)),
+                reason=f"{provider}:{status}",
+            )
+            if followup:
+                return followup
             state["current_order"] = None
             _save_state(state)
             return {"handled": True, "action": "order_failed", "order_id": order_id}
         if reserved <= 0:
             order.pop("partial_ready_since", None)
             order.pop("partial_finalize_last_attempt_at", None)
-        if status == "ready_partial" and reserved > 0:
+        if provider == "sogou" and status == "ready_partial" and reserved > 0:
             partial_since = _parse_time(order.get("partial_ready_since"))
             if partial_since is None:
                 order["partial_ready_since"] = _now()
@@ -581,6 +796,15 @@ def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: d
             and status == "partial"
             and _partial_order_is_exhausted(response)
         ):
+            followup = _schedule_followup_order(
+                order,
+                order_cfg,
+                state,
+                remaining=max(1, int(order.get("quantity") or 0)),
+                reason=f"{provider}:partial_exhausted",
+            )
+            if followup:
+                return followup
             state["current_order"] = None
             _save_state(state)
             return {
@@ -623,7 +847,7 @@ def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: d
     payload = _delivery_payload(order.get("payload"))
     if payload is not order.get("payload"):
         order["payload"] = payload
-    prepared = _build_prepared(payload, order_cfg, order_id=order_id)
+    prepared = _build_prepared(payload, order_cfg, order_id=order_id, provider=provider)
     if not prepared:
         order["last_error"] = "取货响应未包含有效 OAuth 账号"
         order.pop("payload", None)
@@ -633,19 +857,44 @@ def _process_current_order(client: SogouEduClient, cfg: dict[str, Any], state: d
         _save_state(state)
         return {"handled": True, "action": "push_waiting", "order_id": order_id}
     result = push_prepared_accounts_to_pool(prepared)
-    order["last_push"] = {"success": result.get("success", 0), "failed": result.get("failed", 0)}
+    pushed_success = max(0, min(len(prepared), int(result.get("success", 0) or 0)))
+    pushed_failed = max(0, int(result.get("failed", 0) or 0))
+    order["last_push"] = {"success": pushed_success, "failed": pushed_failed}
     order["updated_at"] = _now()
-    if result.get("failed", 0):
+    if pushed_failed:
         _save_state(state)
         return {"handled": True, "action": "push_retry", "order_id": order_id, "result": order["last_push"]}
+    expected = max(1, int(order.get("quantity") or len(prepared)))
+    if order.get("provider") and pushed_success < expected:
+        followup = _schedule_followup_order(
+            order,
+            order_cfg,
+            state,
+            remaining=expected - pushed_success,
+            reason=f"{provider}:partial_delivery:{pushed_success}/{expected}",
+        )
+        if followup:
+            followup["order_id"] = order_id
+            followup["delivered"] = pushed_success
+            return followup
     state["current_order"] = None
     _save_state(state)
     return {"handled": True, "action": "pushed", "order_id": order_id, "result": order["last_push"]}
 
 
-def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict[str, Any], accounts: list[dict]) -> dict[str, Any]:
+def _process_recoveries(
+    client: Any,
+    cfg: dict[str, Any],
+    state: dict[str, Any],
+    accounts: list[dict],
+    *,
+    provider: str = "sogou",
+) -> dict[str, Any]:
+    provider = str(provider or "sogou").strip().lower()
     now = time.time()
-    last = _parse_time(state.get("last_recovery_scan_at"))
+    scan_key = "last_recovery_scan_at" if provider == "sogou" else f"last_recovery_scan_at_{provider}"
+    cursor_key = "recovery_cursor" if provider == "sogou" else f"recovery_cursor_{provider}"
+    last = _parse_time(state.get(scan_key))
     if last and now - last < cfg["recovery_poll_interval_sec"]:
         return {"scanned": False, "repaired": 0, "recreated": 0}
     # before_id 是向更旧记录翻页的游标，不能作为下一轮轮询的起点，否则新
@@ -656,7 +905,19 @@ def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict
     stored_items = _read_json(RECOVERIES_PATH, [])
     if not isinstance(stored_items, list):
         stored_items = []
-    items = _merge_recovery_items(latest_items, [row for row in stored_items if isinstance(row, dict)])
+    for row in latest_items:
+        row["provider"] = provider
+    provider_items: list[dict[str, Any]] = []
+    other_provider_items: list[dict[str, Any]] = []
+    for row in stored_items:
+        if not isinstance(row, dict):
+            continue
+        row_provider = str(row.get("provider") or "sogou").strip().lower()
+        if row_provider == provider:
+            provider_items.append(row)
+        else:
+            other_provider_items.append(row)
+    items = _merge_recovery_items(latest_items, provider_items)
     repaired = recreated = 0
     newest = _recovery_page_cursor(body)
     source_orders: dict[str, Any] = {}
@@ -664,7 +925,8 @@ def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict
         rid = recovery.get("id") or recovery.get("recovery_id")
         if rid in (None, ""):
             continue
-        status = str(recovery.get("status") or recovery.get("delivery_status") or "").strip().lower()
+        recovery.setdefault("provider", provider)
+        status = str(recovery.get("status") or recovery.get("state") or recovery.get("delivery_status") or "").strip().lower()
         if status in {"recovered", "claimed", "completed", "success", "repaired"}:
             continue
         if status not in {"claimable", "ready", "available"} and not recovery.get("claim_url"):
@@ -682,22 +944,27 @@ def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict
                 if resolved_email:
                     recovery["email"] = resolved_email
                     recovery["matched_by"] = "source_order"
-            matched = _match_sogou_account(accounts, recovery)
-            claim = client.claim_recovery(rid, claim_url=recovery.get("claim_url"), ticket=recovery.get("ticket"))
+            matched = _match_provider_account(accounts, recovery, provider)
+            claim = client.claim_recovery(
+                rid,
+                claim_url=recovery.get("claim_url"),
+                ticket=recovery.get("ticket") or recovery.get("claim_ticket"),
+            )
             payload = _delivery_payload(claim)
             if not matched:
                 claimed_email = _payload_email(payload, recovery_id=rid)
                 if claimed_email:
                     recovery["email"] = claimed_email
                     recovery["matched_by"] = "claim_payload"
-                    matched = _match_sogou_account(accounts, recovery)
+                    matched = _match_provider_account(accounts, recovery, provider)
             if matched:
-                entries = normalize_upload_json_to_codex_entries(payload, filename=f"sogou-recovery-{rid}.json")
+                prefix = "bugteam" if provider == "bugteam" else "sogou"
+                entries = normalize_upload_json_to_codex_entries(payload, filename=f"{prefix}-recovery-{rid}.json")
                 if not entries:
                     raise ValueError("补发认领响应未包含有效 OAuth 账号")
                 account_payload = build_pool_account_from_codex_json(
                     entries[0],
-                    filename=f"sogou-recovery-{rid}.json",
+                    filename=f"{prefix}-recovery-{rid}.json",
                     model_whitelist=cfg["model_whitelist"],
                 )
                 pool_id = matched.get("id") or matched.get("account_id")
@@ -705,7 +972,14 @@ def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict
                 repaired += 1
             else:
                 replacement = recovery.get("pool_id") or recovery.get("account_id")
-                prepared = _build_prepared(payload, cfg, order_id=f"recovery-{rid}", recreated=True, replacement_of_pool_id=replacement)
+                prepared = _build_prepared(
+                    payload,
+                    cfg,
+                    order_id=f"recovery-{rid}",
+                    provider=provider,
+                    recreated=True,
+                    replacement_of_pool_id=replacement,
+                )
                 if not prepared:
                     raise ValueError("补发认领响应未包含有效 OAuth 账号")
                 result = push_prepared_accounts_to_pool(prepared)
@@ -716,14 +990,14 @@ def _process_recoveries(client: SogouEduClient, cfg: dict[str, Any], state: dict
             recovery["result"] = "repaired" if matched else "recreated"
         except Exception as exc:
             recovery["last_error"] = f"{type(exc).__name__}: {exc}"
-        _write_json(RECOVERIES_PATH, items)
-    state["last_recovery_scan_at"] = _now()
-    state["recovery_cursor"] = newest
+        _write_json(RECOVERIES_PATH, other_provider_items + items)
+    state[scan_key] = _now()
+    state[cursor_key] = newest
     _save_state(state)
     return {"scanned": True, "repaired": repaired, "recreated": recreated}
 
 
-def run_restock_cycle(*, force: bool = False, client: SogouEduClient | None = None) -> dict[str, Any]:
+def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, Any]:
     """执行一次补池循环；同一进程内并发调用会被合并为一次。"""
     global _RUNNING
     with _LOCK:
@@ -738,14 +1012,32 @@ def run_restock_cycle(*, force: bool = False, client: SogouEduClient | None = No
         if not force and not cfg["enabled"]:
             result.update({"ok": True, "skipped": True, "reason": "disabled"})
             return result
-        api = client or SogouEduClient()
+        current_order = state.get("current_order") if isinstance(state.get("current_order"), dict) else None
+        current_provider = str((current_order or {}).get("provider") or "sogou").strip().lower()
+        api = _new_provider_client(current_provider, injected_client=client if current_provider == "sogou" else None)
         order_result = _process_current_order(api, cfg, state)
         if order_result.get("handled"):
             result.update(order_result)
             result["ok"] = True
             return result
         accounts = _pool_monitor.fetch_pool_accounts(group_id=cfg["monitor_group_id"], platform="openai", account_type="oauth")
-        result["recovery"] = _process_recoveries(api, cfg, state, accounts)
+        recovery_totals: dict[str, Any] = {"scanned": False, "repaired": 0, "recreated": 0}
+        recovery_errors: list[dict[str, Any]] = []
+        for provider in _provider_names(cfg):
+            if not _provider_configured(provider, injected_client=client if provider == "sogou" else None):
+                continue
+            provider_client = _new_provider_client(provider, injected_client=client if provider == "sogou" else None)
+            try:
+                recovery_result = _process_recoveries(provider_client, cfg, state, accounts, provider=provider)
+            except (SogouEduError, BugTeamError) as exc:
+                recovery_errors.append({"provider": provider, "error": str(exc)})
+                continue
+            recovery_totals["scanned"] = bool(recovery_totals["scanned"] or recovery_result.get("scanned"))
+            recovery_totals["repaired"] += int(recovery_result.get("repaired") or 0)
+            recovery_totals["recreated"] += int(recovery_result.get("recreated") or 0)
+        if recovery_errors:
+            recovery_totals["errors"] = recovery_errors
+        result["recovery"] = recovery_totals
         active_accounts = _pool_monitor.fetch_pool_accounts(
             group_id=cfg["monitor_group_id"],
             platform="openai",
@@ -769,23 +1061,53 @@ def run_restock_cycle(*, force: bool = False, client: SogouEduClient | None = No
         if quantity <= 0:
             result.update({"ok": True, "action": "inventory_ok"})
             return result
-        api.balance()
-        api.inventory(cfg["product"], quantity)
-        key = f"sogou-restock-{uuid.uuid4().hex}"
+        selected_provider = ""
+        provider_errors: list[dict[str, Any]] = []
+        selected_api: Any = None
+        selected_product = ""
+        for provider in _provider_names(cfg):
+            injected = client if provider == "sogou" else None
+            if not _provider_configured(provider, injected_client=injected):
+                provider_errors.append({"provider": provider, "error": "未配置供应商凭据"})
+                continue
+            provider_client = _new_provider_client(provider, injected_client=injected)
+            product = _provider_product(provider, cfg)
+            try:
+                provider_client.balance()
+                inventory = provider_client.inventory(product, quantity)
+                available = _inventory_available(inventory)
+                if available is not None and available < quantity:
+                    raise RuntimeError(f"库存不足: available={available}, required={quantity}")
+            except (SogouEduError, BugTeamError, RuntimeError) as exc:
+                message, status_code = _provider_error(exc)
+                provider_errors.append({"provider": provider, "error": message, "status_code": status_code})
+                continue
+            selected_provider = provider
+            selected_api = provider_client
+            selected_product = product
+            break
+        if not selected_provider or selected_api is None:
+            result.update({"error": "所有补池供应商均无法满足库存", "provider_errors": provider_errors})
+            return result
+        key = f"{_provider_order_key(selected_provider)}-{uuid.uuid4().hex}"
         state["current_order"] = {
             "idempotency_key": key,
             "quantity": quantity,
-            "product": cfg["product"],
+            "product": selected_product,
+            "provider": selected_provider,
+            "provider_index": _provider_names(cfg).index(selected_provider),
+            "provider_retry_count": 0,
             "created_at": _now(),
             "status": "creating",
-            "config_snapshot": {key: cfg[key] for key in ("push_group_id", "concurrency", "priority", "load_factor", "rate_multiplier", "model_whitelist", "auto_pause_on_expired", "product")},
+            "config_snapshot": {key: cfg[key] for key in ("push_group_id", "concurrency", "priority", "load_factor", "rate_multiplier", "model_whitelist", "auto_pause_on_expired", "product", "bugteam_product", "partial_retry_limit", "provider_priority")},
         }
         _save_state(state)
-        order_result = _process_current_order(api, cfg, state)
+        order_result = _process_current_order(selected_api, cfg, state)
         result.update(order_result)
+        result["provider"] = selected_provider
         result["ok"] = True
         return result
-    except SogouEduError as exc:
+    except (SogouEduError, BugTeamError) as exc:
         result.update({"error": str(exc), "status_code": exc.status_code})
         return result
     except Exception as exc:

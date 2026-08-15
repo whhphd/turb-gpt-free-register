@@ -651,6 +651,141 @@ class SogouRestockTests(unittest.TestCase):
         self.assertIsNone(row.get("processed_at"))
         self.assertIn("有效 OAuth", row.get("last_error", ""))
 
+    def test_partial_delivery_retries_same_provider_twice_then_falls_back(self):
+        cfg = restock.normalize_restock_config({
+            "provider_priority": ["bugteam", "sogou"],
+            "partial_retry_limit": 2,
+        })
+        state = restock._load_state()
+        state["current_order"] = {
+            "provider": "bugteam",
+            "provider_index": 0,
+            "provider_retry_count": 0,
+            "order_id": "bugteam-1",
+            "quantity": 4,
+            "status": "completed",
+        }
+        restock._save_state(state)
+
+        first = restock._schedule_followup_order(
+            state["current_order"], cfg, state, remaining=3, reason="bugteam:partial_delivery:1/4"
+        )
+        self.assertEqual(first["action"], "provider_retry_scheduled")
+        self.assertEqual(first["provider"], "bugteam")
+        self.assertEqual(first["provider_retry_count"], 1)
+
+        state["current_order"]["order_id"] = "bugteam-2"
+        second = restock._schedule_followup_order(
+            state["current_order"], cfg, state, remaining=2, reason="bugteam:partial_delivery:1/3"
+        )
+        self.assertEqual(second["action"], "provider_retry_scheduled")
+        self.assertEqual(second["provider_retry_count"], 2)
+
+        state["current_order"]["order_id"] = "bugteam-3"
+        fallback = restock._schedule_followup_order(
+            state["current_order"], cfg, state, remaining=1, reason="bugteam:failed"
+        )
+        self.assertEqual(fallback["action"], "provider_fallback_scheduled")
+        self.assertEqual(fallback["provider"], "sogou")
+        self.assertEqual(fallback["provider_retry_count"], 0)
+        current = restock._load_state()["current_order"]
+        self.assertEqual(current["quantity"], 1)
+        self.assertEqual(current["product"], "oauth_7d")
+
+        reverse_cfg = restock.normalize_restock_config({
+            "provider_priority": ["sogou", "bugteam"],
+            "bugteam_product": "team_1h",
+            "partial_retry_limit": 2,
+        })
+        reverse_state = restock._load_state()
+        reverse_state["current_order"] = {
+            "provider": "sogou",
+            "provider_retry_count": 2,
+            "order_id": "sogou-3",
+            "quantity": 2,
+            "product": "oauth_7d",
+        }
+        reverse = restock._schedule_followup_order(
+            reverse_state["current_order"], reverse_cfg, reverse_state, remaining=1, reason="sogou:failed"
+        )
+        self.assertEqual(reverse["provider"], "bugteam")
+        self.assertEqual(restock._load_state()["current_order"]["product"], "team_1h")
+
+    def test_bugteam_completed_download_uses_same_pool_push_path(self):
+        class BugTeamFake:
+            def __init__(self):
+                self.created = []
+                self.sequence = 0
+
+            def balance(self):
+                return {"balance_fen": 10000}
+
+            def inventory(self, product, quantity):
+                return {"product": product, "available": quantity}
+
+            def create_order(self, product, quantity, *, idempotency_key):
+                self.sequence += 1
+                order_id = f"bugteam-{self.sequence}"
+                self.created.append((product, quantity, idempotency_key))
+                return {"order": {"order_id": order_id, "state": "pending"}}
+
+            def order_status(self, order_id, *, status_url=None):
+                return {"order": {"order_id": order_id, "state": "completed", "delivered_quantity": 1}}
+
+            def take_order(self, order_id, *, take_url=None):
+                return {"accounts": [{"email": "bugteam@example.com", "access_token": _jwt("bugteam@example.com")}]}
+
+            def list_recoveries(self, *, before_id=None, limit=100):
+                return {"recoveries": []}
+
+        restock.save_restock_config({
+            "enabled": True,
+            "min_healthy": 1,
+            "target_healthy": 2,
+            "max_purchase_per_order": 2,
+            "provider_priority": ["bugteam", "sogou"],
+            "bugteam_product": "team_1h",
+            "partial_retry_limit": 2,
+        })
+        fake = BugTeamFake()
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", return_value=[]), patch.object(
+            restock, "_provider_configured", side_effect=lambda provider, **kwargs: provider == "bugteam"
+        ), patch.object(restock, "_new_provider_client", return_value=fake), patch.object(
+            restock, "push_prepared_accounts_to_pool", return_value={"success": 1, "failed": 0}
+        ) as pushed:
+            first = restock.run_restock_cycle()
+            self.assertEqual(first["action"], "ordered")
+            second = restock.run_restock_cycle()
+
+        self.assertEqual(second["action"], "provider_retry_scheduled")
+        self.assertEqual(second["provider"], "bugteam")
+        self.assertEqual(second["remaining"], 1)
+        self.assertEqual(fake.created[0][0:2], ("team_1h", 2))
+        pushed.assert_called_once()
+
+    def test_recovery_backlog_is_isolated_by_provider(self):
+        cfg = restock.normalize_restock_config({"recovery_poll_interval_sec": 1})
+        restock._write_json(restock.RECOVERIES_PATH, [
+            {"id": "sogou-old", "status": "claimable", "provider": "sogou"},
+            {"id": "bugteam-ready", "state": "claimable", "provider": "bugteam"},
+        ])
+        fake = FakeClient()
+        with patch.object(fake, "list_recoveries", return_value={"recoveries": []}), patch.object(
+            fake, "claim_recovery", return_value={"accounts": [{
+                "email": "bugteam-fix@example.com",
+                "access_token": _jwt("bugteam-fix@example.com"),
+            }]}
+        ) as claimed, patch.object(
+            restock, "push_prepared_accounts_to_pool", return_value={"success": 1, "failed": 0}
+        ):
+            result = restock._process_recoveries(fake, cfg, restock._load_state(), [], provider="bugteam")
+
+        self.assertEqual(result["recreated"], 1)
+        claimed.assert_called_once()
+        self.assertEqual(claimed.call_args.args[0], "bugteam-ready")
+        saved = restock._read_json(restock.RECOVERIES_PATH, [])
+        self.assertTrue(any(row.get("id") == "sogou-old" for row in saved))
+
 
 if __name__ == "__main__":
     unittest.main()

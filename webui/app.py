@@ -2505,12 +2505,13 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.post("/api/pool-admin/sogou-restock/test-connection")
     def api_pool_admin_sogou_restock_test_connection():
-        from core.sogouedu_client import SogouEduClient
+        from core import sogouedu_restock as sr
         try:
-            SogouEduClient().login()
-            return jsonify({"ok": True, "message": "SogouEdu 登录成功"})
+            providers = sr.test_provider_connections()
+            ok = any(item.get("ok") for item in providers.values() if isinstance(item, dict))
+            return jsonify({"ok": ok, "providers": providers, "message": "供应商连接测试完成"})
         except Exception as exc:
-            logger.exception("SogouEdu 连接测试失败")
+            logger.exception("自动补池供应商连接测试失败")
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
 
     @app.get("/api/pool-admin/sogou-restock/orders")

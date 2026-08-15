@@ -37,6 +37,13 @@ class SogouRestockLiveLogUiTests(unittest.TestCase):
         self.assertIn("推池成功 ${result.success || 0} / 失败 ${result.failed || 0}", self.source)
         self.assertIn("补发原位修复 ${recovery.repaired || 0} / 新建 ${recovery.recreated || 0}", self.source)
 
+    def test_multi_provider_controls_and_fallback_logs_are_visible(self) -> None:
+        self.assertIn('id="restockProviderPriorityV2"', self.source)
+        self.assertIn('id="bugteamRestockProductV2"', self.source)
+        self.assertIn('id="restockPartialRetryLimitV2"', self.source)
+        self.assertIn("provider_retry_scheduled: '同供应商重试'", self.source)
+        self.assertIn("provider_fallback_scheduled: '切换兜底供应商'", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

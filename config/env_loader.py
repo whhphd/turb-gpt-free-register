@@ -39,6 +39,7 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "EXTRACT_LINK_CDK": "提链服务 CDK",
     "SUB2API_API_KEY": "sub2api 管理接口 API Key",
     "SUB2API_API_TOKEN": "sub2api 管理接口鉴权 Token（旧配置名，兼容）",
+    "BUGTEAM_API_TOKEN": "BugTeam 客户取货 API Token",
     "SMS_API_KEY": "GrizzlySMS API Key",
     "HEROSMS_API_KEY": "HeroSMS API Key（与 Grizzly/SMSBower 分开）",
     "SMSBOWER_API_KEY": "SMSBower API Key（与 Grizzly/HeroSMS 分开）",

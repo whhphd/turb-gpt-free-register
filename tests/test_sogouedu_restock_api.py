@@ -36,12 +36,30 @@ class SogouRestockApiTests(unittest.TestCase):
         ):
             response = self.client.post(
                 "/api/pool-admin/sogou-restock/config",
-                json={"enabled": True, "password": "should-not-be-used", "SOGOUEDU_PASSWORD": "secret"},
+                json={
+                    "enabled": True,
+                    "password": "should-not-be-used",
+                    "SOGOUEDU_PASSWORD": "secret",
+                    "BUGTEAM_API_TOKEN": "cfk-secret",
+                },
                 headers=self.headers,
             )
         self.assertEqual(response.status_code, 200)
         save.assert_called_once()
         self.assertNotIn("secret", response.get_data(as_text=True))
+
+    def test_connection_route_returns_redacted_provider_results(self):
+        providers = {
+            "sogou": {"configured": True, "ok": True, "message": "SogouEdu 登录成功"},
+            "bugteam": {"configured": True, "ok": True, "message": "BugTeam 连接成功", "products": [{"code": "team_1h", "name": "Team 1小时"}]},
+        }
+        with patch("core.sogouedu_restock.test_provider_connections", return_value=providers):
+            response = self.client.post(
+                "/api/pool-admin/sogou-restock/test-connection", headers=self.headers
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["providers"]["bugteam"]["ok"])
+        self.assertNotIn("token", response.get_data(as_text=True).lower())
 
     def test_run_orders_logs_routes(self):
         with patch(
