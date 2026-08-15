@@ -3189,6 +3189,7 @@
           <div class="pm-chip"><span>健康号数</span><strong id="sogouRestockHealthyV2">-</strong></div>
           <div class="pm-chip"><span>号池总数</span><strong id="sogouRestockTotalV2">-</strong></div>
           <div class="pm-chip is-good"><span>补池状态</span><strong id="sogouRestockOrderV2">无未完成订单</strong></div>
+          <div class="pm-chip"><span>额度预测</span><strong id="sogouRestockForecastV2">采样不足</strong></div>
           <div class="pm-chip"><span>SogouEdu 凭据</span><strong id="sogouRestockCredentialV2">未配置</strong></div>
           <div class="pm-chip"><span>BugTeam Token</span><strong id="bugteamRestockCredentialV2">未配置</strong></div>
         </div>
@@ -3204,6 +3205,11 @@
           <label class="fld">目标健康库存<input type="number" min="0" id="sogouRestockTargetV2"></label>
           <label class="fld">单次最大购买<input type="number" min="1" id="sogouRestockMaxOrderV2"></label>
           <label class="fld">监测间隔（秒）<input type="number" min="1" id="sogouRestockMonitorIntervalV2"></label>
+          <label class="fld">启用额度预测触发<input type="checkbox" id="sogouRestockForecastEnabledV2"></label>
+          <label class="fld">预计断供前触发（分钟）<input type="number" min="0" max="1440" id="sogouRestockForecastLeadV2"></label>
+          <label class="fld">额度采样间隔（秒）<input type="number" min="10" max="3600" id="sogouRestockForecastSampleV2"></label>
+          <label class="fld">最少有效采样次数<input type="number" min="3" max="1000" id="sogouRestockForecastSamplesV2"></label>
+          <label class="fld">速率安全系数<input type="number" min="1" max="5" step="0.05" id="sogouRestockForecastSafetyV2"></label>
           <label class="fld">订单轮询间隔（秒）<input type="number" min="1" id="sogouRestockOrderIntervalV2"></label>
           <label class="fld">恢复轮询间隔（秒）<input type="number" min="1" id="sogouRestockRecoveryIntervalV2"></label>
           <label class="fld">推池并发<input type="number" min="1" id="sogouRestockConcurrencyV2"></label>
@@ -3215,7 +3221,7 @@
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSogouRestockSaveV2">保存补池配置</button>
-          <span class="pool-monitor-meta">健康统计包含手动补入账号；错误、不可调度和过期账号不计入。</span>
+          <span class="pool-monitor-meta">健康统计包含手动补入账号；错误、不可调度和过期账号不计入。额度速率只按连续采样仍存在的账号计算。</span>
         </div>
         <div class="pool-monitor-table-wrap">
           <table class="pool-monitor-table"><thead><tr><th>订单</th><th>产品</th><th>数量</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody id="sogouRestockOrdersBodyV2"></tbody></table>
@@ -7968,6 +7974,11 @@ async function codexUploadPushPoolOnFiles(ev) {
     _sogouInput('#sogouRestockTargetV2', cfg.target_healthy);
     _sogouInput('#sogouRestockMaxOrderV2', cfg.max_purchase_per_order);
     _sogouInput('#sogouRestockMonitorIntervalV2', cfg.monitor_interval_sec);
+    toggle('#sogouRestockForecastEnabledV2', cfg.forecast_enabled);
+    _sogouInput('#sogouRestockForecastLeadV2', cfg.forecast_interrupt_minutes == null ? 20 : cfg.forecast_interrupt_minutes);
+    _sogouInput('#sogouRestockForecastSampleV2', cfg.forecast_sample_interval_sec == null ? 60 : cfg.forecast_sample_interval_sec);
+    _sogouInput('#sogouRestockForecastSamplesV2', cfg.forecast_min_samples == null ? 3 : cfg.forecast_min_samples);
+    _sogouInput('#sogouRestockForecastSafetyV2', cfg.forecast_safety_factor == null ? 1.2 : cfg.forecast_safety_factor);
     _sogouInput('#sogouRestockOrderIntervalV2', cfg.order_poll_interval_sec);
     _sogouInput('#sogouRestockRecoveryIntervalV2', cfg.recovery_poll_interval_sec);
     _sogouInput('#sogouRestockConcurrencyV2', cfg.concurrency);
@@ -7988,6 +7999,12 @@ async function codexUploadPushPoolOnFiles(ev) {
     const inventory = status.inventory || {};
     set('#sogouRestockHealthyV2', inventory.healthy ?? last.healthy);
     set('#sogouRestockTotalV2', inventory.total ?? last.total);
+    const forecast = status.quota_forecast || last.quota_forecast || {};
+    const forecastWindow = forecast.bottleneck_window || '-';
+    const forecastEta = forecast.eta_minutes == null ? '' : ` · ${Number(forecast.eta_minutes).toFixed(1)} 分钟`;
+    const forecastChurn = Object.values(forecast.windows || {}).reduce((sum, item) => sum + Number(item.new_accounts || 0) + Number(item.removed_accounts || 0), 0);
+    const forecastNote = forecastChurn ? ` · 队列变动 ${forecastChurn}` : '';
+    set('#sogouRestockForecastV2', forecast.status === 'ready' ? `${forecastWindow}${forecastEta}${forecastNote}` : (forecast.status === 'no_rate' ? '暂无消耗' : '采样不足'));
   }
   function renderSogouRestockOrders(items) {
     const body = $('#sogouRestockOrdersBodyV2');
@@ -8045,6 +8062,8 @@ async function codexUploadPushPoolOnFiles(ev) {
     if (row.order_id) parts.push(`订单 ${row.order_id}`);
     if (row.provider) parts.push(`供应商 ${row.provider}`);
     if (row.provider_retry_count != null) parts.push(`同源重试 ${row.provider_retry_count}`);
+    const forecast = row.quota_forecast || {};
+    if (forecast.eta_minutes != null) parts.push(`额度 ETA ${Number(forecast.eta_minutes).toFixed(1)} 分钟`);
     if (row.status) parts.push(`状态 ${row.status}`);
     if (row.reserved != null) parts.push(`已预留 ${row.reserved}`);
     if (row.partial_ready_since) {
@@ -8127,6 +8146,9 @@ async function codexUploadPushPoolOnFiles(ev) {
       monitor_group_id: num('#sogouRestockMonitorGroupV2'), push_group_id: num('#sogouRestockPushGroupV2'),
       product: value('#sogouRestockProductV2'), min_healthy: num('#sogouRestockMinV2'), target_healthy: num('#sogouRestockTargetV2'),
       max_purchase_per_order: num('#sogouRestockMaxOrderV2'), monitor_interval_sec: num('#sogouRestockMonitorIntervalV2'),
+      forecast_enabled: !!($('#sogouRestockForecastEnabledV2') && $('#sogouRestockForecastEnabledV2').checked),
+      forecast_interrupt_minutes: num('#sogouRestockForecastLeadV2'), forecast_sample_interval_sec: num('#sogouRestockForecastSampleV2'),
+      forecast_min_samples: num('#sogouRestockForecastSamplesV2'), forecast_safety_factor: num('#sogouRestockForecastSafetyV2'),
       order_poll_interval_sec: num('#sogouRestockOrderIntervalV2'), recovery_poll_interval_sec: num('#sogouRestockRecoveryIntervalV2'),
       concurrency: num('#sogouRestockConcurrencyV2'), priority: num('#sogouRestockPriorityV2'), load_factor: num('#sogouRestockLoadV2'),
       rate_multiplier: num('#sogouRestockRateV2'), auto_pause_on_expired: !!($('#sogouRestockPauseExpiredV2') && $('#sogouRestockPauseExpiredV2').checked),

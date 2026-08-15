@@ -25,6 +25,7 @@ from core.sub2api_pool_push import (
     normalize_upload_json_to_codex_entries,
     push_prepared_accounts_to_pool,
 )
+from core.quota_forecast import collect_quota_snapshot, update_forecast
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rate_multiplier": float(getattr(_cfg, "SUB2API_POOL_RATE_MULTIPLIER", 1.0) or 1.0),
     "auto_pause_on_expired": bool(getattr(_cfg, "SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED", True)),
     "model_whitelist": [],
+    # Quota forecasting is collected when disabled so operators can compare
+    # it with the provider dashboard before enabling forecast-triggered orders.
+    "forecast_enabled": False,
+    "forecast_interrupt_minutes": 20,
+    "forecast_sample_interval_sec": 60,
+    "forecast_min_samples": 3,
+    "forecast_safety_factor": 1.2,
 }
 
 _CONFIG_KEYS = frozenset(DEFAULT_CONFIG)
@@ -125,6 +133,23 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
             cfg[key] = max(1, int(cfg.get(key) or 1))
         except (TypeError, ValueError):
             cfg[key] = 1
+    cfg["forecast_enabled"] = bool(cfg.get("forecast_enabled", False))
+    try:
+        cfg["forecast_interrupt_minutes"] = max(0, min(24 * 60, int(cfg.get("forecast_interrupt_minutes") or 0)))
+    except (TypeError, ValueError):
+        cfg["forecast_interrupt_minutes"] = 20
+    try:
+        cfg["forecast_sample_interval_sec"] = max(10, min(3600, int(cfg.get("forecast_sample_interval_sec") or 60)))
+    except (TypeError, ValueError):
+        cfg["forecast_sample_interval_sec"] = 60
+    try:
+        cfg["forecast_min_samples"] = max(3, min(1000, int(cfg.get("forecast_min_samples") or 3)))
+    except (TypeError, ValueError):
+        cfg["forecast_min_samples"] = 3
+    try:
+        cfg["forecast_safety_factor"] = max(1.0, min(5.0, float(cfg.get("forecast_safety_factor") or 1.0)))
+    except (TypeError, ValueError):
+        cfg["forecast_safety_factor"] = 1.2
     try:
         cfg["rate_multiplier"] = max(0.0, float(cfg.get("rate_multiplier") or 0.0))
     except (TypeError, ValueError):
@@ -169,6 +194,7 @@ def _load_state() -> dict[str, Any]:
     state.setdefault("inventory", None)
     state.setdefault("last_recovery_scan_at", None)
     state.setdefault("recovery_cursor", None)
+    state.setdefault("quota_forecast", {})
     return state
 
 
@@ -280,10 +306,18 @@ def next_replenishing_state(healthy: int, cfg: dict[str, Any], current: bool) ->
     return bool(current)
 
 
-def calculate_purchase_quantity(healthy: int, cfg: dict[str, Any], *, replenishing: bool) -> int:
+def calculate_purchase_quantity(
+    healthy: int,
+    cfg: dict[str, Any],
+    *,
+    replenishing: bool,
+    forecast_trigger: bool = False,
+) -> int:
     if not replenishing:
         return 0
     gap = max(0, int(cfg["target_healthy"]) - int(healthy))
+    if forecast_trigger and gap <= 0:
+        return max(1, int(cfg["max_purchase_per_order"]))
     return min(gap, max(1, int(cfg["max_purchase_per_order"])))
 
 
@@ -408,6 +442,7 @@ def get_restock_status() -> dict[str, Any]:
         "last_run": state.get("last_run"),
         "replenishing": bool(state.get("replenishing")),
         "inventory": state.get("inventory"),
+        "quota_forecast": (state.get("quota_forecast") or {}).get("forecast"),
         "last_recovery_scan_at": state.get("last_recovery_scan_at"),
         "recovery_cursor": state.get("recovery_cursor"),
         "credentials_configured": bool(getattr(_cfg, "SOGOUEDU_USERNAME", "") and getattr(_cfg, "SOGOUEDU_PASSWORD", "")),
@@ -1156,11 +1191,50 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             account_type="oauth",
             status="active",
         )
-        healthy = len(active_accounts)
-        replenishing = next_replenishing_state(healthy, cfg, bool(state.get("replenishing")))
+        # The API status filter is not sufficient for the inventory count:
+        # rate-limited or otherwise unschedulable rows can still be ``active``.
+        # Keep the quota forecast on the same currently healthy population.
+        healthy_accounts = [account for account in active_accounts if is_healthy_pool_account(account)]
+        healthy = len(healthy_accounts)
+        quota_state = state.get("quota_forecast") if isinstance(state.get("quota_forecast"), dict) else {}
+        last_sampled_at = quota_state.get("last_sampled_at")
+        sample_due = last_sampled_at in (None, "")
+        if not sample_due:
+            try:
+                sample_due = time.time() - float(last_sampled_at) >= cfg["forecast_sample_interval_sec"]
+            except (TypeError, ValueError):
+                sample_due = True
+        if sample_due:
+            quota_snapshot = collect_quota_snapshot(healthy_accounts)
+            quota_state, quota_forecast = update_forecast(
+                quota_state,
+                quota_snapshot,
+                min_samples=cfg["forecast_min_samples"],
+                safety_factor=cfg["forecast_safety_factor"],
+            )
+            state["quota_forecast"] = quota_state
+        else:
+            quota_forecast = quota_state.get("forecast") if isinstance(quota_state.get("forecast"), dict) else {
+                "status": "insufficient",
+                "confidence": "insufficient",
+                "eta_minutes": None,
+                "windows": {},
+            }
+        forecast_trigger = bool(
+            cfg["forecast_enabled"]
+            and quota_forecast.get("status") == "ready"
+            and quota_forecast.get("eta_minutes") is not None
+            and float(quota_forecast["eta_minutes"]) <= float(cfg["forecast_interrupt_minutes"])
+        )
+        static_replenishing = next_replenishing_state(healthy, cfg, bool(state.get("replenishing")))
+        replenishing = bool(static_replenishing or forecast_trigger)
         result["healthy"] = healthy
         result["total"] = len(accounts)
         result["replenishing"] = replenishing
+        result["static_replenishing"] = static_replenishing
+        result["forecast_trigger"] = forecast_trigger
+        result["forecast_sampled"] = sample_due
+        result["quota_forecast"] = quota_forecast
         state["replenishing"] = replenishing
         state["inventory"] = {
             "healthy": healthy,
@@ -1168,7 +1242,12 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             "checked_at": _now(),
         }
         _save_state(state)
-        quantity = calculate_purchase_quantity(healthy, cfg, replenishing=replenishing)
+        quantity = calculate_purchase_quantity(
+            healthy,
+            cfg,
+            replenishing=replenishing,
+            forecast_trigger=forecast_trigger,
+        )
         result["quantity"] = quantity
         if quantity <= 0:
             result.update({"ok": True, "action": "inventory_ok"})

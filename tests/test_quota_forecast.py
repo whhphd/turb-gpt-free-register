@@ -1,0 +1,134 @@
+import unittest
+
+from core.quota_forecast import collect_quota_snapshot, extract_quota_windows, update_forecast
+
+
+class QuotaForecastTests(unittest.TestCase):
+    def test_disabled_zero_window_is_ignored_but_full_active_window_is_kept(self):
+        account = {
+            "id": 1,
+            "extra": {
+                "codex_5h_used_percent": 0,
+                "codex_5h_window_minutes": 0,
+                "codex_5h_reset_after_seconds": 0,
+                "codex_5h_reset_at": "2026-08-16T01:50:28+08:00",
+                "codex_7d_used_percent": 0,
+                "codex_7d_window_minutes": 10080,
+                "codex_7d_reset_after_seconds": 600000,
+            },
+        }
+        windows = extract_quota_windows(account)
+        self.assertNotIn("300m", windows)
+        self.assertEqual(windows["10080m"]["remaining_units"], 1.0)
+
+    def test_discovers_monthly_and_future_duration_windows_without_alias_double_count(self):
+        account = {
+            "id": 2,
+            "extra": {
+                "codex_primary_used_percent": 10,
+                "codex_primary_reset_after_seconds": 100,
+                "codex_30d_used_percent": 25,
+                "codex_30d_window_minutes": 43200,
+                "codex_30d_reset_after_seconds": 100000,
+                "codex_14d_used_percent": 40,
+                "codex_14d_window_minutes": 20160,
+                "codex_14d_reset_after_seconds": 100000,
+            },
+        }
+        windows = extract_quota_windows(account)
+        self.assertEqual(set(windows), {"43200m", "20160m"})
+        self.assertAlmostEqual(windows["43200m"]["remaining_units"], 0.75)
+        self.assertAlmostEqual(windows["20160m"]["remaining_units"], 0.60)
+
+    def test_two_samples_choose_earliest_window_eta(self):
+        first = collect_quota_snapshot([{
+            "id": 3,
+            "extra": {
+                "codex_7d_used_percent": 20,
+                "codex_7d_window_minutes": 10080,
+                "codex_7d_reset_after_seconds": 600000,
+                "codex_30d_used_percent": 50,
+                "codex_30d_window_minutes": 43200,
+                "codex_30d_reset_after_seconds": 200000,
+            },
+        }], sampled_at=0)
+        state, first_forecast = update_forecast(None, first, min_samples=2, safety_factor=1.0)
+        self.assertEqual(first_forecast["status"], "insufficient")
+
+        second = collect_quota_snapshot([{
+            "id": 3,
+            "extra": {
+                "codex_7d_used_percent": 30,
+                "codex_7d_window_minutes": 10080,
+                "codex_7d_reset_after_seconds": 599400,
+                "codex_30d_used_percent": 60,
+                "codex_30d_window_minutes": 43200,
+                "codex_30d_reset_after_seconds": 199400,
+            },
+        }], sampled_at=600)
+        state, forecast = update_forecast(state, second, min_samples=2, safety_factor=1.0)
+        self.assertEqual(forecast["status"], "ready")
+        self.assertEqual(forecast["bottleneck_window"], "43200m")
+        self.assertAlmostEqual(forecast["eta_minutes"], 40.0, places=3)
+        self.assertEqual(state["sample_count"], 2)
+
+    def test_window_reset_counts_new_usage_without_negative_rate(self):
+        first = collect_quota_snapshot([{
+            "id": 4,
+            "extra": {
+                "codex_7d_used_percent": 90,
+                "codex_7d_window_minutes": 10080,
+                "codex_7d_reset_after_seconds": 30,
+            },
+        }], sampled_at=0)
+        state, _ = update_forecast(None, first, min_samples=2, safety_factor=1.0)
+        second = collect_quota_snapshot([{
+            "id": 4,
+            "extra": {
+                "codex_7d_used_percent": 10,
+                "codex_7d_window_minutes": 10080,
+                "codex_7d_reset_after_seconds": 100000,
+            },
+        }], sampled_at=600)
+        _, forecast = update_forecast(state, second, min_samples=2, safety_factor=1.0)
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(window["reset_count"], 1)
+        self.assertGreater(window["rate_units_per_min"], 0)
+
+    def test_new_account_addition_changes_capacity_not_consumption_rate(self):
+        first = collect_quota_snapshot([{
+            "id": 6,
+            "extra": {
+                "codex_7d_used_percent": 20,
+                "codex_7d_window_minutes": 10080,
+                "codex_7d_reset_after_seconds": 600000,
+            },
+        }], sampled_at=0)
+        state, _ = update_forecast(None, first, min_samples=2, safety_factor=1.0)
+        second = collect_quota_snapshot([
+            {
+                "id": 6,
+                "extra": {
+                    "codex_7d_used_percent": 30,
+                    "codex_7d_window_minutes": 10080,
+                    "codex_7d_reset_after_seconds": 599400,
+                },
+            },
+            {
+                "id": 7,
+                "extra": {
+                    "codex_7d_used_percent": 0,
+                    "codex_7d_window_minutes": 10080,
+                    "codex_7d_reset_after_seconds": 599400,
+                },
+            },
+        ], sampled_at=600)
+        _, forecast = update_forecast(state, second, min_samples=2, safety_factor=1.0)
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(window["matched_accounts"], 1)
+        self.assertEqual(window["new_accounts"], 1)
+        self.assertAlmostEqual(window["rate_units_per_min"], 0.01, places=6)
+        self.assertAlmostEqual(window["remaining_units"], 1.7, places=6)
+
+if __name__ == "__main__":
+    unittest.main()
