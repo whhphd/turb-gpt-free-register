@@ -200,12 +200,14 @@ def _aggregate(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
             item = aggregate.setdefault(key, {
                 "accounts": 0,
                 "remaining_units": 0.0,
+                "capacity_units_sum": 0.0,
                 "used_percent_sum": 0.0,
                 "window_minutes": window.get("window_minutes") or 0.0,
                 "reset_after_seconds": [],
             })
             item["accounts"] += 1
             item["remaining_units"] += float(window.get("remaining_units") or 0.0)
+            item["capacity_units_sum"] += float(window.get("capacity_units") or 1.0)
             item["used_percent_sum"] += float(window.get("used_percent") or 0.0)
             item["reset_after_seconds"].append(float(window.get("reset_after_seconds") or 0.0))
     return aggregate
@@ -353,6 +355,10 @@ def update_forecast(
             "accounts": int(item.get("accounts") or 0),
             "coverage": round(coverage, 4),
             "remaining_units": round(remaining, 6),
+            "capacity_units_per_account": round(
+                float(item.get("capacity_units_sum") or 0.0) / max(1, int(item.get("accounts") or 0)),
+                6,
+            ),
             "used_percent_avg": round(float(item.get("used_percent_sum") or 0.0) / max(1, int(item.get("accounts") or 0)), 4),
             "rate_units_per_min": round(actual_rate, 8),
             "planned_rate_units_per_min": round(planned_rate, 8),

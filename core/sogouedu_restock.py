@@ -71,6 +71,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # it with the provider dashboard before enabling forecast-triggered orders.
     "forecast_enabled": False,
     "forecast_interrupt_minutes": 20,
+    "forecast_target_minutes": 25,
     "forecast_sample_interval_sec": 60,
     "forecast_rate_window_minutes": 10,
     "forecast_min_samples": 3,
@@ -152,6 +153,10 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         cfg["forecast_interrupt_minutes"] = max(0, min(24 * 60, int(cfg.get("forecast_interrupt_minutes") or 0)))
     except (TypeError, ValueError):
         cfg["forecast_interrupt_minutes"] = 20
+    try:
+        cfg["forecast_target_minutes"] = max(cfg["forecast_interrupt_minutes"], min(24 * 60, int(cfg.get("forecast_target_minutes") or 25)))
+    except (TypeError, ValueError):
+        cfg["forecast_target_minutes"] = max(cfg["forecast_interrupt_minutes"], 25)
     try:
         cfg["forecast_sample_interval_sec"] = max(10, min(3600, int(cfg.get("forecast_sample_interval_sec") or 60)))
     except (TypeError, ValueError):
@@ -330,15 +335,33 @@ def calculate_purchase_quantity(
     *,
     replenishing: bool,
     forecast_trigger: bool = False,
+    quota_forecast: dict[str, Any] | None = None,
 ) -> int:
     if not replenishing:
         return 0
     if cfg.get("trigger_mode") == "forecast":
         # Forecast mode is independent of inventory thresholds. Once the
-        # remaining-quota ETA crosses the configured lead time, place one
-        # configured-size order instead of using min/target as a second
-        # trigger.
-        return max(1, int(cfg["max_purchase_per_order"])) if forecast_trigger else 0
+        # remaining-quota ETA crosses the lead time, replenish only the
+        # calculated shortfall to the target runway.
+        if not forecast_trigger:
+            return 0
+        forecast = quota_forecast if isinstance(quota_forecast, dict) else {}
+        target_minutes = max(
+            float(cfg.get("forecast_interrupt_minutes") or 0),
+            float(cfg.get("forecast_target_minutes") or 25),
+        )
+        required = 0
+        for window in (forecast.get("windows") or {}).values():
+            if not isinstance(window, dict):
+                continue
+            planned_rate = float(window.get("planned_rate_units_per_min") or 0.0)
+            remaining = max(0.0, float(window.get("remaining_units") or 0.0))
+            capacity = max(1e-12, float(window.get("capacity_units_per_account") or 1.0))
+            shortfall = max(0.0, target_minutes * planned_rate - remaining)
+            required = max(required, int((shortfall / capacity) + 0.999999))
+        if required <= 0:
+            required = 1
+        return min(required, max(1, int(cfg["max_purchase_per_order"])))
     gap = max(0, int(cfg["target_healthy"]) - int(healthy))
     if forecast_trigger and gap <= 0:
         return max(1, int(cfg["max_purchase_per_order"]))
@@ -1276,6 +1299,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             cfg,
             replenishing=replenishing,
             forecast_trigger=forecast_trigger,
+            quota_forecast=quota_forecast,
         )
         result["quantity"] = quantity
         if quantity <= 0:

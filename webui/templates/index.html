@@ -3211,6 +3211,7 @@
           <label class="fld">监测间隔（秒）<input type="number" min="1" id="sogouRestockMonitorIntervalV2"></label>
           <label class="fld">补池触发模式<select id="sogouRestockTriggerModeV2"><option value="inventory">最低健康库存</option><option value="forecast">额度预测</option></select></label>
           <label class="fld">预计断供前触发（分钟）<input type="number" min="0" max="1440" id="sogouRestockForecastLeadV2"></label>
+          <label class="fld">预测目标供给时间（分钟）<input type="number" min="1" max="1440" id="sogouRestockForecastTargetV2"></label>
           <label class="fld">额度采样间隔（秒）<input type="number" min="10" max="3600" id="sogouRestockForecastSampleV2"></label>
           <label class="fld">速率滑动窗口（分钟）<input type="number" min="1" max="1440" id="sogouRestockForecastWindowV2"></label>
           <label class="fld">最少有效采样次数<input type="number" min="3" max="1000" id="sogouRestockForecastSamplesV2"></label>
@@ -7970,7 +7971,7 @@ async function codexUploadPushPoolOnFiles(ev) {
   function syncSogouRestockTriggerModeUI() {
     const mode = (($('#sogouRestockTriggerModeV2') && $('#sogouRestockTriggerModeV2').value) || 'inventory') === 'forecast' ? 'forecast' : 'inventory';
     ['#sogouRestockMinV2', '#sogouRestockTargetV2'].forEach(id => { const el = $(id); if (el) el.disabled = mode !== 'inventory'; });
-    ['#sogouRestockForecastLeadV2', '#sogouRestockForecastSampleV2', '#sogouRestockForecastWindowV2', '#sogouRestockForecastSamplesV2', '#sogouRestockForecastSafetyV2'].forEach(id => { const el = $(id); if (el) el.disabled = mode !== 'forecast'; });
+    ['#sogouRestockForecastLeadV2', '#sogouRestockForecastTargetV2', '#sogouRestockForecastSampleV2', '#sogouRestockForecastWindowV2', '#sogouRestockForecastSamplesV2', '#sogouRestockForecastSafetyV2'].forEach(id => { const el = $(id); if (el) el.disabled = mode !== 'forecast'; });
   }
   function setSogouRestockForecastMeta(text, stale = false) {
     const meta = $('#sogouRestockForecastMetaV2');
@@ -8013,6 +8014,7 @@ async function codexUploadPushPoolOnFiles(ev) {
     _sogouInput('#sogouRestockMonitorIntervalV2', cfg.monitor_interval_sec);
     _sogouInput('#sogouRestockTriggerModeV2', cfg.trigger_mode || (cfg.forecast_enabled ? 'forecast' : 'inventory'));
     _sogouInput('#sogouRestockForecastLeadV2', cfg.forecast_interrupt_minutes == null ? 20 : cfg.forecast_interrupt_minutes);
+    _sogouInput('#sogouRestockForecastTargetV2', cfg.forecast_target_minutes == null ? 25 : cfg.forecast_target_minutes);
     _sogouInput('#sogouRestockForecastSampleV2', cfg.forecast_sample_interval_sec == null ? 60 : cfg.forecast_sample_interval_sec);
     _sogouInput('#sogouRestockForecastWindowV2', cfg.forecast_rate_window_minutes == null ? 10 : cfg.forecast_rate_window_minutes);
     _sogouInput('#sogouRestockForecastSamplesV2', cfg.forecast_min_samples == null ? 3 : cfg.forecast_min_samples);
@@ -8219,7 +8221,7 @@ async function codexUploadPushPoolOnFiles(ev) {
       max_purchase_per_order: num('#sogouRestockMaxOrderV2'), monitor_interval_sec: num('#sogouRestockMonitorIntervalV2'),
       trigger_mode: value('#sogouRestockTriggerModeV2') === 'forecast' ? 'forecast' : 'inventory',
       forecast_enabled: value('#sogouRestockTriggerModeV2') === 'forecast',
-      forecast_interrupt_minutes: num('#sogouRestockForecastLeadV2'), forecast_sample_interval_sec: num('#sogouRestockForecastSampleV2'),
+      forecast_interrupt_minutes: num('#sogouRestockForecastLeadV2'), forecast_target_minutes: num('#sogouRestockForecastTargetV2'), forecast_sample_interval_sec: num('#sogouRestockForecastSampleV2'),
       forecast_rate_window_minutes: num('#sogouRestockForecastWindowV2'),
       forecast_min_samples: num('#sogouRestockForecastSamplesV2'), forecast_safety_factor: num('#sogouRestockForecastSafetyV2'),
       order_poll_interval_sec: num('#sogouRestockOrderIntervalV2'), recovery_poll_interval_sec: num('#sogouRestockRecoveryIntervalV2'),

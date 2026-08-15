@@ -102,7 +102,54 @@ class SogouRestockTests(unittest.TestCase):
             "target_healthy": 100,
             "max_purchase_per_order": 3,
         })
-        self.assertEqual(restock.calculate_purchase_quantity(100, cfg, replenishing=True, forecast_trigger=True), 3)
+        forecast = {
+            "windows": {
+                "10080m": {
+                    "remaining_units": 0.1,
+                    "planned_rate_units_per_min": 0.1,
+                    "capacity_units_per_account": 1.0,
+                }
+            }
+        }
+        self.assertEqual(restock.calculate_purchase_quantity(100, cfg, replenishing=True, forecast_trigger=True, quota_forecast=forecast), 3)
+
+    def test_forecast_purchase_quantity_targets_configured_runway(self):
+        cfg = restock.normalize_restock_config({
+            "trigger_mode": "forecast",
+            "forecast_interrupt_minutes": 20,
+            "forecast_target_minutes": 25,
+            "max_purchase_per_order": 10,
+        })
+        forecast = {
+            "windows": {
+                "10080m": {
+                    "remaining_units": 1.5,
+                    "planned_rate_units_per_min": 0.1,
+                    "capacity_units_per_account": 1.0,
+                },
+                "43200m": {
+                    "remaining_units": 0.5,
+                    "planned_rate_units_per_min": 0.1,
+                    "capacity_units_per_account": 1.0,
+                },
+            }
+        }
+        # The 30d window needs two accounts to reach 2.5 units / 25 minutes;
+        # the 7d window needs only one.
+        self.assertEqual(restock.calculate_purchase_quantity(31, cfg, replenishing=True, forecast_trigger=True, quota_forecast=forecast), 2)
+
+    def test_forecast_purchase_quantity_respects_single_order_cap(self):
+        cfg = restock.normalize_restock_config({
+            "trigger_mode": "forecast",
+            "forecast_target_minutes": 25,
+            "max_purchase_per_order": 3,
+        })
+        forecast = {"windows": {"10080m": {
+            "remaining_units": 0,
+            "planned_rate_units_per_min": 1,
+            "capacity_units_per_account": 1,
+        }}}
+        self.assertEqual(restock.calculate_purchase_quantity(31, cfg, replenishing=True, forecast_trigger=True, quota_forecast=forecast), 3)
 
     def test_healthy_counts_all_sources_but_excludes_bad_rows(self):
         rows = [
