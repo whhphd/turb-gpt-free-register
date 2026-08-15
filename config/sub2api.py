@@ -77,8 +77,8 @@ SOGOUEDU_MAX_RETRIES: int = 2
 
 BUGTEAM_API_BASE: str = "https://bugteam.team"
 BUGTEAM_API_TOKEN: str = ""
-BUGTEAM_API_TIMEOUT: int = 30
-BUGTEAM_MAX_RETRIES: int = 2
+BUGTEAM_API_TIMEOUT: int = 8
+BUGTEAM_MAX_RETRIES: int = 1
 BUGTEAM_PRODUCT: str = "team_1h"
 
 

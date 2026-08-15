@@ -37,6 +37,11 @@ class BugTeamClientTests(unittest.TestCase):
             client.balance()
         self.session.request.assert_not_called()
 
+    def test_default_timeout_and_retry_budget(self):
+        client = BugTeamClient(base_url="https://bugteam.example", token="cfk-test-token", session=self.session)
+        self.assertEqual(client.timeout, 8.0)
+        self.assertEqual(client.max_retries, 1)
+
     def test_token_is_declared_as_server_side_secret(self):
         fields = {field["key"]: field for field in EDITABLE_FIELDS}
         self.assertIn("BUGTEAM_API_TOKEN", SECRET_ENV_KEYS)
