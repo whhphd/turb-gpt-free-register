@@ -195,7 +195,9 @@ class SogouRestockTests(unittest.TestCase):
         def fetch_accounts(**kwargs):
             return [] if kwargs.get("status") == "active" else all_rows
 
-        with patch.object(restock._pool_monitor, "fetch_pool_accounts", side_effect=fetch_accounts) as fetched:
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", side_effect=fetch_accounts) as fetched, patch.object(
+            restock, "_provider_configured", side_effect=lambda provider, **kwargs: provider == "sogou"
+        ):
             result = restock.run_restock_cycle(client=fake)
 
         self.assertTrue(result["ok"])
@@ -235,7 +237,7 @@ class SogouRestockTests(unittest.TestCase):
 
         with patch.object(restock._pool_monitor, "fetch_pool_accounts", side_effect=fetch_accounts), patch.object(
             restock, "_process_recoveries", side_effect=process_recoveries
-        ):
+        ), patch.object(restock, "_provider_configured", side_effect=lambda provider, **kwargs: provider == "sogou"):
             result = restock.run_restock_cycle(client=fake)
 
         self.assertTrue(result["ok"])
