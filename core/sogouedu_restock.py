@@ -351,6 +351,53 @@ def _safe_order(order: dict[str, Any] | None) -> dict[str, Any] | None:
     return {key: value for key, value in order.items() if key not in {"payload", "pending_payload", "credentials"}}
 
 
+def _upsert_order_history(
+    order: dict[str, Any] | None,
+    *,
+    status: str | None = None,
+    remote_status: str | None = None,
+    **fields: Any,
+) -> None:
+    """Persist a sanitized order snapshot without changing order processing state."""
+    if not isinstance(order, dict):
+        return
+    snapshot = dict(order)
+    if status not in (None, ""):
+        snapshot["status"] = str(status)
+    if remote_status not in (None, ""):
+        order["remote_status"] = str(remote_status)
+        snapshot["remote_status"] = str(remote_status)
+    snapshot.update(fields)
+    snapshot["updated_at"] = _now()
+    safe = _safe_order(snapshot)
+    if not safe:
+        return
+    order_id = str(safe.get("order_id") or "").strip()
+    if not order_id:
+        return
+    provider = str(safe.get("provider") or "").strip().lower()
+    rows = _read_json(ORDERS_PATH, [])
+    if not isinstance(rows, list):
+        rows = []
+    match_index = None
+    for index in range(len(rows) - 1, -1, -1):
+        row = rows[index]
+        if not isinstance(row, dict) or str(row.get("order_id") or "").strip() != order_id:
+            continue
+        row_provider = str(row.get("provider") or "").strip().lower()
+        if row_provider and provider and row_provider != provider:
+            continue
+        match_index = index
+        break
+    if match_index is None:
+        rows.append(safe)
+    else:
+        merged = dict(rows[match_index])
+        merged.update(safe)
+        rows[match_index] = merged
+    _write_json(ORDERS_PATH, rows)
+
+
 def get_restock_status() -> dict[str, Any]:
     cfg = load_restock_config()
     state = _load_state()
@@ -600,6 +647,7 @@ def _build_prepared(
 ) -> list[tuple[str, dict]]:
     provider = str(provider or "sogou").strip().lower()
     prefix = "bugteam" if provider == "bugteam" else "sogou"
+    provider_label = "BugTeam" if provider == "bugteam" else "Sogou"
     entries = normalize_upload_json_to_codex_entries(payload, filename=f"{prefix}-{order_id or 'recovery'}.json")
     prepared: list[tuple[str, dict]] = []
     for index, entry in enumerate(entries):
@@ -625,6 +673,8 @@ def _build_prepared(
             extra_patch=extra,
             auto_pause_on_expired=cfg["auto_pause_on_expired"],
         )
+        fallback_name = f"{prefix}-{order_id or 'recovery'}#{index}"
+        account["name"] = f"{provider_label} | {account.get('name') or entry.get('email') or fallback_name}"
         prepared.append((label, account))
     return prepared
 
@@ -664,6 +714,14 @@ def _schedule_followup_order(
     else:
         next_index = provider_index + 1
         if next_index >= len(providers):
+            _upsert_order_history(
+                order,
+                status="order_failed",
+                remote_status=order.get("remote_status") or order.get("status"),
+                transition_reason=reason,
+                remaining_quantity=remaining,
+                finished_at=_now(),
+            )
             state["current_order"] = None
             _save_state(state)
             return {
@@ -678,6 +736,13 @@ def _schedule_followup_order(
         next_retry_count = 0
         action = "provider_fallback_scheduled"
 
+    _upsert_order_history(
+        order,
+        status=action,
+        remote_status=order.get("remote_status") or order.get("status"),
+        transition_reason=reason,
+        remaining_quantity=remaining,
+    )
     order["provider"] = next_provider
     order["provider_index"] = next_index
     order["provider_retry_count"] = next_retry_count
@@ -730,7 +795,7 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
         order["product"] = product
         order["status"] = _order_status(response) or "pending"
         order["updated_at"] = _now()
-        _write_json(ORDERS_PATH, _read_json(ORDERS_PATH, []) + [_safe_order(order)])
+        _upsert_order_history(order, remote_status=order["status"])
         _save_state(state)
         return {"handled": True, "action": "ordered", "order_id": order_id, "provider": provider}
 
@@ -747,6 +812,7 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
         except (TypeError, ValueError):
             reserved = 0
         order["reserved"] = reserved
+        _upsert_order_history(order, remote_status=status)
         if status in {"failed", "cancelled", "canceled", "refunded", "error"}:
             order["last_error"] = str(_value(response, "message", "error") or status)
             followup = _schedule_followup_order(
@@ -758,6 +824,12 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
             )
             if followup:
                 return followup
+            _upsert_order_history(
+                order,
+                status="order_failed",
+                remote_status=status,
+                finished_at=_now(),
+            )
             state["current_order"] = None
             _save_state(state)
             return {"handled": True, "action": "order_failed", "order_id": order_id}
@@ -783,6 +855,12 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
                 order.pop("partial_finalize_last_attempt_at", None)
                 order.pop("last_polled_at", None)
                 order["updated_at"] = _now()
+                _upsert_order_history(
+                    order,
+                    status="partial_finalized",
+                    remote_status=order["status"],
+                    reserved=reserved,
+                )
                 _save_state(state)
                 return {
                     "handled": True,
@@ -805,6 +883,14 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
             )
             if followup:
                 return followup
+            _upsert_order_history(
+                order,
+                status="order_failed",
+                remote_status=status,
+                reserved=reserved,
+                transition_reason="partial_exhausted",
+                finished_at=_now(),
+            )
             state["current_order"] = None
             _save_state(state)
             return {
@@ -825,6 +911,7 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
         )
         if status not in {"ready", "completed", "success", "available", "fulfilled", "done"} and not partial_settled_ready:
             order["updated_at"] = _now()
+            _upsert_order_history(order, remote_status=status, reserved=reserved)
             _save_state(state)
             waiting = {
                 "handled": True,
@@ -842,6 +929,7 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
         order["payload"] = _delivery_payload(response)
         order["status"] = "taken"
         order["updated_at"] = _now()
+        _upsert_order_history(order, status="taken", remote_status=status, reserved=reserved)
         _save_state(state)
 
     payload = _delivery_payload(order.get("payload"))
@@ -854,6 +942,11 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
         order.pop("last_polled_at", None)
         order["status"] = "ready"
         order["updated_at"] = _now()
+        _upsert_order_history(
+            order,
+            status="push_waiting",
+            remote_status=order.get("remote_status") or order.get("status"),
+        )
         _save_state(state)
         return {"handled": True, "action": "push_waiting", "order_id": order_id}
     result = push_prepared_accounts_to_pool(prepared)
@@ -862,10 +955,22 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
     order["last_push"] = {"success": pushed_success, "failed": pushed_failed}
     order["updated_at"] = _now()
     if pushed_failed:
+        _upsert_order_history(
+            order,
+            status="push_retry",
+            remote_status=order.get("remote_status") or order.get("status"),
+            delivered_quantity=pushed_success,
+        )
         _save_state(state)
         return {"handled": True, "action": "push_retry", "order_id": order_id, "result": order["last_push"]}
     expected = max(1, int(order.get("quantity") or len(prepared)))
     if order.get("provider") and pushed_success < expected:
+        _upsert_order_history(
+            order,
+            status="partial_pushed",
+            remote_status=order.get("remote_status") or order.get("status"),
+            delivered_quantity=pushed_success,
+        )
         followup = _schedule_followup_order(
             order,
             order_cfg,
@@ -877,6 +982,13 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
             followup["order_id"] = order_id
             followup["delivered"] = pushed_success
             return followup
+    _upsert_order_history(
+        order,
+        status="pushed",
+        remote_status=order.get("remote_status") or order.get("status"),
+        delivered_quantity=pushed_success,
+        finished_at=_now(),
+    )
     state["current_order"] = None
     _save_state(state)
     return {"handled": True, "action": "pushed", "order_id": order_id, "result": order["last_push"]}

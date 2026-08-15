@@ -95,6 +95,40 @@ class SogouRestockTests(unittest.TestCase):
         ]
         self.assertEqual(restock.count_healthy_accounts(rows), 2)
 
+    def test_order_history_upsert_updates_each_provider_without_leaking_payload(self):
+        restock._write_json(restock.ORDERS_PATH, [
+            {"order_id": "same-id", "provider": "sogou", "status": "waiting_inventory"},
+            {"order_id": "same-id", "provider": "bugteam", "status": "waiting_inventory"},
+        ])
+        restock._upsert_order_history(
+            {
+                "order_id": "same-id",
+                "provider": "bugteam",
+                "status": "taken",
+                "payload": {"accounts": [{"access_token": "secret"}]},
+            },
+            status="pushed",
+            remote_status="completed",
+            delivered_quantity=1,
+        )
+        restock._upsert_order_history(
+            {"order_id": "sogou-new", "provider": "sogou", "status": "completed"},
+            status="pushed",
+            remote_status="completed",
+            delivered_quantity=2,
+        )
+
+        rows = restock._read_json(restock.ORDERS_PATH, [])
+        bugteam = next(row for row in rows if row.get("provider") == "bugteam")
+        sogou = next(row for row in rows if row.get("provider") == "sogou" and row.get("order_id") == "same-id")
+        new_sogou = next(row for row in rows if row.get("order_id") == "sogou-new")
+        self.assertEqual(bugteam["status"], "pushed")
+        self.assertEqual(bugteam["remote_status"], "completed")
+        self.assertEqual(bugteam["delivered_quantity"], 1)
+        self.assertNotIn("payload", bugteam)
+        self.assertEqual(sogou["status"], "waiting_inventory")
+        self.assertEqual(new_sogou["status"], "pushed")
+
     def test_cycle_does_not_order_when_inventory_is_enough(self):
         restock.save_restock_config({"enabled": True, "min_healthy": 2, "target_healthy": 4})
         fake = FakeClient()
@@ -266,6 +300,16 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(account["concurrency"], 7)
         self.assertEqual(account["credentials"]["model_mapping"], {"gpt-5.5": "gpt-5.5", "gpt-5.4": "gpt-5.4"})
         self.assertFalse(account["auto_pause_on_expired"])
+
+    def test_prepared_accounts_are_named_with_provider(self):
+        cfg = restock.normalize_restock_config({})
+        payload = {"accounts": [{"email": "named@example.com", "access_token": _jwt("named@example.com")}]}
+        bugteam = restock._build_prepared(payload, cfg, order_id="bug-1", provider="bugteam")
+        sogou = restock._build_prepared(payload, cfg, order_id="sogou-1", provider="sogou")
+        self.assertEqual(bugteam[0][1]["name"], "BugTeam | named@example.com")
+        self.assertEqual(sogou[0][1]["name"], "Sogou | named@example.com")
+        self.assertNotIn("provider", bugteam[0][1]["extra"])
+        self.assertNotIn("provider", sogou[0][1]["extra"])
 
     def test_unfinished_order_is_taken_and_pushed_without_rebuy(self):
         restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
@@ -764,6 +808,14 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(second["remaining"], 1)
         self.assertEqual(fake.created[0][0:2], ("team_1h", 2))
         pushed.assert_called_once()
+
+        history = restock._read_json(restock.ORDERS_PATH, [])
+        entry = next(row for row in history if row.get("order_id") == "bugteam-1")
+        self.assertEqual(entry["status"], "provider_retry_scheduled")
+        self.assertEqual(entry["remote_status"], "completed")
+        self.assertEqual(entry["delivered_quantity"], 1)
+        pushed_account = pushed.call_args.args[0][0][1]
+        self.assertEqual(pushed_account["name"], "BugTeam | bugteam@example.com")
 
     def test_recovery_backlog_is_isolated_by_provider(self):
         cfg = restock.normalize_restock_config({"recovery_poll_interval_sec": 1})
