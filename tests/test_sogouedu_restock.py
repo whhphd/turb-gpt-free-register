@@ -85,6 +85,25 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(cfg["target_healthy"], 9)
         self.assertEqual(cfg["model_whitelist"], ["gpt-5.5"])
 
+    def test_trigger_mode_is_exclusive_and_legacy_forecast_is_migrated(self):
+        inventory = restock.normalize_restock_config({"trigger_mode": "inventory", "forecast_enabled": True})
+        self.assertEqual(inventory["trigger_mode"], "inventory")
+        self.assertFalse(inventory["forecast_enabled"])
+        forecast = restock.normalize_restock_config({"trigger_mode": "forecast"})
+        self.assertEqual(forecast["trigger_mode"], "forecast")
+        self.assertTrue(forecast["forecast_enabled"])
+        legacy = restock.normalize_restock_config({"forecast_enabled": True})
+        self.assertEqual(legacy["trigger_mode"], "forecast")
+
+    def test_forecast_purchase_quantity_does_not_use_inventory_target(self):
+        cfg = restock.normalize_restock_config({
+            "trigger_mode": "forecast",
+            "min_healthy": 5,
+            "target_healthy": 100,
+            "max_purchase_per_order": 3,
+        })
+        self.assertEqual(restock.calculate_purchase_quantity(100, cfg, replenishing=True, forecast_trigger=True), 3)
+
     def test_healthy_counts_all_sources_but_excludes_bad_rows(self):
         rows = [
             {"status": "active", "schedulable": True, "extra": {"import_source": "manual"}},

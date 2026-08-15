@@ -130,5 +130,47 @@ class QuotaForecastTests(unittest.TestCase):
         self.assertAlmostEqual(window["rate_units_per_min"], 0.01, places=6)
         self.assertAlmostEqual(window["remaining_units"], 1.7, places=6)
 
+    def test_rate_uses_only_the_configured_sliding_window(self):
+        def sample(used, at):
+            return collect_quota_snapshot([{
+                "id": 8,
+                "extra": {
+                    "codex_7d_used_percent": used,
+                    "codex_7d_window_minutes": 10080,
+                    "codex_7d_reset_after_seconds": 600000 - at,
+                },
+            }], sampled_at=at)
+
+        state, _ = update_forecast(None, sample(0, 0), min_samples=3, safety_factor=1.0, rate_window_minutes=5)
+        state, _ = update_forecast(state, sample(20, 300), min_samples=3, safety_factor=1.0, rate_window_minutes=5)
+        _, forecast = update_forecast(state, sample(20, 600), min_samples=3, safety_factor=1.0, rate_window_minutes=5)
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(forecast["status"], "no_rate")
+        self.assertEqual(window["rate_samples"], 1)
+        self.assertAlmostEqual(window["last_delta_units"], 0.0, places=6)
+
+    def test_sliding_window_keeps_latest_balance_after_account_churn(self):
+        def sample(accounts, at):
+            return collect_quota_snapshot([
+                {
+                    "id": account_id,
+                    "extra": {
+                        "codex_7d_used_percent": used,
+                        "codex_7d_window_minutes": 10080,
+                        "codex_7d_reset_after_seconds": 600000 - at,
+                    },
+                }
+                for account_id, used in accounts
+            ], sampled_at=at)
+
+        state, _ = update_forecast(None, sample([(9, 10), (10, 10)], 0), min_samples=2, safety_factor=1.0)
+        _, forecast = update_forecast(state, sample([(9, 20), (11, 0)], 600), min_samples=2, safety_factor=1.0)
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(window["new_accounts"], 1)
+        self.assertEqual(window["removed_accounts"], 1)
+        self.assertEqual(window["matched_accounts"], 1)
+        self.assertAlmostEqual(window["remaining_units"], 1.8, places=6)
+        self.assertAlmostEqual(window["rate_units_per_min"], 0.01, places=6)
+
 if __name__ == "__main__":
     unittest.main()

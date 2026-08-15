@@ -224,86 +224,124 @@ def _consumed_since(previous: dict[str, Any], current: dict[str, Any]) -> tuple[
     return 0.0, False
 
 
+def _snapshot_time(snapshot: dict[str, Any]) -> float | None:
+    value = snapshot.get("sampled_at") if isinstance(snapshot, dict) else None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _history_from_state(previous_state: dict[str, Any], current: dict[str, Any]) -> list[dict[str, Any]]:
+    """Load a bounded, de-duplicated snapshot history from old or new state."""
+    candidates: list[dict[str, Any]] = []
+    samples = previous_state.get("samples")
+    if isinstance(samples, list):
+        candidates.extend(item for item in samples if isinstance(item, dict))
+    previous = previous_state.get("previous_snapshot")
+    if isinstance(previous, dict) and not any(item is previous for item in candidates):
+        candidates.append(previous)
+    candidates.append(current)
+    unique: dict[float, dict[str, Any]] = {}
+    for item in candidates:
+        timestamp = _snapshot_time(item)
+        if timestamp is not None:
+            unique[timestamp] = item
+    return [unique[key] for key in sorted(unique)]
+
+
+def _consumption_over_history(
+    account_key: str,
+    window_key: str,
+    history: list[dict[str, Any]],
+) -> tuple[float, int, bool]:
+    consumed = 0.0
+    resets = 0
+    observed = False
+    for previous, current in zip(history, history[1:]):
+        previous_accounts = previous.get("accounts") if isinstance(previous, dict) else {}
+        current_accounts = current.get("accounts") if isinstance(current, dict) else {}
+        previous_window = previous_accounts.get(account_key, {}).get(window_key) if isinstance(previous_accounts, dict) else None
+        current_window = current_accounts.get(account_key, {}).get(window_key) if isinstance(current_accounts, dict) else None
+        if not isinstance(previous_window, dict) or not isinstance(current_window, dict):
+            continue
+        delta, reset = _consumed_since(previous_window, current_window)
+        consumed += delta
+        resets += int(reset)
+        observed = True
+    return consumed, resets, observed
+
+
 def update_forecast(
     previous_state: dict[str, Any] | None,
     snapshot: dict[str, Any],
     *,
     min_samples: int = 3,
     safety_factor: float = 1.2,
+    rate_window_minutes: int = 10,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Update a cohort-matched EWMA rate and return ``(state, forecast)``.
+    """Update a per-window sliding-rate forecast.
 
-    Account churn is common during replenishment.  New accounts contribute to
-    current remaining capacity but never to the consumption delta until they
-    have a matching sample; removed accounts likewise cannot create a fake
-    consumption spike.  The EWMA smooths delayed percentage refreshes without
-    mixing different pool sizes in a fixed sliding window.
+    The current snapshot supplies the remaining capacity for every healthy
+    account.  Consumption is measured only for accounts present at both ends
+    of the sliding window, so a batch import or a sudden account failure cannot
+    fabricate a rate spike.  Consecutive samples are accumulated to preserve
+    usage across quota resets inside the window; ETA is the minimum of all
+    active quota windows.
     """
     previous_state = previous_state if isinstance(previous_state, dict) else {}
-    previous_snapshot = previous_state.get("previous_snapshot")
-    if not isinstance(previous_snapshot, dict):
-        samples = previous_state.get("samples")
-        if isinstance(samples, list) and samples and isinstance(samples[-1], dict):
-            previous_snapshot = samples[-1]
-    current_accounts = snapshot.get("accounts") if isinstance(snapshot, dict) else {}
-    current_accounts = current_accounts if isinstance(current_accounts, dict) else {}
-    previous_accounts = previous_snapshot.get("accounts") if isinstance(previous_snapshot, dict) else {}
-    previous_accounts = previous_accounts if isinstance(previous_accounts, dict) else {}
-    sampled_at = snapshot.get("sampled_at")
-    current_at = float(time.time() if sampled_at is None else sampled_at)
-    previous_value = previous_snapshot.get("sampled_at") if isinstance(previous_snapshot, dict) else None
-    previous_at = float(previous_value) if previous_value is not None else None
-    elapsed_minutes = max(0.0, (current_at - previous_at) / 60.0) if previous_at is not None else 0.0
+    current = snapshot if isinstance(snapshot, dict) else {"sampled_at": time.time(), "accounts": {}, "account_count": 0}
+    current_at = _snapshot_time(current)
+    if current_at is None:
+        current_at = time.time()
+        current = dict(current)
+        current["sampled_at"] = current_at
+    history = _history_from_state(previous_state, current)
+    window_seconds = max(60.0, float(rate_window_minutes or 10) * 60.0)
+    cutoff = current_at - window_seconds
+    history = [
+        item for item in history
+        if ((_snapshot_time(item) if _snapshot_time(item) is not None else current_at) >= cutoff)
+    ]
+    if not history or _snapshot_time(history[-1]) != current_at:
+        history.append(current)
+    oldest = history[0]
+    oldest_value = _snapshot_time(oldest)
+    oldest_at = oldest_value if oldest_value is not None else current_at
+    elapsed_minutes = max(0.0, (current_at - oldest_at) / 60.0)
     sample_count = int(previous_state.get("sample_count") or 0) + 1
-    rate_state = previous_state.get("windows") if isinstance(previous_state.get("windows"), dict) else {}
-    next_rates: dict[str, dict[str, Any]] = {}
-    deltas: dict[str, dict[str, Any]] = {}
-
-    if previous_snapshot and elapsed_minutes > 0:
-        for account_key, current_windows in current_accounts.items():
-            old_windows = previous_accounts.get(account_key)
-            if not isinstance(current_windows, dict) or not isinstance(old_windows, dict):
-                continue
-            for window_key, current_window in current_windows.items():
-                previous_window = old_windows.get(window_key)
-                if not isinstance(previous_window, dict) or not isinstance(current_window, dict):
-                    continue
-                consumed, reset = _consumed_since(previous_window, current_window)
-                item = deltas.setdefault(window_key, {
-                    "consumed_units": 0.0,
-                    "matched_accounts": 0,
-                    "resets": 0,
-                })
-                item["consumed_units"] += consumed
-                item["matched_accounts"] += 1
-                item["resets"] += int(reset)
-
-    aggregate = _aggregate(snapshot)
+    current_accounts = current.get("accounts") if isinstance(current.get("accounts"), dict) else {}
+    oldest_accounts = oldest.get("accounts") if isinstance(oldest.get("accounts"), dict) else {}
+    cohort_keys = set(current_accounts).intersection(oldest_accounts)
+    new_account_count = max(0, len(current_accounts) - len(cohort_keys))
+    removed_account_count = max(0, len(oldest_accounts) - len(cohort_keys))
+    aggregate = _aggregate(current)
     windows: dict[str, dict[str, Any]] = {}
+    next_rates: dict[str, dict[str, Any]] = {}
     valid_etas: list[tuple[float, str]] = []
     safe_factor = max(1.0, float(safety_factor or 1.0))
-    total_current_accounts = max(0, int(snapshot.get("account_count") or 0))
-    matched_account_keys = {key for key in current_accounts if key in previous_accounts}
-    new_account_count = max(0, len(current_accounts) - len(matched_account_keys))
-    removed_account_count = max(0, len(previous_accounts) - len(matched_account_keys))
+    total_current_accounts = max(0, int(current.get("account_count") or 0))
+    min_required = max(2, int(min_samples or 3))
 
     for window_key, item in aggregate.items():
-        old_rate = rate_state.get(window_key) if isinstance(rate_state.get(window_key), dict) else {}
-        delta = deltas.get(window_key, {})
-        rate_now = float(delta.get("consumed_units") or 0.0) / elapsed_minutes if elapsed_minutes > 0 else None
-        old_rate_value = float(old_rate.get("rate_units_per_min") or 0.0)
-        if rate_now is None:
-            actual_rate = old_rate_value
-        elif int(old_rate.get("rate_samples") or 0) <= 0:
-            actual_rate = rate_now
-        else:
-            actual_rate = 0.35 * rate_now + 0.65 * old_rate_value
+        consumed = 0.0
+        matched_accounts = 0
+        reset_count = 0
+        for account_key in cohort_keys:
+            value, resets, observed = _consumption_over_history(account_key, window_key, history)
+            if observed:
+                consumed += value
+                reset_count += resets
+                matched_accounts += 1
+        rate_now = consumed / elapsed_minutes if elapsed_minutes > 0 and matched_accounts else None
+        actual_rate = max(0.0, float(rate_now or 0.0))
         planned_rate = actual_rate * safe_factor
         remaining = max(0.0, float(item.get("remaining_units") or 0.0))
         eta = remaining / planned_rate if planned_rate > 1e-12 else None
         coverage = float(item.get("accounts") or 0) / max(1, total_current_accounts)
-        rate_samples = int(old_rate.get("rate_samples") or 0) + (1 if rate_now is not None else 0)
-        if sample_count < max(2, int(min_samples or 3)) or not rate_samples:
+        rate_samples = max(0, len(history) - 1) if matched_accounts else 0
+        if sample_count < min_required or rate_samples <= 0:
             status = "insufficient"
         elif actual_rate <= 1e-12:
             status = "no_rate"
@@ -320,19 +358,20 @@ def update_forecast(
             "planned_rate_units_per_min": round(planned_rate, 8),
             "eta_minutes": round(eta, 3) if eta is not None else None,
             "status": status,
-            "matched_accounts": int(delta.get("matched_accounts") or 0),
+            "elapsed_minutes": round(elapsed_minutes, 4) if elapsed_minutes else None,
+            "matched_accounts": matched_accounts,
             "rate_samples": rate_samples,
             "new_accounts": new_account_count,
             "removed_accounts": removed_account_count,
-            "last_delta_units": round(float(delta.get("consumed_units") or 0.0), 6),
-            "reset_count": int(old_rate.get("reset_count") or 0) + int(delta.get("resets") or 0),
+            "last_delta_units": round(consumed, 6),
+            "reset_count": reset_count,
         }
         next_rates[window_key] = {
             "rate_units_per_min": actual_rate,
             "rate_samples": rate_samples,
-            "last_delta_units": float(delta.get("consumed_units") or 0.0),
-            "matched_accounts": int(delta.get("matched_accounts") or 0),
-            "reset_count": int(old_rate.get("reset_count") or 0) + int(delta.get("resets") or 0),
+            "last_delta_units": consumed,
+            "matched_accounts": matched_accounts,
+            "reset_count": reset_count,
         }
 
     if valid_etas:
@@ -341,7 +380,7 @@ def update_forecast(
         confidence = "ready" if windows[window_key]["coverage"] >= 0.8 else "low"
     elif windows:
         eta, window_key = None, None
-        overall_status = "insufficient" if sample_count < max(2, int(min_samples or 3)) else "no_rate"
+        overall_status = "insufficient" if sample_count < min_required else "no_rate"
         confidence = "insufficient" if overall_status == "insufficient" else "low"
     else:
         eta, window_key = None, None
@@ -351,17 +390,22 @@ def update_forecast(
     forecast = {
         "sampled_at": current_at,
         "sample_count": sample_count,
+        "rate_window_minutes": int(max(1, int(rate_window_minutes or 10))),
         "elapsed_minutes": round(elapsed_minutes, 4) if elapsed_minutes else None,
         "status": overall_status,
         "confidence": confidence,
         "eta_minutes": round(eta, 3) if eta is not None else None,
         "bottleneck_window": window_key,
         "windows": windows,
+        "new_accounts": new_account_count,
+        "removed_accounts": removed_account_count,
     }
     next_state = {
         "sample_count": sample_count,
         "last_sampled_at": current_at,
-        "previous_snapshot": snapshot,
+        "previous_snapshot": current,
+        "samples": history,
+        # Keep this summary for operators and old state readers.
         "windows": next_rates,
         "forecast": forecast,
     }

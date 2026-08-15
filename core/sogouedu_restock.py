@@ -64,11 +64,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rate_multiplier": float(getattr(_cfg, "SUB2API_POOL_RATE_MULTIPLIER", 1.0) or 1.0),
     "auto_pause_on_expired": bool(getattr(_cfg, "SUB2API_POOL_AUTO_PAUSE_ON_EXPIRED", True)),
     "model_whitelist": [],
+    # Exactly one replenishment trigger is active at a time.  Keep the old
+    # forecast_enabled field below as a compatibility mirror for old state.
+    "trigger_mode": "inventory",
     # Quota forecasting is collected when disabled so operators can compare
     # it with the provider dashboard before enabling forecast-triggered orders.
     "forecast_enabled": False,
     "forecast_interrupt_minutes": 20,
     "forecast_sample_interval_sec": 60,
+    "forecast_rate_window_minutes": 10,
     "forecast_min_samples": 3,
     "forecast_safety_factor": 1.2,
 }
@@ -116,6 +120,14 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     cfg = _config_defaults()
     if isinstance(raw, dict):
         cfg.update({key: raw[key] for key in _CONFIG_KEYS if key in raw})
+    raw_mode = raw.get("trigger_mode") if isinstance(raw, dict) else None
+    if raw_mode in (None, ""):
+        # Existing installations used forecast_enabled before trigger_mode
+        # existed. Infer that behavior once; new configs default to inventory.
+        raw_mode = "forecast" if isinstance(raw, dict) and bool(raw.get("forecast_enabled")) else "inventory"
+    cfg["trigger_mode"] = str(raw_mode).strip().lower()
+    if cfg["trigger_mode"] not in {"inventory", "forecast"}:
+        cfg["trigger_mode"] = "inventory"
     cfg["enabled"] = bool(cfg.get("enabled", False))
     for key in ("monitor_group_id", "push_group_id", "min_healthy", "target_healthy", "max_purchase_per_order", "partial_retry_limit", "concurrency", "priority", "load_factor"):
         try:
@@ -133,7 +145,9 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
             cfg[key] = max(1, int(cfg.get(key) or 1))
         except (TypeError, ValueError):
             cfg[key] = 1
-    cfg["forecast_enabled"] = bool(cfg.get("forecast_enabled", False))
+    # The mode is authoritative. The mirror keeps old callers readable without
+    # allowing the two trigger paths to be active at the same time.
+    cfg["forecast_enabled"] = cfg["trigger_mode"] == "forecast"
     try:
         cfg["forecast_interrupt_minutes"] = max(0, min(24 * 60, int(cfg.get("forecast_interrupt_minutes") or 0)))
     except (TypeError, ValueError):
@@ -142,6 +156,10 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         cfg["forecast_sample_interval_sec"] = max(10, min(3600, int(cfg.get("forecast_sample_interval_sec") or 60)))
     except (TypeError, ValueError):
         cfg["forecast_sample_interval_sec"] = 60
+    try:
+        cfg["forecast_rate_window_minutes"] = max(1, min(24 * 60, int(cfg.get("forecast_rate_window_minutes") or 10)))
+    except (TypeError, ValueError):
+        cfg["forecast_rate_window_minutes"] = 10
     try:
         cfg["forecast_min_samples"] = max(3, min(1000, int(cfg.get("forecast_min_samples") or 3)))
     except (TypeError, ValueError):
@@ -315,6 +333,12 @@ def calculate_purchase_quantity(
 ) -> int:
     if not replenishing:
         return 0
+    if cfg.get("trigger_mode") == "forecast":
+        # Forecast mode is independent of inventory thresholds. Once the
+        # remaining-quota ETA crosses the configured lead time, place one
+        # configured-size order instead of using min/target as a second
+        # trigger.
+        return max(1, int(cfg["max_purchase_per_order"])) if forecast_trigger else 0
     gap = max(0, int(cfg["target_healthy"]) - int(healthy))
     if forecast_trigger and gap <= 0:
         return max(1, int(cfg["max_purchase_per_order"]))
@@ -1211,6 +1235,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
                 quota_snapshot,
                 min_samples=cfg["forecast_min_samples"],
                 safety_factor=cfg["forecast_safety_factor"],
+                rate_window_minutes=cfg["forecast_rate_window_minutes"],
             )
             state["quota_forecast"] = quota_state
         else:
@@ -1221,15 +1246,19 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
                 "windows": {},
             }
         forecast_trigger = bool(
-            cfg["forecast_enabled"]
+            cfg["trigger_mode"] == "forecast"
             and quota_forecast.get("status") == "ready"
             and quota_forecast.get("eta_minutes") is not None
             and float(quota_forecast["eta_minutes"]) <= float(cfg["forecast_interrupt_minutes"])
         )
-        static_replenishing = next_replenishing_state(healthy, cfg, bool(state.get("replenishing")))
-        replenishing = bool(static_replenishing or forecast_trigger)
+        static_replenishing = (
+            next_replenishing_state(healthy, cfg, bool(state.get("replenishing")))
+            if cfg["trigger_mode"] == "inventory" else False
+        )
+        replenishing = bool(forecast_trigger if cfg["trigger_mode"] == "forecast" else static_replenishing)
         result["healthy"] = healthy
         result["total"] = len(accounts)
+        result["trigger_mode"] = cfg["trigger_mode"]
         result["replenishing"] = replenishing
         result["static_replenishing"] = static_replenishing
         result["forecast_trigger"] = forecast_trigger

@@ -1199,6 +1199,10 @@
     .pool-monitor-summary .pm-chip.is-bad strong { color: #f56c6c; }
     .pool-monitor-summary .pm-chip.is-warn strong { color: #e6a23c; }
     .pool-monitor-summary .pm-chip.is-good strong { color: #67c23a; }
+    .pool-monitor-summary .pm-chip .sogou-restock-forecast-meta {
+      display: block; margin-top: 4px; color: #909399; font-size: 11px; line-height: 1.35;
+    }
+    .pool-monitor-summary .pm-chip .sogou-restock-forecast-meta.is-stale { color: #e6a23c; }
     .pool-monitor-toolbar {
       display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
       padding: 10px 16px; border-bottom: 1px solid #ebeef5;
@@ -3189,7 +3193,7 @@
           <div class="pm-chip"><span>健康号数</span><strong id="sogouRestockHealthyV2">-</strong></div>
           <div class="pm-chip"><span>号池总数</span><strong id="sogouRestockTotalV2">-</strong></div>
           <div class="pm-chip is-good"><span>补池状态</span><strong id="sogouRestockOrderV2">无未完成订单</strong></div>
-          <div class="pm-chip"><span>额度预测</span><strong id="sogouRestockForecastV2">采样不足</strong></div>
+          <div class="pm-chip" id="sogouRestockForecastChipV2"><span>额度预测</span><strong id="sogouRestockForecastV2">采样不足</strong><small class="sogou-restock-forecast-meta" id="sogouRestockForecastMetaV2">等待采样</small></div>
           <div class="pm-chip"><span>SogouEdu 凭据</span><strong id="sogouRestockCredentialV2">未配置</strong></div>
           <div class="pm-chip"><span>BugTeam Token</span><strong id="bugteamRestockCredentialV2">未配置</strong></div>
         </div>
@@ -3205,9 +3209,10 @@
           <label class="fld">目标健康库存<input type="number" min="0" id="sogouRestockTargetV2"></label>
           <label class="fld">单次最大购买<input type="number" min="1" id="sogouRestockMaxOrderV2"></label>
           <label class="fld">监测间隔（秒）<input type="number" min="1" id="sogouRestockMonitorIntervalV2"></label>
-          <label class="fld">启用额度预测触发<input type="checkbox" id="sogouRestockForecastEnabledV2"></label>
+          <label class="fld">补池触发模式<select id="sogouRestockTriggerModeV2"><option value="inventory">最低健康库存</option><option value="forecast">额度预测</option></select></label>
           <label class="fld">预计断供前触发（分钟）<input type="number" min="0" max="1440" id="sogouRestockForecastLeadV2"></label>
           <label class="fld">额度采样间隔（秒）<input type="number" min="10" max="3600" id="sogouRestockForecastSampleV2"></label>
+          <label class="fld">速率滑动窗口（分钟）<input type="number" min="1" max="1440" id="sogouRestockForecastWindowV2"></label>
           <label class="fld">最少有效采样次数<input type="number" min="3" max="1000" id="sogouRestockForecastSamplesV2"></label>
           <label class="fld">速率安全系数<input type="number" min="1" max="5" step="0.05" id="sogouRestockForecastSafetyV2"></label>
           <label class="fld">订单轮询间隔（秒）<input type="number" min="1" id="sogouRestockOrderIntervalV2"></label>
@@ -7962,6 +7967,38 @@ async function codexUploadPushPoolOnFiles(ev) {
     const el = $(id);
     if (el) el.value = value == null ? '' : String(value);
   }
+  function syncSogouRestockTriggerModeUI() {
+    const mode = (($('#sogouRestockTriggerModeV2') && $('#sogouRestockTriggerModeV2').value) || 'inventory') === 'forecast' ? 'forecast' : 'inventory';
+    ['#sogouRestockMinV2', '#sogouRestockTargetV2'].forEach(id => { const el = $(id); if (el) el.disabled = mode !== 'inventory'; });
+    ['#sogouRestockForecastLeadV2', '#sogouRestockForecastSampleV2', '#sogouRestockForecastWindowV2', '#sogouRestockForecastSamplesV2', '#sogouRestockForecastSafetyV2'].forEach(id => { const el = $(id); if (el) el.disabled = mode !== 'forecast'; });
+  }
+  function setSogouRestockForecastMeta(text, stale = false) {
+    const meta = $('#sogouRestockForecastMetaV2');
+    const chip = $('#sogouRestockForecastChipV2');
+    if (meta) { meta.textContent = text; meta.classList.toggle('is-stale', !!stale); }
+    if (chip) chip.classList.toggle('is-warn', !!stale);
+  }
+  function formatSogouRestockForecastAge(seconds) {
+    const value = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (value < 60) return `${value}秒前`;
+    return `${Math.floor(value / 60)}分${String(value % 60).padStart(2, '0')}秒前`;
+  }
+  function forecastSampleTimestamp(value) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return number > 10000000000 ? number : number * 1000;
+    const parsed = new Date(value || '');
+    return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+  }
+  function renderSogouRestockForecastMeta(forecast, cfg, fetchError = false) {
+    if (fetchError) { setSogouRestockForecastMeta('状态刷新失败 · 保留上次数据', true); return; }
+    const sampledAt = forecastSampleTimestamp(forecast && forecast.sampled_at);
+    if (sampledAt == null) { setSogouRestockForecastMeta('尚未完成有效采样', true); return; }
+    const age = Math.max(0, (Date.now() - sampledAt) / 1000);
+    const interval = Math.max(10, Number(cfg.forecast_sample_interval_sec) || 60);
+    const stale = age > Math.max(60, interval * 2);
+    const clock = new Date(sampledAt).toLocaleTimeString('zh-CN', { hour12: false });
+    setSogouRestockForecastMeta(`${stale ? '数据过期' : '最近采样'} ${clock} · ${formatSogouRestockForecastAge(age)}`, stale);
+  }
   function renderSogouRestockStatus(status) {
     const cfg = status && status.config || {};
     const set = (id, value) => { const el = $(id); if (el) el.textContent = value == null ? '-' : String(value); };
@@ -7974,9 +8011,10 @@ async function codexUploadPushPoolOnFiles(ev) {
     _sogouInput('#sogouRestockTargetV2', cfg.target_healthy);
     _sogouInput('#sogouRestockMaxOrderV2', cfg.max_purchase_per_order);
     _sogouInput('#sogouRestockMonitorIntervalV2', cfg.monitor_interval_sec);
-    toggle('#sogouRestockForecastEnabledV2', cfg.forecast_enabled);
+    _sogouInput('#sogouRestockTriggerModeV2', cfg.trigger_mode || (cfg.forecast_enabled ? 'forecast' : 'inventory'));
     _sogouInput('#sogouRestockForecastLeadV2', cfg.forecast_interrupt_minutes == null ? 20 : cfg.forecast_interrupt_minutes);
     _sogouInput('#sogouRestockForecastSampleV2', cfg.forecast_sample_interval_sec == null ? 60 : cfg.forecast_sample_interval_sec);
+    _sogouInput('#sogouRestockForecastWindowV2', cfg.forecast_rate_window_minutes == null ? 10 : cfg.forecast_rate_window_minutes);
     _sogouInput('#sogouRestockForecastSamplesV2', cfg.forecast_min_samples == null ? 3 : cfg.forecast_min_samples);
     _sogouInput('#sogouRestockForecastSafetyV2', cfg.forecast_safety_factor == null ? 1.2 : cfg.forecast_safety_factor);
     _sogouInput('#sogouRestockOrderIntervalV2', cfg.order_poll_interval_sec);
@@ -8005,6 +8043,8 @@ async function codexUploadPushPoolOnFiles(ev) {
     const forecastChurn = Object.values(forecast.windows || {}).reduce((sum, item) => sum + Number(item.new_accounts || 0) + Number(item.removed_accounts || 0), 0);
     const forecastNote = forecastChurn ? ` · 队列变动 ${forecastChurn}` : '';
     set('#sogouRestockForecastV2', forecast.status === 'ready' ? `${forecastWindow}${forecastEta}${forecastNote}` : (forecast.status === 'no_rate' ? '暂无消耗' : '采样不足'));
+    renderSogouRestockForecastMeta(forecast, cfg);
+    syncSogouRestockTriggerModeUI();
   }
   function renderSogouRestockOrders(items) {
     const body = $('#sogouRestockOrdersBodyV2');
@@ -8015,8 +8055,11 @@ async function codexUploadPushPoolOnFiles(ev) {
       <td>${esc(row.updated_at || row.created_at || '-')}</td><td>${esc(row.last_error || '')}</td>
     </tr>`).join('') || '<tr><td colspan="6" style="color:#c0c4cc">暂无订单记录</td></tr>';
   }
+  const SOGOU_RESTOCK_STATUS_INTERVAL_MS = 5000;
   const SOGOU_RESTOCK_LOG_INTERVAL_MS = 2000;
+  let SOGOU_RESTOCK_STATUS_TIMER = null;
   let SOGOU_RESTOCK_LOG_TIMER = null;
+  let SOGOU_RESTOCK_STATUS_LOADING = false;
   let SOGOU_RESTOCK_LOG_LOADING = false;
   let SOGOU_RESTOCK_LOG_SIGNATURE = '';
 
@@ -8033,6 +8076,33 @@ async function codexUploadPushPoolOnFiles(ev) {
     el.classList.toggle('is-error', state === 'error');
     const label = el.querySelector('span');
     if (label) label.textContent = text;
+  }
+  async function loadSogouRestockStatus({ notify = false } = {}) {
+    if (SOGOU_RESTOCK_STATUS_LOADING || !isSogouRestockLogVisible()) return;
+    SOGOU_RESTOCK_STATUS_LOADING = true;
+    try {
+      const status = await api('/api/pool-admin/sogou-restock');
+      renderSogouRestockStatus(status);
+    } catch (err) {
+      renderSogouRestockForecastMeta({}, {}, true);
+      if (notify) showToast('刷新自动补池状态失败: ' + err.message);
+    } finally {
+      SOGOU_RESTOCK_STATUS_LOADING = false;
+    }
+  }
+  function stopSogouRestockStatusPolling() {
+    if (SOGOU_RESTOCK_STATUS_TIMER) clearInterval(SOGOU_RESTOCK_STATUS_TIMER);
+    SOGOU_RESTOCK_STATUS_TIMER = null;
+  }
+  function syncSogouRestockStatusPolling() {
+    if (!isSogouRestockLogVisible()) {
+      stopSogouRestockStatusPolling();
+      return;
+    }
+    if (!SOGOU_RESTOCK_STATUS_TIMER) {
+      loadSogouRestockStatus();
+      SOGOU_RESTOCK_STATUS_TIMER = setInterval(loadSogouRestockStatus, SOGOU_RESTOCK_STATUS_INTERVAL_MS);
+    }
   }
   function formatSogouRestockLogTime(value) {
     if (!value) return '-';
@@ -8117,6 +8187,7 @@ async function codexUploadPushPoolOnFiles(ev) {
     setSogouRestockLogState('自动刷新已暂停', 'paused');
   }
   function syncSogouRestockLogPolling() {
+    syncSogouRestockStatusPolling();
     if (!isSogouRestockLogVisible()) {
       stopSogouRestockLogPolling();
       return;
@@ -8146,8 +8217,10 @@ async function codexUploadPushPoolOnFiles(ev) {
       monitor_group_id: num('#sogouRestockMonitorGroupV2'), push_group_id: num('#sogouRestockPushGroupV2'),
       product: value('#sogouRestockProductV2'), min_healthy: num('#sogouRestockMinV2'), target_healthy: num('#sogouRestockTargetV2'),
       max_purchase_per_order: num('#sogouRestockMaxOrderV2'), monitor_interval_sec: num('#sogouRestockMonitorIntervalV2'),
-      forecast_enabled: !!($('#sogouRestockForecastEnabledV2') && $('#sogouRestockForecastEnabledV2').checked),
+      trigger_mode: value('#sogouRestockTriggerModeV2') === 'forecast' ? 'forecast' : 'inventory',
+      forecast_enabled: value('#sogouRestockTriggerModeV2') === 'forecast',
       forecast_interrupt_minutes: num('#sogouRestockForecastLeadV2'), forecast_sample_interval_sec: num('#sogouRestockForecastSampleV2'),
+      forecast_rate_window_minutes: num('#sogouRestockForecastWindowV2'),
       forecast_min_samples: num('#sogouRestockForecastSamplesV2'), forecast_safety_factor: num('#sogouRestockForecastSafetyV2'),
       order_poll_interval_sec: num('#sogouRestockOrderIntervalV2'), recovery_poll_interval_sec: num('#sogouRestockRecoveryIntervalV2'),
       concurrency: num('#sogouRestockConcurrencyV2'), priority: num('#sogouRestockPriorityV2'), load_factor: num('#sogouRestockLoadV2'),
@@ -8185,8 +8258,11 @@ async function codexUploadPushPoolOnFiles(ev) {
   bind('btnSogouRestockSaveV2', saveSogouRestock);
   bind('btnSogouRestockRunV2', runSogouRestock);
   bind('btnSogouRestockConnectionV2', testSogouRestockConnection);
+  const triggerMode = $('#sogouRestockTriggerModeV2');
+  if (triggerMode) triggerMode.addEventListener('change', syncSogouRestockTriggerModeUI);
   document.addEventListener('visibilitychange', syncSogouRestockLogPolling);
   window.addEventListener('pagehide', stopSogouRestockLogPolling);
+  window.addEventListener('pagehide', stopSogouRestockStatusPolling);
 
   function _fabStatusLabel(st) {
     const m = { pending:'待运行', running:'运行中', done:'完成', partial:'部分成功', failed:'失败' };
