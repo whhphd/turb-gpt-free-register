@@ -12,6 +12,7 @@ import hashlib
 import math
 import re
 import time
+from datetime import datetime
 from typing import Any
 
 _USED_RE = re.compile(r"^codex_(?P<label>[a-z0-9]+)_used_percent$", re.IGNORECASE)
@@ -27,6 +28,19 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _timestamp(value: Any) -> float | None:
+    number = _number(value)
+    if number is not None:
+        return number / 1000.0 if number > 10_000_000_000 else number
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def _duration_minutes(label: str) -> float | None:
@@ -90,6 +104,13 @@ def extract_quota_windows(account: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if not isinstance(account, dict):
         return {}
     sources = _source_maps(account)
+    common_usage_updated_at = _timestamp(_lookup(
+        sources,
+        "codex_usage_updated_at",
+        "codexUsageUpdatedAt",
+        "usage_updated_at",
+        "usageUpdatedAt",
+    ))
     candidates: list[tuple[int, str, dict[str, Any]]] = []
 
     for item in _explicit_windows(account):
@@ -102,6 +123,10 @@ def extract_quota_windows(account: dict[str, Any]) -> dict[str, dict[str, Any]]:
             continue
         if not label or used is None or (minutes or 0) <= 0 and (reset_after or 0) <= 0:
             continue
+        usage_updated_at = _timestamp(item.get(
+            "usage_updated_at",
+            item.get("usageUpdatedAt", item.get("updated_at", item.get("updatedAt"))),
+        )) or common_usage_updated_at
         key, specificity = _canonical_window(label, minutes)
         candidates.append((specificity + 3, key, {
             "label": label,
@@ -109,6 +134,8 @@ def extract_quota_windows(account: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "window_minutes": max(0.0, minutes or 0.0),
             "reset_after_seconds": max(0.0, reset_after or 0.0),
             "capacity_units": max(0.0, _number(item.get("capacity_units", item.get("capacity"))) or 1.0),
+            "usage_updated_at": usage_updated_at,
+            "usage_updated_at_observed": usage_updated_at is not None,
         }))
 
     for source in sources:
@@ -149,6 +176,8 @@ def extract_quota_windows(account: dict[str, Any]) -> dict[str, dict[str, Any]]:
                     f"codex_{label}_capacity_units",
                     f"codex_{label}_capacity",
                 )) or 1.0),
+                "usage_updated_at": common_usage_updated_at,
+                "usage_updated_at_observed": common_usage_updated_at is not None,
             }))
 
     selected: dict[str, tuple[int, dict[str, Any]]] = {}
@@ -178,13 +207,18 @@ def _account_key(account: dict[str, Any], index: int) -> str:
 
 def collect_quota_snapshot(accounts: list[dict[str, Any]], *, sampled_at: float | None = None) -> dict[str, Any]:
     """Create a credential-free snapshot suitable for persistence."""
+    snapshot_at = float(sampled_at if sampled_at is not None else time.time())
     rows: dict[str, dict[str, dict[str, Any]]] = {}
     for index, account in enumerate(accounts or []):
         windows = extract_quota_windows(account)
         if windows:
+            for window in windows.values():
+                if _timestamp(window.get("usage_updated_at")) is None:
+                    window["usage_updated_at"] = snapshot_at
+                    window["usage_updated_at_observed"] = False
             rows[_account_key(account, index)] = windows
     return {
-        "sampled_at": float(sampled_at if sampled_at is not None else time.time()),
+        "sampled_at": snapshot_at,
         "accounts": rows,
         "account_count": len(accounts or []),
         "quota_account_count": len(rows),
@@ -264,22 +298,66 @@ def _consumption_over_history(
     account_key: str,
     window_key: str,
     history: list[dict[str, Any]],
-) -> tuple[float, int, bool]:
-    consumed = 0.0
-    resets = 0
-    observed = False
-    for previous, current in zip(history, history[1:]):
-        previous_accounts = previous.get("accounts") if isinstance(previous, dict) else {}
-        current_accounts = current.get("accounts") if isinstance(current, dict) else {}
-        previous_window = previous_accounts.get(account_key, {}).get(window_key) if isinstance(previous_accounts, dict) else None
-        current_window = current_accounts.get(account_key, {}).get(window_key) if isinstance(current_accounts, dict) else None
-        if not isinstance(previous_window, dict) or not isinstance(current_window, dict):
+) -> tuple[float, float, int, int, bool]:
+    raw_observations: list[tuple[float, bool, dict[str, Any]]] = []
+    for snapshot in history:
+        accounts = snapshot.get("accounts") if isinstance(snapshot, dict) else {}
+        window = accounts.get(account_key, {}).get(window_key) if isinstance(accounts, dict) else None
+        if not isinstance(window, dict):
             continue
-        delta, reset = _consumed_since(previous_window, current_window)
-        consumed += delta
-        resets += int(reset)
-        observed = True
-    return consumed, resets, observed
+        observed_at = _timestamp(window.get("usage_updated_at"))
+        is_admin_timestamp = bool(window.get("usage_updated_at_observed")) and observed_at is not None
+        fallback_at = _snapshot_time(snapshot)
+        timestamp = observed_at if is_admin_timestamp else fallback_at
+        if timestamp is not None:
+            raw_observations.append((timestamp, is_admin_timestamp, window))
+
+    if not raw_observations:
+        return 0.0, 0.0, 0, 0, False
+    has_admin_timestamps = any(item[1] for item in raw_observations)
+    observations: list[tuple[float, dict[str, Any]]] = []
+    for timestamp, is_admin_timestamp, window in raw_observations:
+        if has_admin_timestamps and not is_admin_timestamp:
+            continue
+        if observations and timestamp < observations[-1][0] - 0.001:
+            continue
+        if observations and abs(timestamp - observations[-1][0]) <= 0.001:
+            observations[-1] = (timestamp, window)
+        else:
+            observations.append((timestamp, window))
+    if len(observations) < 2:
+        return 0.0, 0.0, 0, 0, False
+
+    consumed = 0.0
+    measured_seconds = 0.0
+    resets = 0
+    segment_at, segment_window = observations[0]
+    previous_at, previous_window = observations[0]
+
+    def close_segment(end_at: float, end_window: dict[str, Any]) -> tuple[float, float]:
+        duration = max(0.0, end_at - segment_at)
+        used_delta = max(
+            0.0,
+            float(end_window.get("used_percent") or 0.0) - float(segment_window.get("used_percent") or 0.0),
+        )
+        capacity = float(end_window.get("capacity_units") or 1.0)
+        return used_delta / 100.0 * capacity, duration
+
+    for current_at, current_window in observations[1:]:
+        _, reset = _consumed_since(previous_window, current_window)
+        if reset:
+            value, duration = close_segment(previous_at, previous_window)
+            consumed += value
+            measured_seconds += duration
+            resets += 1
+            segment_at, segment_window = current_at, current_window
+        previous_at, previous_window = current_at, current_window
+
+    value, duration = close_segment(previous_at, previous_window)
+    consumed += value
+    measured_seconds += duration
+    rate = consumed / (measured_seconds / 60.0) if measured_seconds > 0 else 0.0
+    return consumed, rate, resets, len(observations) - 1, True
 
 
 def update_forecast(
@@ -335,21 +413,27 @@ def update_forecast(
 
     for window_key, item in aggregate.items():
         consumed = 0.0
+        actual_rate = 0.0
         matched_accounts = 0
         reset_count = 0
+        rate_samples = 0
         for account_key in cohort_keys:
-            value, resets, observed = _consumption_over_history(account_key, window_key, history)
+            value, account_rate, resets, account_samples, observed = _consumption_over_history(
+                account_key,
+                window_key,
+                history,
+            )
             if observed:
                 consumed += value
+                actual_rate += account_rate
                 reset_count += resets
+                rate_samples = max(rate_samples, account_samples)
                 matched_accounts += 1
-        rate_now = consumed / elapsed_minutes if elapsed_minutes > 0 and matched_accounts else None
-        actual_rate = max(0.0, float(rate_now or 0.0))
+        actual_rate = max(0.0, actual_rate)
         planned_rate = actual_rate * safe_factor
         remaining = max(0.0, float(item.get("remaining_units") or 0.0))
         eta = remaining / planned_rate if planned_rate > 1e-12 else None
         coverage = float(item.get("accounts") or 0) / max(1, total_current_accounts)
-        rate_samples = max(0, len(history) - 1) if matched_accounts else 0
         if sample_count < min_required or rate_samples <= 0:
             status = "insufficient"
         elif actual_rate <= 1e-12:

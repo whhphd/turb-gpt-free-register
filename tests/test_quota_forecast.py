@@ -1,9 +1,27 @@
 import unittest
+from datetime import datetime
 
 from core.quota_forecast import collect_quota_snapshot, extract_quota_windows, update_forecast
 
 
 class QuotaForecastTests(unittest.TestCase):
+    def test_snapshot_records_admin_usage_update_timestamp(self):
+        snapshot = collect_quota_snapshot([{
+            "id": 100,
+            "extra": {
+                "codex_7d_used_percent": 12,
+                "codex_7d_window_minutes": 10080,
+                "codex_7d_reset_after_seconds": 600000,
+                "codex_usage_updated_at": "2026-08-16T09:33:41+08:00",
+            },
+        }], sampled_at=10)
+        window = snapshot["accounts"]["100"]["10080m"]
+        self.assertTrue(window["usage_updated_at_observed"])
+        self.assertEqual(
+            window["usage_updated_at"],
+            datetime.fromisoformat("2026-08-16T09:33:41+08:00").timestamp(),
+        )
+
     def test_disabled_zero_window_is_ignored_but_full_active_window_is_kept(self):
         account = {
             "id": 1,
@@ -119,6 +137,81 @@ class QuotaForecastTests(unittest.TestCase):
         self.assertEqual(window["reset_count"], 0)
         self.assertEqual(window["last_delta_units"], 0.0)
         self.assertEqual(window["rate_units_per_min"], 0.0)
+
+    def test_rate_uses_admin_update_elapsed_instead_of_patrol_elapsed(self):
+        def sample(used, sampled_at, updated_at):
+            return collect_quota_snapshot([{
+                "id": 12,
+                "extra": {
+                    "codex_7d_used_percent": used,
+                    "codex_7d_window_minutes": 10080,
+                    "codex_7d_reset_after_seconds": 600000,
+                    "codex_usage_updated_at": updated_at,
+                },
+            }], sampled_at=sampled_at)
+
+        state, _ = update_forecast(
+            None,
+            sample(5, 0, "2026-08-16T09:33:10+08:00"),
+            min_samples=2,
+            safety_factor=1.0,
+        )
+        state, _ = update_forecast(
+            state,
+            sample(5, 10, "2026-08-16T09:33:10+08:00"),
+            min_samples=2,
+            safety_factor=1.0,
+        )
+        _, forecast = update_forecast(
+            state,
+            sample(7, 20, "2026-08-16T09:33:40+08:00"),
+            min_samples=2,
+            safety_factor=1.0,
+        )
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(window["rate_samples"], 1)
+        self.assertAlmostEqual(window["last_delta_units"], 0.02, places=6)
+        self.assertAlmostEqual(window["rate_units_per_min"], 0.04, places=6)
+
+    def test_negative_jitter_and_recovery_have_zero_net_consumption(self):
+        def sample(used, sampled_at, updated_at):
+            return collect_quota_snapshot([{
+                "id": 13,
+                "extra": {
+                    "codex_7d_used_percent": used,
+                    "codex_7d_window_minutes": 10080,
+                    "codex_7d_reset_after_seconds": 600000,
+                    "codex_usage_updated_at": updated_at,
+                },
+            }], sampled_at=sampled_at)
+
+        state, _ = update_forecast(None, sample(3, 0, "2026-08-16T09:33:00+08:00"), min_samples=2, safety_factor=1.0)
+        state, _ = update_forecast(state, sample(1, 10, "2026-08-16T09:33:30+08:00"), min_samples=2, safety_factor=1.0)
+        _, forecast = update_forecast(state, sample(3, 20, "2026-08-16T09:34:00+08:00"), min_samples=2, safety_factor=1.0)
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(window["reset_count"], 0)
+        self.assertEqual(window["last_delta_units"], 0.0)
+        self.assertEqual(window["rate_units_per_min"], 0.0)
+
+    def test_post_reset_rate_starts_after_new_baseline(self):
+        def sample(used, sampled_at, updated_at, reset_after):
+            return collect_quota_snapshot([{
+                "id": 14,
+                "extra": {
+                    "codex_7d_used_percent": used,
+                    "codex_7d_window_minutes": 10080,
+                    "codex_7d_reset_after_seconds": reset_after,
+                    "codex_usage_updated_at": updated_at,
+                },
+            }], sampled_at=sampled_at)
+
+        state, _ = update_forecast(None, sample(90, 0, "2026-08-16T09:33:00+08:00", 30), min_samples=2, safety_factor=1.0)
+        state, _ = update_forecast(state, sample(10, 10, "2026-08-16T09:33:30+08:00", 604800), min_samples=2, safety_factor=1.0)
+        _, forecast = update_forecast(state, sample(12, 20, "2026-08-16T09:34:00+08:00", 604770), min_samples=2, safety_factor=1.0)
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(window["reset_count"], 1)
+        self.assertAlmostEqual(window["last_delta_units"], 0.02, places=6)
+        self.assertAlmostEqual(window["rate_units_per_min"], 0.04, places=6)
 
     def test_new_account_addition_changes_capacity_not_consumption_rate(self):
         first = collect_quota_snapshot([{
