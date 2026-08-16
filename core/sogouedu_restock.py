@@ -346,28 +346,25 @@ def calculate_purchase_quantity(
         # calculated shortfall to the target runway.
         if not forecast_trigger and not forecast_fallback:
             return 0
-        if forecast_fallback:
-            # A sudden availability drop or an empty pool has no reliable ETA.
-            # Use the explicit emergency quantity, still respecting the order cap.
-            return min(
-                max(1, int(cfg.get("forecast_fallback_quantity") or 5)),
-                max(1, int(cfg["max_purchase_per_order"])),
-            )
         forecast = quota_forecast if isinstance(quota_forecast, dict) else {}
         target_minutes = max(
             float(cfg.get("forecast_interrupt_minutes") or 0),
             float(cfg.get("forecast_target_minutes") or 25),
         )
         required = 0
-        for window in (forecast.get("windows") or {}).values():
-            if not isinstance(window, dict):
-                continue
-            planned_rate = float(window.get("planned_rate_units_per_min") or 0.0)
-            remaining = max(0.0, float(window.get("remaining_units") or 0.0))
-            capacity = max(1e-12, float(window.get("capacity_units_per_account") or 1.0))
-            shortfall = max(0.0, target_minutes * planned_rate - remaining)
-            required = max(required, int((shortfall / capacity) + 0.999999))
-        if required <= 0:
+        if forecast_trigger:
+            for window in (forecast.get("windows") or {}).values():
+                if not isinstance(window, dict):
+                    continue
+                planned_rate = float(window.get("planned_rate_units_per_min") or 0.0)
+                remaining = max(0.0, float(window.get("remaining_units") or 0.0))
+                capacity = max(1e-12, float(window.get("capacity_units_per_account") or 1.0))
+                shortfall = max(0.0, target_minutes * planned_rate - remaining)
+                required = max(required, int((shortfall / capacity) + 0.999999))
+        if forecast_fallback:
+            healthy_floor = max(1, int(cfg.get("forecast_fallback_quantity") or 5))
+            required = max(required, healthy_floor - int(healthy))
+        if forecast_trigger and required <= 0:
             required = 1
         return min(required, max(1, int(cfg["max_purchase_per_order"])))
     gap = max(0, int(cfg["target_healthy"]) - int(healthy))
@@ -1269,23 +1266,12 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             and quota_forecast.get("eta_minutes") is not None
             and float(quota_forecast["eta_minutes"]) <= float(cfg["forecast_interrupt_minutes"])
         )
-        # Forecast mode normally ignores inventory thresholds. A completely
-        # empty schedulable OAuth pool is the exception: without an account we
-        # cannot collect a quota window, so waiting for an ETA would deadlock
-        # replenishment indefinitely.
-        removed_accounts = int(quota_forecast.get("removed_accounts") or 0)
-        new_accounts = int(quota_forecast.get("new_accounts") or 0)
-        previous_account_count = max(0, healthy + removed_accounts - new_accounts)
-        drop_threshold = max(2, int(previous_account_count * 0.2 + 0.999999))
-        net_removed_accounts = max(0, removed_accounts - new_accounts)
-        availability_drop = bool(
-            net_removed_accounts >= drop_threshold
-            and previous_account_count > 0
-        )
+        # ETA is the primary forecast trigger. The only inventory fallback is
+        # an absolute healthy floor, independent of account churn history.
+        fallback_healthy_floor = max(1, int(cfg.get("forecast_fallback_quantity") or 5))
         forecast_fallback = bool(
             cfg["trigger_mode"] == "forecast"
-            and not forecast_trigger
-            and (healthy <= 0 or availability_drop)
+            and healthy < fallback_healthy_floor
         )
         static_replenishing = (
             next_replenishing_state(healthy, cfg, bool(state.get("replenishing")))
@@ -1302,9 +1288,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         result["static_replenishing"] = static_replenishing
         result["forecast_trigger"] = forecast_trigger
         result["forecast_fallback"] = forecast_fallback
-        result["forecast_fallback_reason"] = (
-            "availability_drop" if availability_drop else ("empty_pool" if healthy <= 0 else "")
-        )
+        result["forecast_fallback_reason"] = "healthy_floor" if forecast_fallback else ""
         result["forecast_sampled"] = True
         result["quota_forecast"] = quota_forecast
         state["replenishing"] = replenishing
