@@ -17,6 +17,8 @@ from typing import Any
 _USED_RE = re.compile(r"^codex_(?P<label>[a-z0-9]+)_used_percent$", re.IGNORECASE)
 _DURATION_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>m|h|d|w)$", re.IGNORECASE)
 _ALIAS_LABELS = {"primary", "secondary"}
+_RESET_USED_PERCENT_MAX = 10.0
+_RESET_MIN_DROP_PERCENT = 5.0
 
 
 def _number(value: Any) -> float | None:
@@ -219,10 +221,15 @@ def _consumed_since(previous: dict[str, Any], current: dict[str, Any]) -> tuple[
     delta = current_used - previous_used
     if delta >= -0.01:
         return max(0.0, delta) / 100.0 * float(current.get("capacity_units") or 1.0), False
-    # A large drop accompanied by a reset timer jump is a new quota window.
-    reset = float(current.get("reset_after_seconds") or 0.0) > float(previous.get("reset_after_seconds") or 0.0) + 30.0
-    if reset or delta < -5.0:
-        return max(0.0, current_used) / 100.0 * float(current.get("capacity_units") or 1.0), True
+    # A real window reset clears usage.  A timer jump alone is too noisy: the
+    # upstream payload can move the timer while the rounded usage changes by
+    # only one percentage point.  Treat the reset sample as a new baseline so
+    # its post-reset balance is not mistaken for instantaneous consumption.
+    used_drop = previous_used - current_used
+    timer_jump = float(current.get("reset_after_seconds") or 0.0) > float(previous.get("reset_after_seconds") or 0.0) + 30.0
+    reset = current_used <= _RESET_USED_PERCENT_MAX and used_drop >= _RESET_MIN_DROP_PERCENT and (timer_jump or used_drop >= 10.0)
+    if reset:
+        return 0.0, True
     return 0.0, False
 
 

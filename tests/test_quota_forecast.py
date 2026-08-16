@@ -72,7 +72,7 @@ class QuotaForecastTests(unittest.TestCase):
         self.assertAlmostEqual(forecast["eta_minutes"], 40.0, places=3)
         self.assertEqual(state["sample_count"], 2)
 
-    def test_window_reset_counts_new_usage_without_negative_rate(self):
+    def test_window_reset_uses_new_baseline_without_rate_spike(self):
         first = collect_quota_snapshot([{
             "id": 4,
             "extra": {
@@ -93,7 +93,32 @@ class QuotaForecastTests(unittest.TestCase):
         _, forecast = update_forecast(state, second, min_samples=2, safety_factor=1.0)
         window = forecast["windows"]["10080m"]
         self.assertEqual(window["reset_count"], 1)
-        self.assertGreater(window["rate_units_per_min"], 0)
+        self.assertEqual(window["last_delta_units"], 0.0)
+        self.assertEqual(window["rate_units_per_min"], 0.0)
+
+    def test_small_usage_drop_with_timer_jump_is_not_a_reset(self):
+        first = collect_quota_snapshot([{
+            "id": 5,
+            "extra": {
+                "codex_7d_used_percent": 44,
+                "codex_7d_window_minutes": 10080,
+                "codex_7d_reset_after_seconds": 602255,
+            },
+        }], sampled_at=0)
+        state, _ = update_forecast(None, first, min_samples=2, safety_factor=1.0)
+        second = collect_quota_snapshot([{
+            "id": 5,
+            "extra": {
+                "codex_7d_used_percent": 43,
+                "codex_7d_window_minutes": 10080,
+                "codex_7d_reset_after_seconds": 602287,
+            },
+        }], sampled_at=600)
+        _, forecast = update_forecast(state, second, min_samples=2, safety_factor=1.0)
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(window["reset_count"], 0)
+        self.assertEqual(window["last_delta_units"], 0.0)
+        self.assertEqual(window["rate_units_per_min"], 0.0)
 
     def test_new_account_addition_changes_capacity_not_consumption_rate(self):
         first = collect_quota_snapshot([{
