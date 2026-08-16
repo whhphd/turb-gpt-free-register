@@ -1203,6 +1203,13 @@ def _process_recoveries(
         if rid in (None, ""):
             continue
         recovery.setdefault("provider", provider)
+        # BugTeam keeps already-claimed recoveries in the local backlog with
+        # delivery_status=claimable.  The local result is authoritative after
+        # a successful claim, otherwise every patrol reclaims the same record
+        # and turns the later idempotent failure into a misleading repair.
+        local_result = str(recovery.get("result") or "").strip().lower()
+        if local_result in {"repaired", "recreated"} and recovery.get("processed_at"):
+            continue
         status = str(recovery.get("status") or recovery.get("state") or recovery.get("delivery_status") or "").strip().lower()
         if status in {"recovered", "claimed", "completed", "success", "repaired"}:
             continue
@@ -1265,6 +1272,7 @@ def _process_recoveries(
                 recreated += result.get("success", 0)
             recovery["processed_at"] = _now()
             recovery["result"] = "repaired" if matched else "recreated"
+            recovery.pop("last_error", None)
         except Exception as exc:
             recovery["last_error"] = f"{type(exc).__name__}: {exc}"
         _write_json(RECOVERIES_PATH, other_provider_items + items)

@@ -1121,6 +1121,59 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(result["recovery"]["recreated"], 0)
         claim.assert_not_called()
 
+    def test_processed_recovery_is_not_claimed_again(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "min_healthy": 0,
+            "target_healthy": 0,
+            "recovery_poll_interval_sec": 1,
+        })
+        fake = FakeClient()
+        recovery = {
+            "id": "bugteam-repaired",
+            "provider": "bugteam",
+            "pool_id": "42",
+            "delivery_status": "claimable",
+            "claim_url": "/signed/claim",
+        }
+        claim_response = {"data": {"payload": {"accounts": [{
+            "email": "fixed@example.com",
+            "access_token": _jwt("fixed@example.com"),
+        }]}}}
+        existing = [{
+            "id": 42,
+            "status": "error",
+            "extra": {"import_source": "bugteam_auto_restock"},
+            "credentials": {"email": "fixed@example.com"},
+        }]
+        state = restock._load_state()
+        with patch.object(fake, "list_recoveries", return_value={"data": {"items": [recovery]}}), patch.object(
+            fake, "claim_recovery", return_value=claim_response
+        ) as claim, patch.object(
+            restock._pool_monitor, "_update_pool_credentials"
+        ) as updated, patch.object(
+            restock.time, "time", return_value=100
+        ):
+            first = restock._process_recoveries(fake, restock.load_restock_config(), state, existing, provider="bugteam")
+
+        self.assertEqual(first["repaired"], 1)
+        self.assertEqual(claim.call_count, 1)
+        self.assertEqual(updated.call_count, 1)
+
+        state = restock._load_state()
+        state["last_recovery_scan_at_bugteam"] = 0
+        with patch.object(restock.time, "time", return_value=200):
+            second = restock._process_recoveries(fake, restock.load_restock_config(), state, existing, provider="bugteam")
+
+        self.assertEqual(second["repaired"], 0)
+        self.assertEqual(second["recreated"], 0)
+        self.assertEqual(claim.call_count, 1)
+        self.assertEqual(updated.call_count, 1)
+        saved = restock._read_json(restock.RECOVERIES_PATH, [])
+        row = next(item for item in saved if item.get("id") == "bugteam-repaired")
+        self.assertEqual(row["result"], "repaired")
+        self.assertNotIn("last_error", row)
+
     def test_empty_nested_recovery_claim_is_not_marked_processed(self):
         restock.save_restock_config({"enabled": True, "min_healthy": 0, "target_healthy": 0})
         fake = FakeClient()
