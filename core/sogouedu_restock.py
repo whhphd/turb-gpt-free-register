@@ -1256,6 +1256,9 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         # Keep the quota forecast on the same currently healthy population.
         healthy_accounts = [account for account in active_accounts if is_healthy_pool_account(account)]
         healthy = len(healthy_accounts)
+        # Quota sampling is the first replenishment-decision stage. Cached
+        # forecasts remain visible between samples, but only a fresh snapshot
+        # may trigger a new order.
         quota_state = state.get("quota_forecast") if isinstance(state.get("quota_forecast"), dict) else {}
         last_sampled_at = quota_state.get("last_sampled_at")
         sample_due = last_sampled_at in (None, "")
@@ -1283,6 +1286,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             }
         forecast_trigger = bool(
             cfg["trigger_mode"] == "forecast"
+            and sample_due
             and quota_forecast.get("status") == "ready"
             and quota_forecast.get("eta_minutes") is not None
             and float(quota_forecast["eta_minutes"]) <= float(cfg["forecast_interrupt_minutes"])
@@ -1343,7 +1347,10 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         )
         result["quantity"] = quantity
         if quantity <= 0:
-            result.update({"ok": True, "action": "inventory_ok"})
+            action = "inventory_ok"
+            if cfg["trigger_mode"] == "forecast":
+                action = "forecast_not_triggered" if sample_due else "forecast_waiting_sample"
+            result.update({"ok": True, "action": action})
             return result
         selected_provider = ""
         provider_errors: list[dict[str, Any]] = []

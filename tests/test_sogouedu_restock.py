@@ -385,6 +385,88 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(result["forecast_fallback_reason"], "availability_drop")
         self.assertEqual(result["quantity"], 5)
 
+    def test_forecast_mode_does_not_reuse_low_eta_between_samples(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "trigger_mode": "forecast",
+            "forecast_sample_interval_sec": 60,
+            "forecast_interrupt_minutes": 20,
+            "max_purchase_per_order": 5,
+        })
+        state = restock._load_state()
+        state["quota_forecast"] = {
+            "last_sampled_at": 90,
+            "forecast": {
+                "status": "ready",
+                "eta_minutes": 1.779,
+                "windows": {
+                    "10080m": {
+                        "remaining_units": 0.1,
+                        "planned_rate_units_per_min": 0.1,
+                        "capacity_units_per_account": 1.0,
+                    },
+                },
+            },
+        }
+        restock._save_state(state)
+        fake = FakeClient()
+        rows = [{"id": index, "status": "active", "schedulable": True} for index in range(9)]
+
+        with patch.object(restock.time, "time", return_value=100), patch.object(
+            restock._pool_monitor, "fetch_pool_accounts", return_value=rows
+        ):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "forecast_waiting_sample")
+        self.assertFalse(result["forecast_sampled"])
+        self.assertFalse(result["forecast_trigger"])
+        self.assertEqual(result["quantity"], 0)
+        self.assertEqual(result["quota_forecast"]["eta_minutes"], 1.779)
+        self.assertEqual(fake.inventory_calls, [])
+        self.assertEqual(fake.created, [])
+
+    def test_forecast_mode_can_order_from_current_sample(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "trigger_mode": "forecast",
+            "forecast_sample_interval_sec": 60,
+            "forecast_interrupt_minutes": 20,
+            "forecast_target_minutes": 30,
+            "max_purchase_per_order": 5,
+        })
+        state = restock._load_state()
+        state["quota_forecast"] = {"last_sampled_at": 0}
+        restock._save_state(state)
+        fake = FakeClient()
+        rows = [{"id": index, "status": "active", "schedulable": True} for index in range(4)]
+        forecast = {
+            "status": "ready",
+            "eta_minutes": 5,
+            "windows": {
+                "10080m": {
+                    "remaining_units": 0.5,
+                    "planned_rate_units_per_min": 0.1,
+                    "capacity_units_per_account": 1.0,
+                },
+            },
+            "new_accounts": 0,
+            "removed_accounts": 0,
+        }
+        next_state = {"last_sampled_at": 100, "forecast": forecast}
+
+        with patch.object(restock.time, "time", return_value=100), patch.object(
+            restock._pool_monitor, "fetch_pool_accounts", return_value=rows
+        ), patch.object(restock, "update_forecast", return_value=(next_state, forecast)):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "ordered")
+        self.assertTrue(result["forecast_sampled"])
+        self.assertTrue(result["forecast_trigger"])
+        self.assertEqual(result["quantity"], 3)
+        self.assertEqual(fake.created[0][1], 3)
+
     def test_cycle_counts_active_accounts_after_recovery_before_ordering(self):
         restock.save_restock_config({
             "enabled": True,

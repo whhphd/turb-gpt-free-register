@@ -8121,7 +8121,8 @@ async function codexUploadPushPoolOnFiles(ev) {
   }
   function formatSogouRestockLog(row) {
     const actionLabels = {
-      inventory_ok: '库存充足', ordered: '订单已创建', waiting: '等待订单', taken: '取货完成',
+      inventory_ok: '库存充足', forecast_not_triggered: '额度预测未触发',
+      forecast_waiting_sample: '等待下一次额度采样', ordered: '订单已创建', waiting: '等待订单', taken: '取货完成',
       partial_finalized: '部分结算完成', pushed: '推池完成', push_retry: '推池待重试',
       push_waiting: '等待有效账号', order_failed: '订单失败', provider_retry_scheduled: '同供应商重试',
       provider_fallback_scheduled: '切换兜底供应商',
