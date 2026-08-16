@@ -22,6 +22,7 @@ class FakeClient:
         self.balance_calls = 0
         self.take_calls = 0
         self.finalize_calls = []
+        self.cancel_calls = []
 
     def balance(self):
         self.balance_calls += 1
@@ -45,6 +46,10 @@ class FakeClient:
     def finalize_order(self, order_id):
         self.finalize_calls.append(order_id)
         return {"order": {"id": order_id, "status": "completed"}, "status": "completed"}
+
+    def cancel_order(self, order_id):
+        self.cancel_calls.append(order_id)
+        return {"order_id": order_id, "state": "cancelled"}
 
     def list_recoveries(self, *, before_id=None, limit=100):
         return {"data": {"items": []}}
@@ -656,6 +661,46 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(result["reserved"], 5)
         self.assertEqual(fake.finalize_calls, [])
         self.assertEqual(restock._load_state()["current_order"]["partial_ready_since"], 900)
+
+    def test_bugteam_zero_inventory_timeout_cancels_and_skips_to_next_provider(self):
+        cfg = restock.normalize_restock_config({
+            "provider_priority": ["bugteam", "sogou"],
+            "partial_retry_limit": 2,
+            "order_poll_interval_sec": 1,
+        })
+        state = restock._load_state()
+        state["current_order"] = {
+            "provider": "bugteam",
+            "provider_index": 0,
+            "provider_retry_count": 0,
+            "order_id": "bug-wait-1",
+            "quantity": 5,
+            "product": "team_1h",
+            "status": "waiting_inventory",
+            "created_at": 1000,
+        }
+        fake = FakeClient()
+
+        with patch.object(fake, "order_status", return_value={
+            "order_id": "bug-wait-1",
+            "state": "waiting_inventory",
+            "reserved": 0,
+        }), patch.object(restock.time, "time", return_value=1060), patch.object(
+            restock, "_now", return_value="1970-01-01T00:17:40+00:00"
+        ):
+            result = restock._process_current_order(fake, cfg, state)
+
+        self.assertEqual(fake.cancel_calls, ["bug-wait-1"])
+        self.assertEqual(result["action"], "provider_fallback_scheduled")
+        self.assertEqual(result["provider"], "sogou")
+        self.assertEqual(result["reason"], "bugteam:waiting_inventory_timeout")
+        self.assertEqual(result["cancelled_status"], "cancelled")
+        current = restock._load_state()["current_order"]
+        self.assertEqual(current["provider"], "sogou")
+        self.assertEqual(current["provider_retry_count"], 0)
+        self.assertEqual(current["quantity"], 5)
+        self.assertEqual(current["created_at"], "1970-01-01T00:17:40+00:00")
+        self.assertNotIn("order_id", current)
 
     def test_partial_order_finalizes_after_five_minutes(self):
         restock.save_restock_config({"enabled": True, "order_poll_interval_sec": 1})

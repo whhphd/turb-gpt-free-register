@@ -43,6 +43,7 @@ _WAKE = threading.Event()
 _WORKER: threading.Thread | None = None
 _PARTIAL_FINALIZE_WAIT_SEC = 300
 _PARTIAL_FINALIZE_RETRY_SEC = 30
+_BUGTEAM_WAITING_INVENTORY_TIMEOUT_SEC = 60
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
@@ -792,6 +793,7 @@ def _schedule_followup_order(
     *,
     remaining: int,
     reason: str,
+    force_next_provider: bool = False,
 ) -> dict[str, Any] | None:
     """为少交付/终态失败订单安排同供应商重试或下一个供应商。
 
@@ -812,7 +814,7 @@ def _schedule_followup_order(
         provider_index = max(0, int(order.get("provider_index") or 0))
     retry_count = max(0, int(order.get("provider_retry_count") or 0))
     retry_limit = max(0, int(cfg.get("partial_retry_limit") or 0))
-    if retry_count < retry_limit:
+    if not force_next_provider and retry_count < retry_limit:
         next_provider = provider
         next_retry_count = retry_count + 1
         next_index = provider_index
@@ -856,8 +858,17 @@ def _schedule_followup_order(
     order["quantity"] = remaining
     order["remaining_quantity"] = remaining
     order["last_transition_reason"] = reason
+    order["created_at"] = _now()
     order["updated_at"] = _now()
-    for key in ("order_id", "payload", "last_polled_at", "partial_ready_since", "partial_finalize_last_attempt_at", "partial_finalized_at"):
+    for key in (
+        "order_id",
+        "payload",
+        "last_polled_at",
+        "partial_ready_since",
+        "partial_finalize_last_attempt_at",
+        "partial_finalized_at",
+        "cancelled_at",
+    ):
         order.pop(key, None)
     order["status"] = "creating"
     order["idempotency_key"] = f"{_provider_order_key(next_provider)}-{uuid.uuid4().hex}"
@@ -939,6 +950,31 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
             state["current_order"] = None
             _save_state(state)
             return {"handled": True, "action": "order_failed", "order_id": order_id}
+        created_at = _parse_time(order.get("created_at"))
+        if (
+            provider == "bugteam"
+            and status == "waiting_inventory"
+            and reserved <= 0
+            and created_at is not None
+            and time.time() - created_at >= _BUGTEAM_WAITING_INVENTORY_TIMEOUT_SEC
+        ):
+            cancelled = client.cancel_order(order_id)
+            cancelled_status = _order_status(cancelled) or "cancelled"
+            order["status"] = cancelled_status
+            order["remote_status"] = cancelled_status
+            order["cancelled_at"] = _now()
+            order["updated_at"] = _now()
+            followup = _schedule_followup_order(
+                order,
+                order_cfg,
+                state,
+                remaining=max(1, int(order.get("quantity") or 0)),
+                reason="bugteam:waiting_inventory_timeout",
+                force_next_provider=True,
+            )
+            if followup:
+                followup["cancelled_status"] = cancelled_status
+                return followup
         if reserved <= 0:
             order.pop("partial_ready_since", None)
             order.pop("partial_finalize_last_attempt_at", None)
