@@ -388,6 +388,33 @@ def _consumption_over_history(
     return consumed, rate, resets, len(observations) - 1, True
 
 
+def _reliable_rates_from_state(previous_state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Load reliable rates, migrating a ready pre-fallback state when needed."""
+    rates = previous_state.get("reliable_rates")
+    if isinstance(rates, dict) and rates:
+        return {
+            str(key): dict(value)
+            for key, value in rates.items()
+            if isinstance(value, dict)
+        }
+    forecast = previous_state.get("forecast")
+    legacy_windows = forecast.get("windows") if isinstance(forecast, dict) else None
+    if not isinstance(forecast, dict) or forecast.get("status") != "ready" or not isinstance(legacy_windows, dict):
+        return {}
+    sampled_at = _snapshot_time({"sampled_at": forecast.get("sampled_at")})
+    migrated: dict[str, dict[str, Any]] = {}
+    for key, value in legacy_windows.items():
+        if not isinstance(value, dict) or _number(value.get("rate_units_per_min")) is None:
+            continue
+        migrated[str(key)] = {
+            "rate_units_per_min": max(0.0, float(value.get("rate_units_per_min") or 0.0)),
+            "sampled_at": sampled_at,
+            "rate_samples": int(value.get("rate_samples") or 0),
+            "rate_coverage": float(value.get("rate_coverage") or 0.0),
+        }
+    return migrated
+
+
 def update_forecast(
     previous_state: dict[str, Any] | None,
     snapshot: dict[str, Any],
@@ -441,6 +468,9 @@ def update_forecast(
     safe_factor = max(1.0, float(safety_factor or 1.0))
     total_current_accounts = max(0, int(current.get("account_count") or 0))
     min_required = max(2, int(min_samples or 3))
+    previous_reliable_rates = _reliable_rates_from_state(previous_state)
+    reliable_rates = dict(previous_reliable_rates)
+    reliable_rate_ttl_minutes = max(1.0, float(rate_window_minutes or 10))
 
     for window_key, item in aggregate.items():
         consumed = 0.0
@@ -474,20 +504,35 @@ def update_forecast(
                 if account_key in remaining_cohort_keys:
                     coverage_matched_accounts += 1
         actual_rate = max(0.0, actual_rate)
-        planned_rate = actual_rate * safe_factor
+        raw_rate = actual_rate
         remaining = max(0.0, float(item.get("remaining_units") or 0.0))
-        eta = remaining / planned_rate if planned_rate > 1e-12 else None
         coverage = float(item.get("accounts") or 0) / max(1, total_current_accounts)
         rate_coverage = coverage_matched_accounts / max(1, cohort_window_accounts)
         required_rate_samples = max(1, min_required - 1)
-        if rate_samples < required_rate_samples or rate_coverage < 0.8:
+        coverage_insufficient = rate_samples < required_rate_samples or rate_coverage < 0.8
+        rate_source = "current"
+        rate_snapshot_age = None
+        previous_reliable = previous_reliable_rates.get(window_key)
+        if coverage_insufficient and isinstance(previous_reliable, dict):
+            previous_rate = max(0.0, float(previous_reliable.get("rate_units_per_min") or 0.0))
+            previous_at = _timestamp(previous_reliable.get("sampled_at"))
+            if previous_rate > 1e-12 and previous_at is not None:
+                rate_snapshot_age = max(0.0, (current_at - previous_at) / 60.0)
+                if rate_snapshot_age <= reliable_rate_ttl_minutes:
+                    actual_rate = previous_rate
+                    rate_source = "last_reliable"
+        planned_rate = actual_rate * safe_factor
+        eta = remaining / planned_rate if planned_rate > 1e-12 else None
+        if rate_source == "last_reliable":
+            status = "ready"
+        elif coverage_insufficient:
             status = "insufficient"
         elif actual_rate <= 1e-12:
             status = "no_rate"
         else:
             status = "ready"
-            if eta is not None:
-                valid_etas.append((eta, window_key))
+        if status == "ready" and eta is not None:
+            valid_etas.append((eta, window_key))
         windows[window_key] = {
             "accounts": int(item.get("accounts") or 0),
             "coverage": round(coverage, 4),
@@ -499,9 +544,12 @@ def update_forecast(
             ),
             "used_percent_avg": round(float(item.get("used_percent_sum") or 0.0) / max(1, int(item.get("accounts") or 0)), 4),
             "rate_units_per_min": round(actual_rate, 8),
+            "raw_rate_units_per_min": round(raw_rate, 8),
             "planned_rate_units_per_min": round(planned_rate, 8),
             "eta_minutes": round(eta, 3) if eta is not None else None,
             "status": status,
+            "rate_source": rate_source,
+            "rate_snapshot_age_minutes": round(rate_snapshot_age, 4) if rate_snapshot_age is not None else None,
             "elapsed_minutes": round(elapsed_minutes, 4) if elapsed_minutes else None,
             "matched_accounts": matched_accounts,
             "rate_coverage_matched_accounts": coverage_matched_accounts,
@@ -519,12 +567,22 @@ def update_forecast(
             "last_delta_units": consumed,
             "matched_accounts": matched_accounts,
             "reset_count": reset_count,
+            "rate_source": rate_source,
         }
+        if not coverage_insufficient and raw_rate > 1e-12:
+            reliable_rates[window_key] = {
+                "rate_units_per_min": raw_rate,
+                "sampled_at": current_at,
+                "rate_samples": rate_samples,
+                "rate_coverage": rate_coverage,
+            }
 
     if valid_etas:
         eta, window_key = min(valid_etas)
         overall_status = "ready"
-        confidence = "ready" if windows[window_key]["coverage"] >= 0.8 else "low"
+        confidence = "low" if windows[window_key]["rate_source"] == "last_reliable" else (
+            "ready" if windows[window_key]["coverage"] >= 0.8 else "low"
+        )
     elif windows:
         eta, window_key = None, None
         overall_status = "insufficient" if any(
@@ -549,6 +607,9 @@ def update_forecast(
         "new_accounts": new_account_count,
         "removed_accounts": removed_account_count,
     }
+    if window_key is not None and isinstance(windows.get(window_key), dict):
+        forecast["rate_source"] = windows[window_key].get("rate_source")
+        forecast["rate_snapshot_age_minutes"] = windows[window_key].get("rate_snapshot_age_minutes")
     next_state = {
         "sample_count": sample_count,
         "last_sampled_at": current_at,
@@ -556,6 +617,7 @@ def update_forecast(
         "samples": history,
         # Keep this summary for operators and old state readers.
         "windows": next_rates,
+        "reliable_rates": reliable_rates,
         "forecast": forecast,
     }
     return next_state, forecast

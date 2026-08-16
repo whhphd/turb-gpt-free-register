@@ -223,6 +223,70 @@ class QuotaForecastTests(unittest.TestCase):
         self.assertEqual(forecast["status"], "ready")
         self.assertEqual(window["rate_coverage"], 1.0)
 
+    def test_existing_reliable_rate_survives_new_account_coverage_dip(self):
+        def sample(rows, sampled_at):
+            return collect_quota_snapshot(rows, sampled_at=sampled_at)
+
+        def account(account_id, used, updated_at):
+            return {
+                "id": account_id,
+                "extra": {
+                    "codex_7d_used_percent": used,
+                    "codex_7d_window_minutes": 10080,
+                    "codex_7d_reset_after_seconds": 600000,
+                    "codex_usage_updated_at": updated_at,
+                },
+            }
+
+        first_time = "2026-08-16T09:33:00+08:00"
+        second_time = "2026-08-16T09:34:00+08:00"
+        state, _ = update_forecast(
+            None,
+            sample([
+                account(31, 0, first_time),
+                account(32, 0, first_time),
+            ], 0),
+            min_samples=2,
+            safety_factor=1.0,
+            rate_window_minutes=5,
+        )
+        state, reliable = update_forecast(
+            state,
+            sample([
+                account(31, 10, second_time),
+                account(32, 10, second_time),
+            ], 60),
+            min_samples=2,
+            safety_factor=1.0,
+            rate_window_minutes=5,
+        )
+        self.assertEqual(reliable["status"], "ready")
+        self.assertIn("10080m", state["reliable_rates"])
+
+        # Account 32 has no new admin usage timestamp and account 33 is new.
+        # The latest balance still includes both accounts, but the prior rate
+        # remains usable because a reliable snapshot already exists.
+        _, forecast = update_forecast(
+            state,
+            sample([
+                account(31, 20, "2026-08-16T09:35:00+08:00"),
+                account(32, 10, second_time),
+                account(33, 0, "2026-08-16T09:35:00+08:00"),
+            ], 301),
+            min_samples=2,
+            safety_factor=1.0,
+            rate_window_minutes=5,
+        )
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(forecast["status"], "ready")
+        self.assertEqual(window["rate_source"], "last_reliable")
+        self.assertEqual(window["new_accounts"], 1)
+        self.assertEqual(window["rate_coverage"], 0.5)
+        self.assertAlmostEqual(window["remaining_units"], 2.7, places=6)
+        self.assertAlmostEqual(window["rate_units_per_min"], 0.2, places=6)
+        self.assertAlmostEqual(window["raw_rate_units_per_min"], 0.1, places=6)
+        self.assertAlmostEqual(window["eta_minutes"], 13.5, places=3)
+
     def test_negative_jitter_and_recovery_have_zero_net_consumption(self):
         def sample(used, sampled_at, updated_at):
             return collect_quota_snapshot([{
