@@ -418,6 +418,110 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(result["quantity"], 2)
         self.assertEqual(fake.created[0][1], 2)
 
+    def test_forecast_shortage_keeps_peak_quantity_when_new_estimate_drops(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "trigger_mode": "forecast",
+            "max_purchase_per_order": 20,
+            "forecast_fallback_quantity": 5,
+        })
+        state = restock._load_state()
+        state["pending_restock_quantity"] = 20
+        restock._save_state(state)
+        fake = FakeClient()
+        fake.inventory = lambda product, quantity: {"data": {"available": 0}}
+        rows = [{"id": index, "status": "active", "schedulable": True} for index in range(4)]
+        forecast = {"status": "insufficient", "eta_minutes": None, "windows": {}}
+
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", return_value=rows), patch.object(
+            restock, "update_forecast", return_value=({"forecast": forecast}, forecast)
+        ), patch.object(restock, "_provider_configured", side_effect=lambda provider, **kwargs: provider == "sogou"):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["calculated_quantity"], 1)
+        self.assertEqual(result["quantity"], 20)
+        self.assertEqual(result["pending_restock_quantity"], 20)
+        self.assertEqual(restock._load_state()["pending_restock_quantity"], 20)
+
+    def test_forecast_shortage_orders_partial_supplier_inventory(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "trigger_mode": "forecast",
+            "max_purchase_per_order": 20,
+            "forecast_fallback_quantity": 5,
+        })
+        state = restock._load_state()
+        state["pending_restock_quantity"] = 20
+        restock._save_state(state)
+        fake = FakeClient()
+        fake.inventory = lambda product, quantity: {"data": {"available": 3}}
+        forecast = {"status": "insufficient", "eta_minutes": None, "windows": {}}
+
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", return_value=[]), patch.object(
+            restock, "update_forecast", return_value=({"forecast": forecast}, forecast)
+        ), patch.object(restock, "_provider_configured", side_effect=lambda provider, **kwargs: provider == "sogou"):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["quantity"], 20)
+        self.assertEqual(result["order_quantity"], 3)
+        self.assertEqual(fake.created[0][1], 3)
+        state = restock._load_state()
+        self.assertEqual(state["pending_restock_quantity"], 20)
+        self.assertEqual(state["current_order"]["quantity"], 3)
+
+    def test_pending_shortage_survives_an_insufficient_forecast_above_healthy_floor(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "trigger_mode": "forecast",
+            "max_purchase_per_order": 20,
+            "forecast_fallback_quantity": 5,
+        })
+        state = restock._load_state()
+        state["pending_restock_quantity"] = 20
+        restock._save_state(state)
+        fake = FakeClient()
+        fake.inventory = lambda product, quantity: {"data": {"available": 0}}
+        rows = [{"id": index, "status": "active", "schedulable": True} for index in range(5)]
+        forecast = {"status": "insufficient", "eta_minutes": None, "windows": {}}
+
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", return_value=rows), patch.object(
+            restock, "update_forecast", return_value=({"forecast": forecast}, forecast)
+        ), patch.object(restock, "_provider_configured", side_effect=lambda provider, **kwargs: provider == "sogou"):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertFalse(result["forecast_fallback"])
+        self.assertTrue(result["pending_forecast_trigger"])
+        self.assertEqual(result["calculated_quantity"], 0)
+        self.assertEqual(result["quantity"], 20)
+        self.assertEqual(restock._load_state()["pending_restock_quantity"], 20)
+
+    def test_successful_push_decrements_pending_shortage(self):
+        restock.save_restock_config({"enabled": True, "trigger_mode": "forecast"})
+        state = restock._load_state()
+        state["pending_restock_quantity"] = 20
+        state["current_order"] = {
+            "provider": "sogou",
+            "order_id": "delivery-3",
+            "quantity": 3,
+            "status": "taken",
+            "payload": {"accounts": [
+                {"email": f"delivered-{index}@example.com", "access_token": _jwt(f"delivered-{index}@example.com")}
+                for index in range(3)
+            ]},
+        }
+        restock._save_state(state)
+        fake = FakeClient()
+
+        with patch.object(restock, "push_prepared_accounts_to_pool", return_value={"success": 3, "failed": 0}):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertEqual(result["action"], "pushed")
+        state = restock._load_state()
+        self.assertEqual(state["pending_restock_quantity"], 17)
+        self.assertIsNone(state["current_order"])
+
     def test_forecast_mode_stops_drop_fallback_after_replacements_arrive(self):
         restock.save_restock_config({
             "enabled": True,
@@ -426,6 +530,9 @@ class SogouRestockTests(unittest.TestCase):
             "forecast_fallback_quantity": 5,
         })
         fake = FakeClient()
+        state = restock._load_state()
+        state["pending_restock_quantity"] = 10
+        restock._save_state(state)
         rows = [{"id": index, "status": "active", "schedulable": True} for index in range(28)]
         forecast = {
             "status": "ready",
@@ -447,6 +554,7 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(result["action"], "forecast_not_triggered")
         self.assertEqual(result["quantity"], 0)
         self.assertEqual(fake.created, [])
+        self.assertEqual(restock._load_state()["pending_restock_quantity"], 0)
 
     def test_forecast_mode_samples_every_cycle_instead_of_reusing_cached_eta(self):
         restock.save_restock_config({

@@ -219,6 +219,10 @@ def _load_state() -> dict[str, Any]:
     state.setdefault("last_recovery_scan_at", None)
     state.setdefault("recovery_cursor", None)
     state.setdefault("quota_forecast", {})
+    try:
+        state["pending_restock_quantity"] = max(0, int(state.get("pending_restock_quantity") or 0))
+    except (TypeError, ValueError):
+        state["pending_restock_quantity"] = 0
     return state
 
 
@@ -393,6 +397,22 @@ def calculate_purchase_quantity(
     return min(gap, max(1, int(cfg["max_purchase_per_order"])))
 
 
+def _decrement_pending_restock(state: dict[str, Any], delivered: int) -> int:
+    pending = max(0, int(state.get("pending_restock_quantity") or 0))
+    pending = max(0, pending - max(0, int(delivered or 0)))
+    state["pending_restock_quantity"] = pending
+    return pending
+
+
+def _account_order_delivery(state: dict[str, Any], order: dict[str, Any], delivered: int) -> int:
+    """Deduct each order's successfully pushed accounts from the shortage once."""
+    previous = max(0, int(order.get("pending_accounted_delivered") or 0))
+    accounted = max(previous, max(0, int(delivered or 0)))
+    order["pending_accounted_delivered"] = accounted
+    _decrement_pending_restock(state, accounted - previous)
+    return accounted
+
+
 def _provider_names(cfg: dict[str, Any]) -> list[str]:
     values = cfg.get("provider_priority") if isinstance(cfg, dict) else None
     if not isinstance(values, list):
@@ -515,6 +535,7 @@ def get_restock_status() -> dict[str, Any]:
         "replenishing": bool(state.get("replenishing")),
         "inventory": state.get("inventory"),
         "quota_forecast": (state.get("quota_forecast") or {}).get("forecast"),
+        "pending_restock_quantity": int(state.get("pending_restock_quantity") or 0),
         "last_recovery_scan_at": state.get("last_recovery_scan_at"),
         "recovery_cursor": state.get("recovery_cursor"),
         "credentials_configured": bool(getattr(_cfg, "SOGOUEDU_USERNAME", "") and getattr(_cfg, "SOGOUEDU_PASSWORD", "")),
@@ -868,6 +889,7 @@ def _schedule_followup_order(
         "partial_finalize_last_attempt_at",
         "partial_finalized_at",
         "cancelled_at",
+        "pending_accounted_delivered",
     ):
         order.pop(key, None)
     order["status"] = "creating"
@@ -1096,6 +1118,7 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
     pushed_failed = max(0, int(result.get("failed", 0) or 0))
     order["last_push"] = {"success": pushed_success, "failed": pushed_failed}
     order["updated_at"] = _now()
+    _account_order_delivery(state, order, pushed_success)
     if pushed_failed:
         _upsert_order_history(
             order,
@@ -1292,6 +1315,9 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         if recovery_errors:
             recovery_totals["errors"] = recovery_errors
         result["recovery"] = recovery_totals
+        recovered = int(recovery_totals["repaired"]) + int(recovery_totals["recreated"])
+        if recovered:
+            _decrement_pending_restock(state, recovered)
         active_accounts = _pool_monitor.fetch_pool_accounts(
             group_id=cfg["monitor_group_id"],
             platform="openai",
@@ -1335,8 +1361,22 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             next_replenishing_state(healthy, cfg, bool(state.get("replenishing")))
             if cfg["trigger_mode"] == "inventory" else False
         )
+        pending_quantity = max(0, int(state.get("pending_restock_quantity") or 0))
+        forecast_recovered = bool(
+            quota_forecast.get("status") == "no_rate"
+            or (
+                quota_forecast.get("status") == "ready"
+                and quota_forecast.get("eta_minutes") is not None
+                and float(quota_forecast["eta_minutes"]) > float(cfg["forecast_interrupt_minutes"])
+            )
+        )
+        pending_forecast_trigger = bool(
+            cfg["trigger_mode"] == "forecast"
+            and pending_quantity > 0
+            and not forecast_recovered
+        )
         replenishing = bool(
-            (forecast_trigger or forecast_fallback)
+            (forecast_trigger or forecast_fallback or pending_forecast_trigger)
             if cfg["trigger_mode"] == "forecast" else static_replenishing
         )
         result["healthy"] = healthy
@@ -1346,6 +1386,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         result["static_replenishing"] = static_replenishing
         result["forecast_trigger"] = forecast_trigger
         result["forecast_fallback"] = forecast_fallback
+        result["pending_forecast_trigger"] = pending_forecast_trigger
         result["forecast_fallback_reason"] = "healthy_floor" if forecast_fallback else ""
         result["forecast_sampled"] = True
         result["quota_forecast"] = quota_forecast
@@ -1356,7 +1397,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             "checked_at": _now(),
         }
         _save_state(state)
-        quantity = calculate_purchase_quantity(
+        calculated_quantity = calculate_purchase_quantity(
             healthy,
             cfg,
             replenishing=replenishing,
@@ -1364,7 +1405,20 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             forecast_fallback=forecast_fallback,
             quota_forecast=quota_forecast,
         )
+        if cfg["trigger_mode"] == "forecast" and replenishing:
+            quantity = max(
+                calculated_quantity,
+                int(state.get("pending_restock_quantity") or 0),
+            )
+            quantity = min(quantity, max(1, int(cfg["max_purchase_per_order"])))
+            state["pending_restock_quantity"] = quantity
+        else:
+            quantity = calculated_quantity
+            state["pending_restock_quantity"] = 0
+        result["calculated_quantity"] = calculated_quantity
+        result["pending_restock_quantity"] = int(state["pending_restock_quantity"])
         result["quantity"] = quantity
+        _save_state(state)
         if quantity <= 0:
             action = "inventory_ok"
             if cfg["trigger_mode"] == "forecast":
@@ -1375,6 +1429,8 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         provider_errors: list[dict[str, Any]] = []
         selected_api: Any = None
         selected_product = ""
+        selected_quantity = quantity
+        partial_candidate: tuple[str, Any, str, int] | None = None
         for provider in _provider_names(cfg):
             injected = client if provider == "sogou" else None
             if not _provider_configured(provider, injected_client=injected):
@@ -1386,8 +1442,17 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
                 provider_client.balance()
                 inventory = provider_client.inventory(product, quantity)
                 available = _inventory_available(inventory)
-                if available is not None and available < quantity:
+                if available is not None and available <= 0:
                     raise RuntimeError(f"库存不足: available={available}, required={quantity}")
+                if available is not None and available < quantity:
+                    provider_errors.append({
+                        "provider": provider,
+                        "error": f"库存不足以整单交付: available={available}, required={quantity}",
+                        "status_code": None,
+                    })
+                    if partial_candidate is None:
+                        partial_candidate = (provider, provider_client, product, available)
+                    continue
             except (SogouEduError, BugTeamError, RuntimeError) as exc:
                 message, status_code = _provider_error(exc)
                 provider_errors.append({"provider": provider, "error": message, "status_code": status_code})
@@ -1396,13 +1461,15 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             selected_api = provider_client
             selected_product = product
             break
+        if not selected_provider and partial_candidate is not None:
+            selected_provider, selected_api, selected_product, selected_quantity = partial_candidate
         if not selected_provider or selected_api is None:
             result.update({"error": "所有补池供应商均无法满足库存", "provider_errors": provider_errors})
             return result
         key = f"{_provider_order_key(selected_provider)}-{uuid.uuid4().hex}"
         state["current_order"] = {
             "idempotency_key": key,
-            "quantity": quantity,
+            "quantity": selected_quantity,
             "product": selected_product,
             "provider": selected_provider,
             "provider_index": _provider_names(cfg).index(selected_provider),
@@ -1415,6 +1482,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         order_result = _process_current_order(selected_api, cfg, state)
         result.update(order_result)
         result["provider"] = selected_provider
+        result["order_quantity"] = selected_quantity
         result["ok"] = True
         return result
     except (SogouEduError, BugTeamError) as exc:
