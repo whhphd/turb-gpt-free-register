@@ -446,9 +446,15 @@ def update_forecast(
         consumed = 0.0
         actual_rate = 0.0
         matched_accounts = 0
+        coverage_matched_accounts = 0
         reset_count = 0
         rate_samples = 0
         cohort_window_accounts = sum(
+            1
+            for account_key in remaining_cohort_keys
+            if isinstance(current_accounts.get(account_key, {}).get(window_key), dict)
+        )
+        rate_pool_window_accounts = sum(
             1
             for account_key in rate_cohort_keys
             if isinstance(current_rate_accounts.get(account_key, {}).get(window_key), dict)
@@ -465,12 +471,14 @@ def update_forecast(
                 reset_count += resets
                 rate_samples = max(rate_samples, account_samples)
                 matched_accounts += 1
+                if account_key in remaining_cohort_keys:
+                    coverage_matched_accounts += 1
         actual_rate = max(0.0, actual_rate)
         planned_rate = actual_rate * safe_factor
         remaining = max(0.0, float(item.get("remaining_units") or 0.0))
         eta = remaining / planned_rate if planned_rate > 1e-12 else None
         coverage = float(item.get("accounts") or 0) / max(1, total_current_accounts)
-        rate_coverage = matched_accounts / max(1, cohort_window_accounts)
+        rate_coverage = coverage_matched_accounts / max(1, cohort_window_accounts)
         required_rate_samples = max(1, min_required - 1)
         if rate_samples < required_rate_samples or rate_coverage < 0.8:
             status = "insufficient"
@@ -496,7 +504,9 @@ def update_forecast(
             "status": status,
             "elapsed_minutes": round(elapsed_minutes, 4) if elapsed_minutes else None,
             "matched_accounts": matched_accounts,
+            "rate_coverage_matched_accounts": coverage_matched_accounts,
             "rate_account_population": cohort_window_accounts,
+            "rate_pool_account_population": rate_pool_window_accounts,
             "rate_samples": rate_samples,
             "new_accounts": new_account_count,
             "removed_accounts": removed_account_count,
