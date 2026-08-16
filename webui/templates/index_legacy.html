@@ -731,6 +731,25 @@ function isPlaceholderEmpty(v) {
   return !s || ['-', '—', '无', '空', 'none', 'null', 'n/a', 'na'].includes(s.toLowerCase());
 }
 function short(v, n=40) { const s = v || ''; return s.length > n ? s.slice(0,n)+'…' : s; }
+function parseDisplayDateTime(v) {
+  if (v instanceof Date) return v;
+  const s = String(v ?? '').trim();
+  if (!s) return new Date(NaN);
+  // 业务旧数据是不带时区的北京时间；带 Z/偏移量的值按其声明的时区解析。
+  const hasClock = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(s);
+  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/i.test(s);
+  return new Date(hasClock && !hasZone ? `${s.replace(' ', 'T')}+08:00` : s);
+}
+function formatDateTime(v) {
+  if (v == null || v === '') return '-';
+  const d = parseDisplayDateTime(v);
+  if (Number.isNaN(d.getTime())) {
+    const s = String(v).replace('T', ' ').replace(/\.\d+.*$/, '').replace(/Z$/, '').replace(/[+-]\d{2}:\d{2}$/, '');
+    return s || '-';
+  }
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 function copyId(v) { if (!v) return ''; const id = 'c'+(++copySeq); copyStore.set(id, v); return id; }
 function cbtn(label, value, cls='') { const id = copyId(value); return `<button class="${cls}" data-copy-id="${id}" ${id?'':'disabled'}>${label}</button>`; }
 function pill(status) {
@@ -840,8 +859,8 @@ function renderJobs() {
       <td class="muted">#${esc(j.id)}${j.parent_job_id ? `<div class="sub-cell" title="重试自任务 #${esc(j.parent_job_id)}">↳ #${esc(j.parent_job_id)} · ${esc(j.retry_attempt || 1)}</div>` : ''}</td>
       <td>${pill(j.display_status || j.status)}</td>
       <td title="${esc(j.email || '-')}">${esc(j.email || '-')}</td>
-      <td class="muted" title="${esc(j.started_at || '-')}">${esc(j.started_at || '-')}</td>
-      <td class="muted" title="${esc(j.completed_at || '-')}">${esc(j.completed_at || '-')}</td>
+      <td class="muted" title="${esc(formatDateTime(j.started_at))}">${esc(formatDateTime(j.started_at))}</td>
+      <td class="muted" title="${esc(formatDateTime(j.completed_at))}">${esc(formatDateTime(j.completed_at))}</td>
       <td class="muted wrap" title="${esc(j.error_message || '')}">${esc(short(j.error_message || '', 90))}</td>
       <td class="actions-cell">
         <div class="actions job-actions">
@@ -1243,7 +1262,7 @@ function _codexAgentCell(r) {
 function _fmtPlanTime(v, dateOnly = false) {
   if (!v) return '';
   try {
-    const d = new Date(v);
+    const d = parseDisplayDateTime(v);
     if (Number.isNaN(d.getTime())) {
       const raw = String(v).replace('T', ' ').replace(/(\+00:00|Z)$/, '');
       return dateOnly ? raw.slice(0, 10) : raw;
@@ -1274,7 +1293,7 @@ function _planCell(r) {
   const ok = r.plan_check_ok;
   const err = r.plan_check_error || '';
   const plan = (r.current_plan_type || r.plan_type || '-').toString();
-  const checked = r.plan_checked_at ? `查询: ${esc(r.plan_checked_at)}` : '未查询实时套餐';
+  const checked = r.plan_checked_at ? `查询: ${esc(formatDateTime(r.plan_checked_at))}` : '未查询实时套餐';
   const route = (r.plan_check_network_route || '').toString();
   const routeLabel = route === 'proxy' ? `网络: 代理${r.plan_check_proxy_used ? ` (${r.plan_check_proxy_used})` : ''}` :
     route === 'direct_fallback' ? `网络: 直连回退${r.plan_check_proxy_fallback_reason ? ` (${r.plan_check_proxy_fallback_reason})` : ''}` :
@@ -1285,7 +1304,7 @@ function _planCell(r) {
     const queued = r.plan_check_status === 'queued';
     const label = automatic ? (queued ? '自动查询排队中' : '自动查询中') : (queued ? '查询排队中' : '查询中');
     const stamp = queued ? r.plan_check_queued_at : r.plan_check_started_at;
-    const detail = stamp ? `${queued ? '入队' : '开始'}: ${esc(stamp)}` : '';
+    const detail = stamp ? `${queued ? '入队' : '开始'}: ${esc(formatDateTime(stamp))}` : '';
     return `<span class="pill status-running" title="${detail}">${label}</span>`;
   }
   if (err || r.plan_check_status === 'failed') {
@@ -1293,7 +1312,7 @@ function _planCell(r) {
     const hasLastSuccess = Boolean(r.plan_last_success_at);
     const lastPlan = hasLastSuccess ? `${plan}${r.plus_trial_eligible ? '/可Plus试用' : ''}` : '';
     const lastText = lastPlan ? `（上次: ${lastPlan}）` : '';
-    const lastTitle = hasLastSuccess ? `上次成功: ${esc(r.plan_last_success_at)}` : '';
+    const lastTitle = hasLastSuccess ? `上次成功: ${esc(formatDateTime(r.plan_last_success_at))}` : '';
     return `<div class="extract-link-cell"><span class="pill status-failed" title="${[esc(reason), lastTitle].filter(Boolean).join('；')}">查询失败${esc(lastText)}</span><div class="extract-link-error" title="${esc(reason)}">${esc(reason)}</div></div>`;
   }
   const lower = plan.toLowerCase();
@@ -1322,9 +1341,9 @@ function _planCell(r) {
   if (discount) parts.push(discount);
   const text = parts.length ? `${plan}（${parts.join('/')}）` : plan;
   const detail = [title];
-  if (expireRaw) detail.push(`到期时间: ${expireRaw}`);
-  if (r.plan_renews_at) detail.push(`续费时间: ${r.plan_renews_at}`);
-  if (r.discount_expires_at) detail.push(`折扣结束: ${r.discount_expires_at}`);
+  if (expireRaw) detail.push(`到期时间: ${_fmtPlanTime(expireRaw)}`);
+  if (r.plan_renews_at) detail.push(`续费时间: ${_fmtPlanTime(r.plan_renews_at)}`);
+  if (r.discount_expires_at) detail.push(`折扣结束: ${_fmtPlanTime(r.discount_expires_at)}`);
   if (r.discount_promo_campaign_id) detail.push(`优惠: ${r.discount_promo_campaign_id}`);
   return `<span class="pill ${cls}" title="${esc(detail.join('；'))}">${esc(text)}</span>`;
 }
@@ -1392,7 +1411,7 @@ function _codexAction(r) {
 function _liveStatusSub(r) {
   const s = r.live_check_status || '';
   const err = r.live_check_error || '';
-  const at = r.live_checked_at || '';
+  const at = formatDateTime(r.live_checked_at);
   const fp = r.live_check_fingerprint_text || '';
   if (s === 'live') return `<div class="sub-cell" title="${esc([at, fp].filter(Boolean).join('\n'))}">查活: 正常${fp ? ` · ${esc(fp)}` : ''}</div>`;
   if (s === 'queued') return `<div class="sub-cell" style="color:#e6a23c">查活: 排队</div>`;
@@ -1417,7 +1436,7 @@ function renderAccounts() {
       <td>${r.totp_enabled ? '已启用' : '<span class="muted">未启用</span>'}</td>
       <td>${_codexCell(r)}</td>
       <td>${_codexAgentCell(r)}</td>
-      <td class="muted">${esc(r.created_at || '-')}</td>
+      <td class="muted">${esc(formatDateTime(r.created_at))}</td>
       <td class="actions actions-cell">
         <div class="account-row-actions">
           <div class="account-action-group"><button class="primary" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" ${r.has_access_token ? '' : 'disabled'}>复制Token</button> <button class="good" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button></div>
@@ -2406,8 +2425,8 @@ function renderOutlook() {
       <td>${esc(poolLabel(r.source))}</td>
       <td>${pill(r.status)}</td>
       <td><span class="mono">${esc(short(r.access_token || '', 36) || '未生成')}</span></td>
-      <td class="muted">${esc(r.imported_at || r.created_at || '-')}</td>
-      <td class="muted">${esc(r.used_at || '-')}</td>
+      <td class="muted">${esc(formatDateTime(r.imported_at || r.created_at))}</td>
+      <td class="muted">${esc(formatDateTime(r.used_at))}</td>
       <td class="actions">
         ${cbtn('复制邮箱', r.copy_line)} ${cbtn('复制Token', r.access_token, 'primary')} ${cbtn('复制整行', r.account_copy_line, 'good')}
         ${r.status !== 'available'
@@ -2601,8 +2620,10 @@ function renderCodex() {
   const rows = CODEX;
   $('#codexBody').innerHTML = rows.map(r => {
     const exported = (r.exported_count || 0) > 0;
+    const mtime = formatDateTime(r.mtime);
+    const expired = formatDateTime(r.expired);
     const statusBadge = exported
-      ? `<span class="pill status-used" title="导出 ${esc(r.exported_count)} 次，最近 ${esc(r.exported_at || '-')}">已导出</span>`
+      ? `<span class="pill status-used" title="导出 ${esc(r.exported_count)} 次，最近 ${esc(formatDateTime(r.exported_at))}">已导出</span>`
       : `<span class="pill status-available">未导出</span>`;
     const checked = CODEX_SELECTED.has(r.filename) ? 'checked' : '';
     return `
@@ -2612,8 +2633,8 @@ function renderCodex() {
       <td>${esc(r.plan || '-')}</td>
       <td>${statusBadge}</td>
       <td><span class="mono">${esc(r.account_id || '-')}</span></td>
-      <td class="muted">${esc(r.mtime || '-')}</td>
-      <td class="muted">${esc(r.expired || '-')}</td>
+      <td class="muted">${esc(mtime)}</td>
+      <td class="muted">${esc(expired)}</td>
       <td class="actions">
         <button class="primary" data-codex-download="${esc(r.filename)}" title="下载本地 codex_accounts/ 中的 JSON/回执">本地下载</button>
         <button class="good" data-codex-download-cpa="${esc(r.filename)}" title="按邮箱从 CPA auth-files 下载真实 Codex JSON">从CPA下载</button>

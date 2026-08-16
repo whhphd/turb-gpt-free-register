@@ -3632,9 +3632,18 @@ function pillV2(status) {
   else if (s === 'pending' || s === 'cancelled' || s === 'stopped') cls = 'jobs-v2-pill--muted';
   return `<span class="jobs-v2-pill ${cls}">${esc(map[s]||s||'-')}</span>`;
 }
+function parseDisplayDateTime(v) {
+  if (v instanceof Date) return v;
+  const s = String(v ?? '').trim();
+  if (!s) return new Date(NaN);
+  // 业务旧数据是不带时区的北京时间；带 Z/偏移量的值按其声明的时区解析。
+  const hasClock = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(s);
+  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/i.test(s);
+  return new Date(hasClock && !hasZone ? `${s.replace(' ', 'T')}+08:00` : s);
+}
 function formatDateTime(v) {
   if (v == null || v === '') return '-';
-  const d = v instanceof Date ? v : new Date(v);
+  const d = parseDisplayDateTime(v);
   if (Number.isNaN(d.getTime())) {
     const s = String(v).replace('T', ' ').replace(/\.\d+.*$/, '').replace(/Z$/, '').replace(/[+-]\d{2}:\d{2}$/, '');
     return s || '-';
@@ -4685,7 +4694,7 @@ function _codexAgentCell(r) {
 function _fmtPlanTime(v, dateOnly = false) {
   if (!v) return '';
   try {
-    const d = new Date(v);
+    const d = parseDisplayDateTime(v);
     if (Number.isNaN(d.getTime())) {
       const raw = String(v).replace('T', ' ').replace(/(\+00:00|Z)$/, '');
       return dateOnly ? raw.slice(0, 10) : raw;
@@ -4716,7 +4725,7 @@ function _planCell(r) {
   const ok = r.plan_check_ok;
   const err = r.plan_check_error || '';
   const plan = (r.current_plan_type || r.plan_type || '-').toString();
-  const checked = r.plan_checked_at ? `查询: ${esc(r.plan_checked_at)}` : '未查询实时套餐';
+  const checked = r.plan_checked_at ? `查询: ${esc(formatDateTime(r.plan_checked_at))}` : '未查询实时套餐';
   const route = (r.plan_check_network_route || '').toString();
   const routeLabel = route === 'proxy' ? `网络: 代理${r.plan_check_proxy_used ? ` (${r.plan_check_proxy_used})` : ''}` :
     route === 'direct_fallback' ? `网络: 直连回退${r.plan_check_proxy_fallback_reason ? ` (${r.plan_check_proxy_fallback_reason})` : ''}` :
@@ -4727,7 +4736,7 @@ function _planCell(r) {
     const queued = r.plan_check_status === 'queued';
     const label = automatic ? (queued ? '自动查询排队中' : '自动查询中') : (queued ? '查询排队中' : '查询中');
     const stamp = queued ? r.plan_check_queued_at : r.plan_check_started_at;
-    const detail = stamp ? `${queued ? '入队' : '开始'}: ${esc(stamp)}` : '';
+    const detail = stamp ? `${queued ? '入队' : '开始'}: ${esc(formatDateTime(stamp))}` : '';
     return `<span class="pill status-running" title="${detail}">${label}</span>`;
   }
   if (err || r.plan_check_status === 'failed') {
@@ -4735,7 +4744,7 @@ function _planCell(r) {
     const hasLastSuccess = Boolean(r.plan_last_success_at);
     const lastPlan = hasLastSuccess ? `${plan}${r.plus_trial_eligible ? '/可Plus试用' : ''}` : '';
     const lastText = lastPlan ? `（上次: ${lastPlan}）` : '';
-    const lastTitle = hasLastSuccess ? `上次成功: ${esc(r.plan_last_success_at)}` : '';
+    const lastTitle = hasLastSuccess ? `上次成功: ${esc(formatDateTime(r.plan_last_success_at))}` : '';
     return `<div class="extract-link-cell"><span class="pill status-failed" title="${[esc(reason), lastTitle].filter(Boolean).join('；')}">查询失败${esc(lastText)}</span><div class="extract-link-error" title="${esc(reason)}">${esc(reason)}</div></div>`;
   }
   const lower = plan.toLowerCase();
@@ -4763,9 +4772,9 @@ function _planCell(r) {
   if (discount) parts.push(discount);
   const text = parts.length ? `${plan}（${parts.join('/')}）` : plan;
   const detail = [title];
-  if (expireRaw) detail.push(`到期时间: ${expireRaw}`);
-  if (r.plan_renews_at) detail.push(`续费时间: ${r.plan_renews_at}`);
-  if (r.discount_expires_at) detail.push(`折扣结束: ${r.discount_expires_at}`);
+  if (expireRaw) detail.push(`到期时间: ${_fmtPlanTime(expireRaw)}`);
+  if (r.plan_renews_at) detail.push(`续费时间: ${_fmtPlanTime(r.plan_renews_at)}`);
+  if (r.discount_expires_at) detail.push(`折扣结束: ${_fmtPlanTime(r.discount_expires_at)}`);
   if (r.discount_promo_campaign_id) detail.push(`优惠: ${r.discount_promo_campaign_id}`);
   return `<span class="pill ${cls}" title="${esc(detail.join('；'))}">${esc(text)}</span>`;
 }
@@ -4871,7 +4880,7 @@ function _directCardCellV2(r) {
 function _tokenCellV2(r) {
   const live = r.live_check_status || '';
   const liveErr = r.live_check_error || '';
-  const liveAt = r.live_checked_at || '';
+  const liveAt = formatDateTime(r.live_checked_at);
   const st = _directCardStatus(r);
   const stHtml = st === '已用'
     ? `<div class="acc-v2-direct-inline is-used" title="直卡开通：已用">直卡:已用</div>`
@@ -4946,7 +4955,7 @@ function renderAccounts() {
       <td class="col-small">${r.totp_enabled ? '已启用' : '<span class="acc-v2-muted">未启用</span>'}</td>
       <td class="col-status">${_codexCellV2(r)}</td>
       <td class="col-agent">${_codexAgentCell(r)}</td>
-      <td class="col-time" title="${esc(r.created_at || '-')}">${esc(r.created_at || '-')}</td>
+      <td class="col-time" title="${esc(formatDateTime(r.created_at))}">${esc(formatDateTime(r.created_at))}</td>
       <td class="col-actions">
         <div class="acc-v2-actions">
           <button type="button" class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button>
@@ -6337,8 +6346,8 @@ function renderOutlook() {
       <td class="col-source">${esc(poolLabel(r.source))}</td>
       <td class="col-status">${pill(r.status)}</td>
       <td class="col-token">${_outlookTokenCell(r)}</td>
-      <td class="col-time" title="${esc(r.imported_at || r.created_at || '-')}">${esc(r.imported_at || r.created_at || '-')}</td>
-      <td class="col-time" title="${esc(r.used_at || '-')}">${esc(r.used_at || '-')}</td>
+      <td class="col-time" title="${esc(formatDateTime(r.imported_at || r.created_at))}">${esc(formatDateTime(r.imported_at || r.created_at))}</td>
+      <td class="col-time" title="${esc(formatDateTime(r.used_at))}">${esc(formatDateTime(r.used_at))}</td>
       <td class="col-actions">
         <div class="acc-v2-actions">
           ${cbtn('复制邮箱', r.copy_line, 'primary')}
@@ -6857,7 +6866,7 @@ function _codexUpdateSelectedHint() {
 function _codexStatusBadge(r) {
   const exported = (r.exported_count || 0) > 0;
   return exported
-    ? `<span class="pill status-used" title="导出 ${esc(r.exported_count)} 次，最近 ${esc(r.exported_at || '-')}">已导出</span>`
+    ? `<span class="pill status-used" title="导出 ${esc(r.exported_count)} 次，最近 ${esc(formatDateTime(r.exported_at))}">已导出</span>`
     : `<span class="pill status-available">未导出</span>`;
 }
 function closeCodexV2MoreMenus() {
@@ -6898,6 +6907,8 @@ function renderCodex() {
   body.innerHTML = rows.map(r => {
     const checked = CODEX_SELECTED.has(r.filename) ? 'checked' : '';
     const exported = (r.exported_count || 0) > 0;
+    const mtime = formatDateTime(r.mtime);
+    const expired = formatDateTime(r.expired);
     const isSub2 = String(r.type || '').includes('sub2') || String(r.filename || '').includes('sub2-callback');
     const moreItems = [
       `<button type="button" class="good" data-codex-download-sub2="${esc(r.filename)}" title="从 sub2api 导出可导入 JSON（含完整 token）">从sub2下载</button>`,
@@ -6916,8 +6927,8 @@ function renderCodex() {
       <td class="col-plan">${esc(r.plan || '-')}</td>
       <td class="col-status">${_codexStatusBadge(r)}</td>
       <td class="col-account" title="${esc(r.account_id || '-')}">${esc(r.account_id || '-')}</td>
-      <td class="col-time" title="${esc(r.mtime || '-')}">${esc(r.mtime || '-')}</td>
-      <td class="col-time" title="${esc(r.expired || '-')}">${esc(r.expired || '-')}</td>
+      <td class="col-time" title="${esc(mtime)}">${esc(mtime)}</td>
+      <td class="col-time" title="${esc(expired)}">${esc(expired)}</td>
       <td class="col-actions">
         <div class="acc-v2-actions">
           <button type="button" class="primary" data-codex-download="${esc(r.filename)}" title="${isSub2 ? '从 sub2api 导出可导入格式（含 token）' : '下载本地 codex_accounts/ 中的 JSON'}">${isSub2 ? '下载sub2' : '本地下载'}</button>
@@ -7368,7 +7379,7 @@ function renderPoolMonitor(scan) {
   const meta = $('#poolMonitorMetaV2');
   const s = (scan && scan.summary) || {};
   if (meta) {
-    const at = (scan && scan.scanned_at) || '-';
+    const at = formatDateTime(scan && scan.scanned_at);
     const gid = (scan && scan.group_id) != null ? scan.group_id : '-';
     meta.textContent = `扫描时间 ${at} · group=${gid} · base=${(scan && scan.api_base) || '-'}`;
   }
@@ -7657,12 +7668,8 @@ let POOL_MONITOR_AUTO_TIMER = null;
 let POOL_MONITOR_AUTO_BUSY = false;
 
 function _pmFmtTime(ts) {
-  if (!ts) return '-';
-  const s = String(ts);
-  // 2026-08-07T20:15:00 → 08-07 20:15
-  const m = s.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
-  if (m) return `${m[2]}-${m[3]} ${m[4]}:${m[5]}`;
-  return s;
+  const formatted = formatDateTime(ts);
+  return formatted === '-' ? '-' : formatted.slice(5, 16);
 }
 function renderPoolMonitorAuto(status, logs) {
   const enabled = !!(status && status.enabled);
@@ -7987,7 +7994,7 @@ async function codexUploadPushPoolOnFiles(ev) {
   function forecastSampleTimestamp(value) {
     const number = Number(value);
     if (Number.isFinite(number)) return number > 10000000000 ? number : number * 1000;
-    const parsed = new Date(value || '');
+    const parsed = parseDisplayDateTime(value || '');
     return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
   }
   function renderSogouRestockForecastMeta(forecast, cfg, fetchError = false) {
@@ -8054,7 +8061,7 @@ async function codexUploadPushPoolOnFiles(ev) {
     body.innerHTML = (items || []).slice().reverse().map(row => `<tr>
       <td>${esc(row.order_id || row.idempotency_key || '-')}</td><td>${esc(row.product || '-')}</td>
       <td>${esc(row.quantity == null ? '-' : row.quantity)}</td><td>${esc(row.status || '-')}</td>
-      <td>${esc(row.updated_at || row.created_at || '-')}</td><td>${esc(row.last_error || '')}</td>
+      <td>${esc(formatDateTime(row.updated_at || row.created_at))}</td><td>${esc(row.last_error || '')}</td>
     </tr>`).join('') || '<tr><td colspan="6" style="color:#c0c4cc">暂无订单记录</td></tr>';
   }
   const SOGOU_RESTOCK_STATUS_INTERVAL_MS = 5000;
@@ -8107,10 +8114,7 @@ async function codexUploadPushPoolOnFiles(ev) {
     }
   }
   function formatSogouRestockLogTime(value) {
-    if (!value) return '-';
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) return String(value);
-    return parsed.toLocaleString('zh-CN', { hour12: false });
+    return formatDateTime(value);
   }
   function formatSogouRestockDuration(seconds) {
     const value = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -8140,7 +8144,7 @@ async function codexUploadPushPoolOnFiles(ev) {
     if (row.status) parts.push(`状态 ${row.status}`);
     if (row.reserved != null) parts.push(`已预留 ${row.reserved}`);
     if (row.partial_ready_since) {
-      const started = new Date(row.partial_ready_since).getTime();
+      const started = parseDisplayDateTime(row.partial_ready_since).getTime();
       if (!Number.isNaN(started)) {
         const elapsed = Math.max(0, (Date.now() - started) / 1000);
         parts.push(`部分备货已等 ${formatSogouRestockDuration(elapsed)}`);
@@ -8284,7 +8288,7 @@ async function codexUploadPushPoolOnFiles(ev) {
       const sum = b.summary || {};
       return `<div data-fab-id="${esc(b.id)}" style="cursor:pointer;padding:8px;border-bottom:1px solid #ebeef5;${active}">
         <div style="font-weight:600;color:#303133">${esc(b.name || b.id)}</div>
-        <div style="font-size:12px;color:#909399">${esc(_fabStatusLabel(b.status))} · ${esc(b.created_at || '')}</div>
+        <div style="font-size:12px;color:#909399">${esc(_fabStatusLabel(b.status))} · ${esc(formatDateTime(b.created_at))}</div>
         <div style="font-size:12px;color:#606266">导入${sum.imported||0} Codex${sum.codex_success||0} 入池${sum.pool_pushed||0}</div>
       </div>`;
     }).join('');
