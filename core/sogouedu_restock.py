@@ -72,7 +72,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "forecast_enabled": False,
     "forecast_interrupt_minutes": 20,
     "forecast_target_minutes": 25,
-    "forecast_sample_interval_sec": 60,
     "forecast_rate_window_minutes": 10,
     "forecast_min_samples": 3,
     "forecast_safety_factor": 1.2,
@@ -162,10 +161,6 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         cfg["forecast_target_minutes"] = max(cfg["forecast_interrupt_minutes"], min(24 * 60, int(cfg.get("forecast_target_minutes") or 25)))
     except (TypeError, ValueError):
         cfg["forecast_target_minutes"] = max(cfg["forecast_interrupt_minutes"], 25)
-    try:
-        cfg["forecast_sample_interval_sec"] = max(10, min(3600, int(cfg.get("forecast_sample_interval_sec") or 60)))
-    except (TypeError, ValueError):
-        cfg["forecast_sample_interval_sec"] = 60
     try:
         cfg["forecast_rate_window_minutes"] = max(1, min(24 * 60, int(cfg.get("forecast_rate_window_minutes") or 10)))
     except (TypeError, ValueError):
@@ -1256,37 +1251,20 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         # Keep the quota forecast on the same currently healthy population.
         healthy_accounts = [account for account in active_accounts if is_healthy_pool_account(account)]
         healthy = len(healthy_accounts)
-        # Quota sampling is the first replenishment-decision stage. Cached
-        # forecasts remain visible between samples, but only a fresh snapshot
-        # may trigger a new order.
+        # Quota sampling is the first replenishment-decision stage. Every
+        # patrol uses the same current account snapshot for ETA and ordering.
         quota_state = state.get("quota_forecast") if isinstance(state.get("quota_forecast"), dict) else {}
-        last_sampled_at = quota_state.get("last_sampled_at")
-        sample_due = last_sampled_at in (None, "")
-        if not sample_due:
-            try:
-                sample_due = time.time() - float(last_sampled_at) >= cfg["forecast_sample_interval_sec"]
-            except (TypeError, ValueError):
-                sample_due = True
-        if sample_due:
-            quota_snapshot = collect_quota_snapshot(healthy_accounts)
-            quota_state, quota_forecast = update_forecast(
-                quota_state,
-                quota_snapshot,
-                min_samples=cfg["forecast_min_samples"],
-                safety_factor=cfg["forecast_safety_factor"],
-                rate_window_minutes=cfg["forecast_rate_window_minutes"],
-            )
-            state["quota_forecast"] = quota_state
-        else:
-            quota_forecast = quota_state.get("forecast") if isinstance(quota_state.get("forecast"), dict) else {
-                "status": "insufficient",
-                "confidence": "insufficient",
-                "eta_minutes": None,
-                "windows": {},
-            }
+        quota_snapshot = collect_quota_snapshot(healthy_accounts)
+        quota_state, quota_forecast = update_forecast(
+            quota_state,
+            quota_snapshot,
+            min_samples=cfg["forecast_min_samples"],
+            safety_factor=cfg["forecast_safety_factor"],
+            rate_window_minutes=cfg["forecast_rate_window_minutes"],
+        )
+        state["quota_forecast"] = quota_state
         forecast_trigger = bool(
             cfg["trigger_mode"] == "forecast"
-            and sample_due
             and quota_forecast.get("status") == "ready"
             and quota_forecast.get("eta_minutes") is not None
             and float(quota_forecast["eta_minutes"]) <= float(cfg["forecast_interrupt_minutes"])
@@ -1300,14 +1278,12 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         previous_account_count = max(0, healthy + removed_accounts - new_accounts)
         drop_threshold = max(2, int(previous_account_count * 0.2 + 0.999999))
         availability_drop = bool(
-            sample_due
-            and removed_accounts >= drop_threshold
+            removed_accounts >= drop_threshold
             and previous_account_count > 0
         )
         forecast_fallback = bool(
             cfg["trigger_mode"] == "forecast"
             and not forecast_trigger
-            and sample_due
             and (healthy <= 0 or availability_drop)
         )
         static_replenishing = (
@@ -1328,7 +1304,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         result["forecast_fallback_reason"] = (
             "availability_drop" if availability_drop else ("empty_pool" if healthy <= 0 else "")
         )
-        result["forecast_sampled"] = sample_due
+        result["forecast_sampled"] = True
         result["quota_forecast"] = quota_forecast
         state["replenishing"] = replenishing
         state["inventory"] = {
@@ -1349,7 +1325,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         if quantity <= 0:
             action = "inventory_ok"
             if cfg["trigger_mode"] == "forecast":
-                action = "forecast_not_triggered" if sample_due else "forecast_waiting_sample"
+                action = "forecast_not_triggered"
             result.update({"ok": True, "action": action})
             return result
         selected_provider = ""
