@@ -386,6 +386,36 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(result["forecast_fallback_reason"], "availability_drop")
         self.assertEqual(result["quantity"], 5)
 
+    def test_forecast_mode_stops_drop_fallback_after_replacements_arrive(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "trigger_mode": "forecast",
+            "max_purchase_per_order": 10,
+            "forecast_fallback_quantity": 5,
+        })
+        fake = FakeClient()
+        rows = [{"id": index, "status": "active", "schedulable": True} for index in range(28)]
+        forecast = {
+            "status": "ready",
+            "eta_minutes": 45,
+            "windows": {},
+            "removed_accounts": 12,
+            "new_accounts": 10,
+        }
+        next_state = {"last_sampled_at": 100, "forecast": forecast}
+
+        with patch.object(
+            restock._pool_monitor, "fetch_pool_accounts", return_value=rows
+        ), patch.object(restock, "update_forecast", return_value=(next_state, forecast)):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["forecast_trigger"])
+        self.assertFalse(result["forecast_fallback"])
+        self.assertEqual(result["action"], "forecast_not_triggered")
+        self.assertEqual(result["quantity"], 0)
+        self.assertEqual(fake.created, [])
+
     def test_forecast_mode_samples_every_cycle_instead_of_reusing_cached_eta(self):
         restock.save_restock_config({
             "enabled": True,

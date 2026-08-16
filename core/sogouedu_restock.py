@@ -1277,8 +1277,9 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         new_accounts = int(quota_forecast.get("new_accounts") or 0)
         previous_account_count = max(0, healthy + removed_accounts - new_accounts)
         drop_threshold = max(2, int(previous_account_count * 0.2 + 0.999999))
+        net_removed_accounts = max(0, removed_accounts - new_accounts)
         availability_drop = bool(
-            removed_accounts >= drop_threshold
+            net_removed_accounts >= drop_threshold
             and previous_account_count > 0
         )
         forecast_fallback = bool(
