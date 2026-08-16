@@ -173,6 +173,56 @@ class QuotaForecastTests(unittest.TestCase):
         self.assertAlmostEqual(window["last_delta_units"], 0.02, places=6)
         self.assertAlmostEqual(window["rate_units_per_min"], 0.04, places=6)
 
+    def test_forecast_waits_for_rate_coverage_before_becoming_ready(self):
+        def sample(first_used, second_used, sampled_at, first_updated, second_updated):
+            return collect_quota_snapshot([
+                {
+                    "id": 21,
+                    "extra": {
+                        "codex_7d_used_percent": first_used,
+                        "codex_7d_window_minutes": 10080,
+                        "codex_7d_reset_after_seconds": 600000,
+                        "codex_usage_updated_at": first_updated,
+                    },
+                },
+                {
+                    "id": 22,
+                    "extra": {
+                        "codex_7d_used_percent": second_used,
+                        "codex_7d_window_minutes": 10080,
+                        "codex_7d_reset_after_seconds": 600000,
+                        "codex_usage_updated_at": second_updated,
+                    },
+                },
+            ], sampled_at=sampled_at)
+
+        first_time = "2026-08-16T09:33:00+08:00"
+        state, _ = update_forecast(
+            None,
+            sample(5, 5, 0, first_time, first_time),
+            min_samples=2,
+            safety_factor=1.0,
+        )
+        state, forecast = update_forecast(
+            state,
+            sample(7, 5, 10, "2026-08-16T09:33:30+08:00", first_time),
+            min_samples=2,
+            safety_factor=1.0,
+        )
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(forecast["status"], "insufficient")
+        self.assertEqual(window["rate_coverage"], 0.5)
+
+        _, forecast = update_forecast(
+            state,
+            sample(8, 7, 20, "2026-08-16T09:34:00+08:00", "2026-08-16T09:33:30+08:00"),
+            min_samples=2,
+            safety_factor=1.0,
+        )
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(forecast["status"], "ready")
+        self.assertEqual(window["rate_coverage"], 1.0)
+
     def test_negative_jitter_and_recovery_have_zero_net_consumption(self):
         def sample(used, sampled_at, updated_at):
             return collect_quota_snapshot([{
@@ -263,7 +313,7 @@ class QuotaForecastTests(unittest.TestCase):
         state, _ = update_forecast(state, sample(20, 300), min_samples=3, safety_factor=1.0, rate_window_minutes=5)
         _, forecast = update_forecast(state, sample(20, 600), min_samples=3, safety_factor=1.0, rate_window_minutes=5)
         window = forecast["windows"]["10080m"]
-        self.assertEqual(forecast["status"], "no_rate")
+        self.assertEqual(forecast["status"], "insufficient")
         self.assertEqual(window["rate_samples"], 1)
         self.assertAlmostEqual(window["last_delta_units"], 0.0, places=6)
 

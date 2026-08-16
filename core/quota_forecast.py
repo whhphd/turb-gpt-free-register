@@ -434,7 +434,9 @@ def update_forecast(
         remaining = max(0.0, float(item.get("remaining_units") or 0.0))
         eta = remaining / planned_rate if planned_rate > 1e-12 else None
         coverage = float(item.get("accounts") or 0) / max(1, total_current_accounts)
-        if sample_count < min_required or rate_samples <= 0:
+        rate_coverage = matched_accounts / max(1, int(item.get("accounts") or 0))
+        required_rate_samples = max(1, min_required - 1)
+        if rate_samples < required_rate_samples or rate_coverage < 0.8:
             status = "insufficient"
         elif actual_rate <= 1e-12:
             status = "no_rate"
@@ -445,6 +447,7 @@ def update_forecast(
         windows[window_key] = {
             "accounts": int(item.get("accounts") or 0),
             "coverage": round(coverage, 4),
+            "rate_coverage": round(rate_coverage, 4),
             "remaining_units": round(remaining, 6),
             "capacity_units_per_account": round(
                 float(item.get("capacity_units_sum") or 0.0) / max(1, int(item.get("accounts") or 0)),
@@ -477,7 +480,9 @@ def update_forecast(
         confidence = "ready" if windows[window_key]["coverage"] >= 0.8 else "low"
     elif windows:
         eta, window_key = None, None
-        overall_status = "insufficient" if sample_count < min_required else "no_rate"
+        overall_status = "insufficient" if any(
+            item.get("status") == "insufficient" for item in windows.values()
+        ) else "no_rate"
         confidence = "insufficient" if overall_status == "insufficient" else "low"
     else:
         eta, window_key = None, None
