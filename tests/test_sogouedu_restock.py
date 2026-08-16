@@ -376,6 +376,7 @@ class SogouRestockTests(unittest.TestCase):
             return active_rows if kwargs.get("status") == "active" else all_rows
 
         with patch.object(restock._pool_monitor, "fetch_pool_accounts", side_effect=fetch_accounts), \
+             patch.object(restock, "collect_quota_snapshot", wraps=restock.collect_quota_snapshot) as sampled, \
              patch.object(restock, "update_forecast", return_value=(forecast_state, forecast_state["forecast"])):
             result = restock.run_restock_cycle(client=fake)
 
@@ -387,6 +388,8 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(result["action"], "forecast_not_triggered")
         self.assertEqual(result["quantity"], 0)
         self.assertEqual(fake.created, [])
+        self.assertEqual(len(sampled.call_args.args[0]), 18)
+        self.assertEqual(len(sampled.call_args.kwargs["rate_accounts"]), 30)
 
     def test_forecast_mode_fallback_only_fills_to_healthy_floor(self):
         restock.save_restock_config({

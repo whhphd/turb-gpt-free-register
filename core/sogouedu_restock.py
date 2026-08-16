@@ -321,6 +321,25 @@ def count_healthy_accounts(accounts: list[dict[str, Any]], *, now: float | None 
     return sum(1 for account in (accounts or []) if is_healthy_pool_account(account, now=now))
 
 
+def _merge_rate_accounts(accounts: list[dict[str, Any]], active_accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Overlay the latest active rows onto the full monitored pool."""
+    keyed: dict[str, dict[str, Any]] = {}
+    unkeyed: list[dict[str, Any]] = []
+    for account in accounts or []:
+        raw_id = account.get("id") or account.get("account_id") or account.get("uuid")
+        if raw_id not in (None, ""):
+            keyed[str(raw_id)] = account
+        else:
+            unkeyed.append(account)
+    for account in active_accounts or []:
+        raw_id = account.get("id") or account.get("account_id") or account.get("uuid")
+        if raw_id not in (None, ""):
+            keyed[str(raw_id)] = account
+        elif account not in unkeyed:
+            unkeyed.append(account)
+    return list(keyed.values()) + unkeyed
+
+
 def next_replenishing_state(healthy: int, cfg: dict[str, Any], current: bool) -> bool:
     if int(healthy) < int(cfg["min_healthy"]):
         return True
@@ -1245,13 +1264,16 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         )
         # The API status filter is not sufficient for the inventory count:
         # rate-limited or otherwise unschedulable rows can still be ``active``.
-        # Keep the quota forecast on the same currently healthy population.
         healthy_accounts = [account for account in active_accounts if is_healthy_pool_account(account)]
         healthy = len(healthy_accounts)
+        # Balance only includes healthy accounts. Demand rate uses the entire
+        # monitored pool, with post-recovery active rows overlaying the first
+        # full query, so a health transition cannot erase recent consumption.
+        rate_accounts = _merge_rate_accounts(accounts, active_accounts)
         # Quota sampling is the first replenishment-decision stage. Every
         # patrol uses the same current account snapshot for ETA and ordering.
         quota_state = state.get("quota_forecast") if isinstance(state.get("quota_forecast"), dict) else {}
-        quota_snapshot = collect_quota_snapshot(healthy_accounts)
+        quota_snapshot = collect_quota_snapshot(healthy_accounts, rate_accounts=rate_accounts)
         quota_state, quota_forecast = update_forecast(
             quota_state,
             quota_snapshot,
