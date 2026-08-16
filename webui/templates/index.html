@@ -7975,6 +7975,18 @@ async function codexUploadPushPoolOnFiles(ev) {
     const el = $(id);
     if (el) el.value = value == null ? '' : String(value);
   }
+  let SOGOU_RESTOCK_CONFIG_DIRTY = false;
+  function markSogouRestockConfigDirty() {
+    SOGOU_RESTOCK_CONFIG_DIRTY = true;
+  }
+  function bindSogouRestockConfigDirtyState() {
+    const section = $('#poolAdminRestockSection');
+    if (!section) return;
+    section.querySelectorAll('input, select, textarea').forEach(el => {
+      el.addEventListener('input', markSogouRestockConfigDirty);
+      el.addEventListener('change', markSogouRestockConfigDirty);
+    });
+  }
   function syncSogouRestockTriggerModeUI() {
     const mode = (($('#sogouRestockTriggerModeV2') && $('#sogouRestockTriggerModeV2').value) || 'inventory') === 'forecast' ? 'forecast' : 'inventory';
     ['#sogouRestockMinV2', '#sogouRestockTargetV2'].forEach(id => { const el = $(id); if (el) el.disabled = mode !== 'inventory'; });
@@ -8007,36 +8019,38 @@ async function codexUploadPushPoolOnFiles(ev) {
     const clock = new Date(sampledAt).toLocaleTimeString('zh-CN', { hour12: false });
     setSogouRestockForecastMeta(`${stale ? '数据过期' : '最近采样'} ${clock} · ${formatSogouRestockForecastAge(age)}`, stale);
   }
-  function renderSogouRestockStatus(status) {
+  function renderSogouRestockStatus(status, { refreshConfig = false } = {}) {
     const cfg = status && status.config || {};
     const set = (id, value) => { const el = $(id); if (el) el.textContent = value == null ? '-' : String(value); };
     const toggle = (id, value) => { const el = $(id); if (el) el.checked = !!value; };
-    toggle('#sogouRestockEnabledV2', cfg.enabled);
-    _sogouInput('#sogouRestockMonitorGroupV2', cfg.monitor_group_id);
-    _sogouInput('#sogouRestockPushGroupV2', cfg.push_group_id);
-    _sogouInput('#sogouRestockProductV2', cfg.product || 'oauth_7d');
-    _sogouInput('#sogouRestockMinV2', cfg.min_healthy);
-    _sogouInput('#sogouRestockTargetV2', cfg.target_healthy);
-    _sogouInput('#sogouRestockMaxOrderV2', cfg.max_purchase_per_order);
-    _sogouInput('#sogouRestockMonitorIntervalV2', cfg.monitor_interval_sec);
-    _sogouInput('#sogouRestockTriggerModeV2', cfg.trigger_mode || (cfg.forecast_enabled ? 'forecast' : 'inventory'));
-    _sogouInput('#sogouRestockForecastLeadV2', cfg.forecast_interrupt_minutes == null ? 20 : cfg.forecast_interrupt_minutes);
-    _sogouInput('#sogouRestockForecastTargetV2', cfg.forecast_target_minutes == null ? 25 : cfg.forecast_target_minutes);
-    _sogouInput('#sogouRestockForecastWindowV2', cfg.forecast_rate_window_minutes == null ? 10 : cfg.forecast_rate_window_minutes);
-    _sogouInput('#sogouRestockForecastSamplesV2', cfg.forecast_min_samples == null ? 3 : cfg.forecast_min_samples);
-    _sogouInput('#sogouRestockForecastSafetyV2', cfg.forecast_safety_factor == null ? 1.2 : cfg.forecast_safety_factor);
-    _sogouInput('#sogouRestockForecastFallbackQuantityV2', cfg.forecast_fallback_quantity == null ? 5 : cfg.forecast_fallback_quantity);
-    _sogouInput('#sogouRestockOrderIntervalV2', cfg.order_poll_interval_sec);
-    _sogouInput('#sogouRestockRecoveryIntervalV2', cfg.recovery_poll_interval_sec);
-    _sogouInput('#sogouRestockConcurrencyV2', cfg.concurrency);
-    _sogouInput('#sogouRestockPriorityV2', cfg.priority);
-    _sogouInput('#sogouRestockLoadV2', cfg.load_factor);
-    _sogouInput('#sogouRestockRateV2', cfg.rate_multiplier);
-    toggle('#sogouRestockPauseExpiredV2', cfg.auto_pause_on_expired);
-    _sogouInput('#sogouRestockModelsV2', (cfg.model_whitelist || []).join('\n'));
-    _sogouInput('#restockProviderPriorityV2', (cfg.provider_priority || ['sogou', 'bugteam']).join(','));
-    _sogouInput('#bugteamRestockProductV2', cfg.bugteam_product || 'team_1h');
-    _sogouInput('#restockPartialRetryLimitV2', cfg.partial_retry_limit == null ? 2 : cfg.partial_retry_limit);
+    if (refreshConfig && !SOGOU_RESTOCK_CONFIG_DIRTY) {
+      toggle('#sogouRestockEnabledV2', cfg.enabled);
+      _sogouInput('#sogouRestockMonitorGroupV2', cfg.monitor_group_id);
+      _sogouInput('#sogouRestockPushGroupV2', cfg.push_group_id);
+      _sogouInput('#sogouRestockProductV2', cfg.product || 'oauth_7d');
+      _sogouInput('#sogouRestockMinV2', cfg.min_healthy);
+      _sogouInput('#sogouRestockTargetV2', cfg.target_healthy);
+      _sogouInput('#sogouRestockMaxOrderV2', cfg.max_purchase_per_order);
+      _sogouInput('#sogouRestockMonitorIntervalV2', cfg.monitor_interval_sec);
+      _sogouInput('#sogouRestockTriggerModeV2', cfg.trigger_mode || (cfg.forecast_enabled ? 'forecast' : 'inventory'));
+      _sogouInput('#sogouRestockForecastLeadV2', cfg.forecast_interrupt_minutes == null ? 20 : cfg.forecast_interrupt_minutes);
+      _sogouInput('#sogouRestockForecastTargetV2', cfg.forecast_target_minutes == null ? 25 : cfg.forecast_target_minutes);
+      _sogouInput('#sogouRestockForecastWindowV2', cfg.forecast_rate_window_minutes == null ? 10 : cfg.forecast_rate_window_minutes);
+      _sogouInput('#sogouRestockForecastSamplesV2', cfg.forecast_min_samples == null ? 3 : cfg.forecast_min_samples);
+      _sogouInput('#sogouRestockForecastSafetyV2', cfg.forecast_safety_factor == null ? 1.2 : cfg.forecast_safety_factor);
+      _sogouInput('#sogouRestockForecastFallbackQuantityV2', cfg.forecast_fallback_quantity == null ? 5 : cfg.forecast_fallback_quantity);
+      _sogouInput('#sogouRestockOrderIntervalV2', cfg.order_poll_interval_sec);
+      _sogouInput('#sogouRestockRecoveryIntervalV2', cfg.recovery_poll_interval_sec);
+      _sogouInput('#sogouRestockConcurrencyV2', cfg.concurrency);
+      _sogouInput('#sogouRestockPriorityV2', cfg.priority);
+      _sogouInput('#sogouRestockLoadV2', cfg.load_factor);
+      _sogouInput('#sogouRestockRateV2', cfg.rate_multiplier);
+      toggle('#sogouRestockPauseExpiredV2', cfg.auto_pause_on_expired);
+      _sogouInput('#sogouRestockModelsV2', (cfg.model_whitelist || []).join('\n'));
+      _sogouInput('#restockProviderPriorityV2', (cfg.provider_priority || ['sogou', 'bugteam']).join(','));
+      _sogouInput('#bugteamRestockProductV2', cfg.bugteam_product || 'team_1h');
+      _sogouInput('#restockPartialRetryLimitV2', cfg.partial_retry_limit == null ? 2 : cfg.partial_retry_limit);
+    }
     set('#sogouRestockStatusV2', cfg.enabled ? (status.running ? '自动补池运行中' : '自动补池已开启') : '自动补池关闭');
     set('#sogouRestockCredentialV2', status.credentials_configured ? '已配置' : '未配置');
     set('#bugteamRestockCredentialV2', status.providers && status.providers.bugteam ? '已配置' : '未配置');
@@ -8091,7 +8105,7 @@ async function codexUploadPushPoolOnFiles(ev) {
     SOGOU_RESTOCK_STATUS_LOADING = true;
     try {
       const status = await api('/api/pool-admin/sogou-restock');
-      renderSogouRestockStatus(status);
+      renderSogouRestockStatus(status, { refreshConfig: false });
     } catch (err) {
       renderSogouRestockForecastMeta({}, {}, true);
       if (notify) showToast('刷新自动补池状态失败: ' + err.message);
@@ -8204,13 +8218,13 @@ async function codexUploadPushPoolOnFiles(ev) {
       SOGOU_RESTOCK_LOG_TIMER = setInterval(loadSogouRestockLogs, SOGOU_RESTOCK_LOG_INTERVAL_MS);
     }
   }
-  async function loadSogouRestock() {
+  async function loadSogouRestock({ refreshConfig = true } = {}) {
     try {
       const [status, orders] = await Promise.all([
         api('/api/pool-admin/sogou-restock'),
         api('/api/pool-admin/sogou-restock/orders?limit=30'),
       ]);
-      renderSogouRestockStatus(status);
+      renderSogouRestockStatus(status, { refreshConfig });
       renderSogouRestockOrders(orders.items || []);
     } catch (err) {
       showToast('加载自动补池失败: ' + err.message);
@@ -8244,15 +8258,16 @@ async function codexUploadPushPoolOnFiles(ev) {
     if (btn) btn.disabled = true;
     try {
       await api('/api/pool-admin/sogou-restock/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(sogouRestockConfigPayload()) });
+      SOGOU_RESTOCK_CONFIG_DIRTY = false;
       showToast('自动补池配置已保存');
-      await loadSogouRestock();
+      await loadSogouRestock({ refreshConfig: true });
     } catch (err) { showToast('保存自动补池配置失败: ' + err.message); }
     finally { if (btn) btn.disabled = false; }
   }
   async function runSogouRestock() {
     const btn = $('#btnSogouRestockRunV2');
     if (btn) btn.disabled = true;
-    try { const r = await api('/api/pool-admin/sogou-restock/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); showToast(r.error || '自动补池执行完成'); await loadSogouRestock(); await loadSogouRestockLogs(); }
+    try { const r = await api('/api/pool-admin/sogou-restock/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); showToast(r.error || '自动补池执行完成'); await loadSogouRestock({ refreshConfig: false }); await loadSogouRestockLogs(); }
     catch (err) { showToast('自动补池执行失败: ' + err.message); }
     finally { if (btn) btn.disabled = false; }
   }
@@ -8266,6 +8281,7 @@ async function codexUploadPushPoolOnFiles(ev) {
   bind('btnSogouRestockSaveV2', saveSogouRestock);
   bind('btnSogouRestockRunV2', runSogouRestock);
   bind('btnSogouRestockConnectionV2', testSogouRestockConnection);
+  bindSogouRestockConfigDirtyState();
   const triggerMode = $('#sogouRestockTriggerModeV2');
   if (triggerMode) triggerMode.addEventListener('change', syncSogouRestockTriggerModeUI);
   document.addEventListener('visibilitychange', syncSogouRestockLogPolling);

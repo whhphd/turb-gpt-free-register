@@ -44,6 +44,13 @@ class SogouRestockLiveLogUiTests(unittest.TestCase):
         self.assertIn("provider_retry_scheduled: '同供应商重试'", self.source)
         self.assertIn("provider_fallback_scheduled: '切换兜底供应商'", self.source)
 
+    def test_status_polling_does_not_overwrite_unsaved_config(self) -> None:
+        self.assertIn("let SOGOU_RESTOCK_CONFIG_DIRTY = false;", self.source)
+        self.assertIn("if (refreshConfig && !SOGOU_RESTOCK_CONFIG_DIRTY)", self.source)
+        self.assertIn("renderSogouRestockStatus(status, { refreshConfig: false });", self.source)
+        self.assertIn("el.addEventListener('input', markSogouRestockConfigDirty);", self.source)
+        self.assertIn("SOGOU_RESTOCK_CONFIG_DIRTY = false;", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
