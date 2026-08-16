@@ -66,6 +66,21 @@ class BugTeamClientTests(unittest.TestCase):
         self.assertEqual(kwargs["json"], {"product": "team_1h", "quantity": 2})
         self.assertEqual(kwargs["headers"]["Idempotency-Key"], "idem-1")
 
+    def test_cancel_order_uses_confirmed_customer_endpoint(self):
+        self.session.request.return_value = _response(
+            200, {"order_id": "order-1", "state": "cancelled"}
+        )
+        body = self.client.cancel_order("order-1")
+
+        self.assertEqual(body["state"], "cancelled")
+        call = self.session.request.call_args
+        self.assertEqual(call.args[0], "POST")
+        self.assertEqual(
+            call.args[1],
+            "https://bugteam.example/api/customer/pickup/orders/order-1/cancel",
+        )
+        self.assertEqual(call.kwargs["json"], {})
+
     def test_429_retries_after_header(self):
         self.session.request.side_effect = [
             _response(429, {"error": "slow"}, {"Retry-After": "1.5"}),

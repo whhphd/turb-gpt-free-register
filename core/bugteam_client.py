@@ -257,6 +257,15 @@ class BugTeamClient:
             self._request_json("GET", status_url or f"/api/customer/pickup/orders/{order_id}")
         )
 
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        body = self._request_json(
+            "POST",
+            f"/api/customer/pickup/orders/{order_id}/cancel",
+            json_body={},
+            retry_network=False,
+        )
+        return self._as_dict(body)
+
     def download_order(self, order_id: str, *, format: str = "sub2") -> dict[str, Any]:
         body = self._request_json(
             "GET",
