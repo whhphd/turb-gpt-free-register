@@ -205,9 +205,7 @@ def _account_key(account: dict[str, Any], index: int) -> str:
     return "hash:" + hashlib.sha256(stable.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
-def collect_quota_snapshot(accounts: list[dict[str, Any]], *, sampled_at: float | None = None) -> dict[str, Any]:
-    """Create a credential-free snapshot suitable for persistence."""
-    snapshot_at = float(sampled_at if sampled_at is not None else time.time())
+def _quota_rows(accounts: list[dict[str, Any]], snapshot_at: float) -> dict[str, dict[str, dict[str, Any]]]:
     rows: dict[str, dict[str, dict[str, Any]]] = {}
     for index, account in enumerate(accounts or []):
         windows = extract_quota_windows(account)
@@ -217,11 +215,31 @@ def collect_quota_snapshot(accounts: list[dict[str, Any]], *, sampled_at: float 
                     window["usage_updated_at"] = snapshot_at
                     window["usage_updated_at_observed"] = False
             rows[_account_key(account, index)] = windows
+    return rows
+
+
+def collect_quota_snapshot(
+    accounts: list[dict[str, Any]],
+    *,
+    sampled_at: float | None = None,
+    rate_accounts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Create a credential-free snapshot suitable for persistence.
+
+    ``accounts`` supplies the currently usable balance. ``rate_accounts`` may
+    include unhealthy accounts from the same monitored pool so account churn
+    does not erase observed demand from the sliding consumption rate.
+    """
+    snapshot_at = float(sampled_at if sampled_at is not None else time.time())
+    rows = _quota_rows(accounts, snapshot_at)
+    rate_rows = rows if rate_accounts is None else _quota_rows(rate_accounts, snapshot_at)
     return {
         "sampled_at": snapshot_at,
         "accounts": rows,
+        "rate_accounts": rate_rows,
         "account_count": len(accounts or []),
         "quota_account_count": len(rows),
+        "rate_account_count": len(rate_rows),
     }
 
 
@@ -294,6 +312,16 @@ def _history_from_state(previous_state: dict[str, Any], current: dict[str, Any])
     return [unique[key] for key in sorted(unique)]
 
 
+def _snapshot_rate_accounts(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    rate_accounts = snapshot.get("rate_accounts")
+    if isinstance(rate_accounts, dict):
+        return rate_accounts
+    accounts = snapshot.get("accounts")
+    return accounts if isinstance(accounts, dict) else {}
+
+
 def _consumption_over_history(
     account_key: str,
     window_key: str,
@@ -301,7 +329,7 @@ def _consumption_over_history(
 ) -> tuple[float, float, int, int, bool]:
     raw_observations: list[tuple[float, bool, dict[str, Any]]] = []
     for snapshot in history:
-        accounts = snapshot.get("accounts") if isinstance(snapshot, dict) else {}
+        accounts = _snapshot_rate_accounts(snapshot)
         window = accounts.get(account_key, {}).get(window_key) if isinstance(accounts, dict) else None
         if not isinstance(window, dict):
             continue
@@ -370,12 +398,12 @@ def update_forecast(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Update a per-window sliding-rate forecast.
 
-    The current snapshot supplies the remaining capacity for every healthy
-    account.  Consumption is measured only for accounts present at both ends
-    of the sliding window, so a batch import or a sudden account failure cannot
-    fabricate a rate spike.  Consecutive samples are accumulated to preserve
-    usage across quota resets inside the window; ETA is the minimum of all
-    active quota windows.
+    The current snapshot's ``accounts`` supplies remaining capacity for every
+    healthy account. Consumption uses ``rate_accounts`` from the full monitored
+    pool so a health transition cannot make observed demand disappear. New
+    accounts still need observations at both ends of the sliding window.
+    Consecutive samples preserve usage across quota resets; ETA is the minimum
+    of all active quota windows.
     """
     previous_state = previous_state if isinstance(previous_state, dict) else {}
     current = snapshot if isinstance(snapshot, dict) else {"sampled_at": time.time(), "accounts": {}, "account_count": 0}
@@ -400,9 +428,12 @@ def update_forecast(
     sample_count = int(previous_state.get("sample_count") or 0) + 1
     current_accounts = current.get("accounts") if isinstance(current.get("accounts"), dict) else {}
     oldest_accounts = oldest.get("accounts") if isinstance(oldest.get("accounts"), dict) else {}
-    cohort_keys = set(current_accounts).intersection(oldest_accounts)
-    new_account_count = max(0, len(current_accounts) - len(cohort_keys))
-    removed_account_count = max(0, len(oldest_accounts) - len(cohort_keys))
+    remaining_cohort_keys = set(current_accounts).intersection(oldest_accounts)
+    new_account_count = max(0, len(current_accounts) - len(remaining_cohort_keys))
+    removed_account_count = max(0, len(oldest_accounts) - len(remaining_cohort_keys))
+    current_rate_accounts = _snapshot_rate_accounts(current)
+    oldest_rate_accounts = _snapshot_rate_accounts(oldest)
+    rate_cohort_keys = set(current_rate_accounts).intersection(oldest_rate_accounts)
     aggregate = _aggregate(current)
     windows: dict[str, dict[str, Any]] = {}
     next_rates: dict[str, dict[str, Any]] = {}
@@ -419,10 +450,10 @@ def update_forecast(
         rate_samples = 0
         cohort_window_accounts = sum(
             1
-            for account_key in cohort_keys
-            if isinstance(current_accounts.get(account_key, {}).get(window_key), dict)
+            for account_key in rate_cohort_keys
+            if isinstance(current_rate_accounts.get(account_key, {}).get(window_key), dict)
         )
-        for account_key in cohort_keys:
+        for account_key in rate_cohort_keys:
             value, account_rate, resets, account_samples, observed = _consumption_over_history(
                 account_key,
                 window_key,

@@ -301,6 +301,38 @@ class QuotaForecastTests(unittest.TestCase):
         self.assertAlmostEqual(window["rate_units_per_min"], 0.01, places=6)
         self.assertAlmostEqual(window["remaining_units"], 1.7, places=6)
 
+    def test_unhealthy_account_keeps_contributing_to_pool_demand_rate(self):
+        def account(account_id, used):
+            return {
+                "id": account_id,
+                "extra": {
+                    "codex_7d_used_percent": used,
+                    "codex_7d_window_minutes": 10080,
+                    "codex_7d_reset_after_seconds": 600000,
+                },
+            }
+
+        first_rows = [account(1, 0), account(2, 0)]
+        first = collect_quota_snapshot(first_rows, rate_accounts=first_rows, sampled_at=0)
+        state, _ = update_forecast(None, first, min_samples=2, safety_factor=1.0)
+
+        healthy_rows = [account(1, 10)]
+        all_rows = [account(1, 10), account(2, 10)]
+        second = collect_quota_snapshot(
+            healthy_rows,
+            rate_accounts=all_rows,
+            sampled_at=600,
+        )
+        _, forecast = update_forecast(state, second, min_samples=2, safety_factor=1.0)
+        window = forecast["windows"]["10080m"]
+
+        self.assertEqual(window["accounts"], 1)
+        self.assertEqual(window["rate_account_population"], 2)
+        self.assertEqual(window["removed_accounts"], 1)
+        self.assertAlmostEqual(window["remaining_units"], 0.9, places=6)
+        self.assertAlmostEqual(window["rate_units_per_min"], 0.02, places=6)
+        self.assertAlmostEqual(window["eta_minutes"], 45.0, places=3)
+
     def test_rate_uses_only_the_configured_sliding_window(self):
         def sample(used, at):
             return collect_quota_snapshot([{
