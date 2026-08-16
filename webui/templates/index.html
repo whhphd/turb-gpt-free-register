@@ -8079,10 +8079,13 @@ async function codexUploadPushPoolOnFiles(ev) {
     </tr>`).join('') || '<tr><td colspan="6" style="color:#c0c4cc">暂无订单记录</td></tr>';
   }
   const SOGOU_RESTOCK_STATUS_INTERVAL_MS = 5000;
+  const SOGOU_RESTOCK_ORDERS_INTERVAL_MS = 5000;
   const SOGOU_RESTOCK_LOG_INTERVAL_MS = 2000;
   let SOGOU_RESTOCK_STATUS_TIMER = null;
+  let SOGOU_RESTOCK_ORDERS_TIMER = null;
   let SOGOU_RESTOCK_LOG_TIMER = null;
   let SOGOU_RESTOCK_STATUS_LOADING = false;
+  let SOGOU_RESTOCK_ORDERS_LOADING = false;
   let SOGOU_RESTOCK_LOG_LOADING = false;
   let SOGOU_RESTOCK_LOG_SIGNATURE = '';
 
@@ -8125,6 +8128,32 @@ async function codexUploadPushPoolOnFiles(ev) {
     if (!SOGOU_RESTOCK_STATUS_TIMER) {
       loadSogouRestockStatus();
       SOGOU_RESTOCK_STATUS_TIMER = setInterval(loadSogouRestockStatus, SOGOU_RESTOCK_STATUS_INTERVAL_MS);
+    }
+  }
+  async function loadSogouRestockOrders({ notify = false } = {}) {
+    if (SOGOU_RESTOCK_ORDERS_LOADING || !isSogouRestockLogVisible()) return;
+    SOGOU_RESTOCK_ORDERS_LOADING = true;
+    try {
+      const orders = await api('/api/pool-admin/sogou-restock/orders?limit=30');
+      renderSogouRestockOrders(orders.items || []);
+    } catch (err) {
+      if (notify) showToast('刷新自动补池订单失败: ' + err.message);
+    } finally {
+      SOGOU_RESTOCK_ORDERS_LOADING = false;
+    }
+  }
+  function stopSogouRestockOrdersPolling() {
+    if (SOGOU_RESTOCK_ORDERS_TIMER) clearInterval(SOGOU_RESTOCK_ORDERS_TIMER);
+    SOGOU_RESTOCK_ORDERS_TIMER = null;
+  }
+  function syncSogouRestockOrdersPolling() {
+    if (!isSogouRestockLogVisible()) {
+      stopSogouRestockOrdersPolling();
+      return;
+    }
+    if (!SOGOU_RESTOCK_ORDERS_TIMER) {
+      loadSogouRestockOrders();
+      SOGOU_RESTOCK_ORDERS_TIMER = setInterval(loadSogouRestockOrders, SOGOU_RESTOCK_ORDERS_INTERVAL_MS);
     }
   }
   function formatSogouRestockLogTime(value) {
@@ -8209,6 +8238,7 @@ async function codexUploadPushPoolOnFiles(ev) {
   }
   function syncSogouRestockLogPolling() {
     syncSogouRestockStatusPolling();
+    syncSogouRestockOrdersPolling();
     if (!isSogouRestockLogVisible()) {
       stopSogouRestockLogPolling();
       return;
@@ -8287,6 +8317,7 @@ async function codexUploadPushPoolOnFiles(ev) {
   document.addEventListener('visibilitychange', syncSogouRestockLogPolling);
   window.addEventListener('pagehide', stopSogouRestockLogPolling);
   window.addEventListener('pagehide', stopSogouRestockStatusPolling);
+  window.addEventListener('pagehide', stopSogouRestockOrdersPolling);
 
   function _fabStatusLabel(st) {
     const m = { pending:'待运行', running:'运行中', done:'完成', partial:'部分成功', failed:'失败' };

@@ -51,6 +51,14 @@ class SogouRestockLiveLogUiTests(unittest.TestCase):
         self.assertIn("el.addEventListener('input', markSogouRestockConfigDirty);", self.source)
         self.assertIn("SOGOU_RESTOCK_CONFIG_DIRTY = false;", self.source)
 
+    def test_order_table_polls_without_touching_config(self) -> None:
+        self.assertIn("const SOGOU_RESTOCK_ORDERS_INTERVAL_MS = 5000;", self.source)
+        self.assertIn("if (SOGOU_RESTOCK_ORDERS_LOADING || !isSogouRestockLogVisible()) return;", self.source)
+        self.assertIn("const orders = await api('/api/pool-admin/sogou-restock/orders?limit=30');", self.source)
+        self.assertIn("renderSogouRestockOrders(orders.items || []);", self.source)
+        self.assertIn("setInterval(loadSogouRestockOrders, SOGOU_RESTOCK_ORDERS_INTERVAL_MS)", self.source)
+        self.assertIn("window.addEventListener('pagehide', stopSogouRestockOrdersPolling)", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
