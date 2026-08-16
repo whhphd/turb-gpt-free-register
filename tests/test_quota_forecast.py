@@ -293,7 +293,10 @@ class QuotaForecastTests(unittest.TestCase):
         ], sampled_at=600)
         _, forecast = update_forecast(state, second, min_samples=2, safety_factor=1.0)
         window = forecast["windows"]["10080m"]
+        self.assertEqual(forecast["status"], "ready")
         self.assertEqual(window["matched_accounts"], 1)
+        self.assertEqual(window["rate_account_population"], 1)
+        self.assertEqual(window["rate_coverage"], 1.0)
         self.assertEqual(window["new_accounts"], 1)
         self.assertAlmostEqual(window["rate_units_per_min"], 0.01, places=6)
         self.assertAlmostEqual(window["remaining_units"], 1.7, places=6)

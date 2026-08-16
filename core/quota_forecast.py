@@ -417,6 +417,11 @@ def update_forecast(
         matched_accounts = 0
         reset_count = 0
         rate_samples = 0
+        cohort_window_accounts = sum(
+            1
+            for account_key in cohort_keys
+            if isinstance(current_accounts.get(account_key, {}).get(window_key), dict)
+        )
         for account_key in cohort_keys:
             value, account_rate, resets, account_samples, observed = _consumption_over_history(
                 account_key,
@@ -434,7 +439,7 @@ def update_forecast(
         remaining = max(0.0, float(item.get("remaining_units") or 0.0))
         eta = remaining / planned_rate if planned_rate > 1e-12 else None
         coverage = float(item.get("accounts") or 0) / max(1, total_current_accounts)
-        rate_coverage = matched_accounts / max(1, int(item.get("accounts") or 0))
+        rate_coverage = matched_accounts / max(1, cohort_window_accounts)
         required_rate_samples = max(1, min_required - 1)
         if rate_samples < required_rate_samples or rate_coverage < 0.8:
             status = "insufficient"
@@ -460,6 +465,7 @@ def update_forecast(
             "status": status,
             "elapsed_minutes": round(elapsed_minutes, 4) if elapsed_minutes else None,
             "matched_accounts": matched_accounts,
+            "rate_account_population": cohort_window_accounts,
             "rate_samples": rate_samples,
             "new_accounts": new_account_count,
             "removed_accounts": removed_account_count,
