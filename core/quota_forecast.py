@@ -473,7 +473,7 @@ def update_forecast(
     # Rate history length and reliable-snapshot lifetime solve different problems.
     # Keep a recent reliable rate through short-lived account churn even when the
     # operator chooses a small sliding window for responsiveness.
-    reliable_rate_ttl_minutes = max(30.0, float(rate_window_minutes or 10))
+    reliable_rate_ttl_minutes = max(60.0, float(rate_window_minutes or 10))
 
     for window_key, item in aggregate.items():
         consumed = 0.0
