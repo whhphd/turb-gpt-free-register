@@ -95,6 +95,12 @@ class SogouRestockTests(unittest.TestCase):
         legacy = restock.normalize_restock_config({"forecast_enabled": True})
         self.assertEqual(legacy["trigger_mode"], "forecast")
 
+    def test_forecast_fallback_quantity_defaults_to_five(self):
+        cfg = restock.normalize_restock_config({"trigger_mode": "forecast"})
+        self.assertEqual(cfg["forecast_fallback_quantity"], 5)
+        cfg = restock.normalize_restock_config({"trigger_mode": "forecast", "forecast_fallback_quantity": 0})
+        self.assertEqual(cfg["forecast_fallback_quantity"], 5)
+
     def test_forecast_purchase_quantity_does_not_use_inventory_target(self):
         cfg = restock.normalize_restock_config({
             "trigger_mode": "forecast",
@@ -311,6 +317,73 @@ class SogouRestockTests(unittest.TestCase):
             "total": 2,
             "checked_at": result["started_at"],
         })
+
+    def test_forecast_mode_bootstraps_when_no_schedulable_oauth_accounts(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "trigger_mode": "forecast",
+            "min_healthy": 5,
+            "target_healthy": 10,
+            "max_purchase_per_order": 10,
+            "forecast_fallback_quantity": 5,
+        })
+        fake = FakeClient()
+        all_rows = [{"id": 1, "status": "active", "schedulable": True}]
+
+        def fetch_accounts(**kwargs):
+            return [] if kwargs.get("status") == "active" else all_rows
+
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", side_effect=fetch_accounts):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["healthy"], 0)
+        self.assertFalse(result["forecast_trigger"])
+        self.assertTrue(result["forecast_fallback"])
+        self.assertEqual(result["forecast_fallback_reason"], "empty_pool")
+        self.assertEqual(result["quantity"], 5)
+        self.assertEqual(fake.created[0][1], 5)
+
+    def test_forecast_mode_falls_back_on_large_sampled_availability_drop(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "trigger_mode": "forecast",
+            "max_purchase_per_order": 10,
+            "forecast_fallback_quantity": 5,
+        })
+        state = restock._load_state()
+        state["quota_forecast"] = {
+            "last_sampled_at": 0,
+            "previous_snapshot": {"account_count": 30},
+        }
+        restock._save_state(state)
+        fake = FakeClient()
+        all_rows = [{"id": index, "status": "active", "schedulable": True} for index in range(30)]
+        active_rows = all_rows[:18]
+        forecast_state = {
+            "last_sampled_at": 100,
+            "previous_snapshot": {"account_count": 30},
+            "forecast": {
+                "status": "ready",
+                "eta_minutes": 45,
+                "windows": {},
+                "removed_accounts": 12,
+            },
+        }
+
+        def fetch_accounts(**kwargs):
+            return active_rows if kwargs.get("status") == "active" else all_rows
+
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", side_effect=fetch_accounts), \
+             patch.object(restock, "update_forecast", return_value=(forecast_state, forecast_state["forecast"])):
+            result = restock.run_restock_cycle(client=fake)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["healthy"], 18)
+        self.assertFalse(result["forecast_trigger"])
+        self.assertTrue(result["forecast_fallback"])
+        self.assertEqual(result["forecast_fallback_reason"], "availability_drop")
+        self.assertEqual(result["quantity"], 5)
 
     def test_cycle_counts_active_accounts_after_recovery_before_ordering(self):
         restock.save_restock_config({

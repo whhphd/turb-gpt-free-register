@@ -3216,6 +3216,7 @@
           <label class="fld">速率滑动窗口（分钟）<input type="number" min="1" max="1440" id="sogouRestockForecastWindowV2"></label>
           <label class="fld">最少有效采样次数<input type="number" min="3" max="1000" id="sogouRestockForecastSamplesV2"></label>
           <label class="fld">速率安全系数<input type="number" min="1" max="5" step="0.05" id="sogouRestockForecastSafetyV2"></label>
+          <label class="fld">预测异常兜底数量<input type="number" min="1" max="1000" id="sogouRestockForecastFallbackQuantityV2"></label>
           <label class="fld">订单轮询间隔（秒）<input type="number" min="1" id="sogouRestockOrderIntervalV2"></label>
           <label class="fld">恢复轮询间隔（秒）<input type="number" min="1" id="sogouRestockRecoveryIntervalV2"></label>
           <label class="fld">推池并发<input type="number" min="1" id="sogouRestockConcurrencyV2"></label>
@@ -7971,7 +7972,7 @@ async function codexUploadPushPoolOnFiles(ev) {
   function syncSogouRestockTriggerModeUI() {
     const mode = (($('#sogouRestockTriggerModeV2') && $('#sogouRestockTriggerModeV2').value) || 'inventory') === 'forecast' ? 'forecast' : 'inventory';
     ['#sogouRestockMinV2', '#sogouRestockTargetV2'].forEach(id => { const el = $(id); if (el) el.disabled = mode !== 'inventory'; });
-    ['#sogouRestockForecastLeadV2', '#sogouRestockForecastTargetV2', '#sogouRestockForecastSampleV2', '#sogouRestockForecastWindowV2', '#sogouRestockForecastSamplesV2', '#sogouRestockForecastSafetyV2'].forEach(id => { const el = $(id); if (el) el.disabled = mode !== 'forecast'; });
+    ['#sogouRestockForecastLeadV2', '#sogouRestockForecastTargetV2', '#sogouRestockForecastSampleV2', '#sogouRestockForecastWindowV2', '#sogouRestockForecastSamplesV2', '#sogouRestockForecastSafetyV2', '#sogouRestockForecastFallbackQuantityV2'].forEach(id => { const el = $(id); if (el) el.disabled = mode !== 'forecast'; });
   }
   function setSogouRestockForecastMeta(text, stale = false) {
     const meta = $('#sogouRestockForecastMetaV2');
@@ -8019,6 +8020,7 @@ async function codexUploadPushPoolOnFiles(ev) {
     _sogouInput('#sogouRestockForecastWindowV2', cfg.forecast_rate_window_minutes == null ? 10 : cfg.forecast_rate_window_minutes);
     _sogouInput('#sogouRestockForecastSamplesV2', cfg.forecast_min_samples == null ? 3 : cfg.forecast_min_samples);
     _sogouInput('#sogouRestockForecastSafetyV2', cfg.forecast_safety_factor == null ? 1.2 : cfg.forecast_safety_factor);
+    _sogouInput('#sogouRestockForecastFallbackQuantityV2', cfg.forecast_fallback_quantity == null ? 5 : cfg.forecast_fallback_quantity);
     _sogouInput('#sogouRestockOrderIntervalV2', cfg.order_poll_interval_sec);
     _sogouInput('#sogouRestockRecoveryIntervalV2', cfg.recovery_poll_interval_sec);
     _sogouInput('#sogouRestockConcurrencyV2', cfg.concurrency);
@@ -8224,6 +8226,7 @@ async function codexUploadPushPoolOnFiles(ev) {
       forecast_interrupt_minutes: num('#sogouRestockForecastLeadV2'), forecast_target_minutes: num('#sogouRestockForecastTargetV2'), forecast_sample_interval_sec: num('#sogouRestockForecastSampleV2'),
       forecast_rate_window_minutes: num('#sogouRestockForecastWindowV2'),
       forecast_min_samples: num('#sogouRestockForecastSamplesV2'), forecast_safety_factor: num('#sogouRestockForecastSafetyV2'),
+      forecast_fallback_quantity: num('#sogouRestockForecastFallbackQuantityV2'),
       order_poll_interval_sec: num('#sogouRestockOrderIntervalV2'), recovery_poll_interval_sec: num('#sogouRestockRecoveryIntervalV2'),
       concurrency: num('#sogouRestockConcurrencyV2'), priority: num('#sogouRestockPriorityV2'), load_factor: num('#sogouRestockLoadV2'),
       rate_multiplier: num('#sogouRestockRateV2'), auto_pause_on_expired: !!($('#sogouRestockPauseExpiredV2') && $('#sogouRestockPauseExpiredV2').checked),

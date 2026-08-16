@@ -76,6 +76,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "forecast_rate_window_minutes": 10,
     "forecast_min_samples": 3,
     "forecast_safety_factor": 1.2,
+    "forecast_fallback_quantity": 5,
 }
 
 _CONFIG_KEYS = frozenset(DEFAULT_CONFIG)
@@ -141,6 +142,10 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     cfg["target_healthy"] = max(cfg["min_healthy"], cfg["target_healthy"])
     cfg["max_purchase_per_order"] = max(1, cfg["max_purchase_per_order"])
     cfg["partial_retry_limit"] = max(0, min(5, cfg["partial_retry_limit"]))
+    try:
+        cfg["forecast_fallback_quantity"] = max(1, min(1000, int(cfg.get("forecast_fallback_quantity") or 5)))
+    except (TypeError, ValueError):
+        cfg["forecast_fallback_quantity"] = 5
     for key in ("monitor_interval_sec", "order_poll_interval_sec", "recovery_poll_interval_sec"):
         try:
             cfg[key] = max(1, int(cfg.get(key) or 1))
@@ -335,6 +340,7 @@ def calculate_purchase_quantity(
     *,
     replenishing: bool,
     forecast_trigger: bool = False,
+    forecast_fallback: bool = False,
     quota_forecast: dict[str, Any] | None = None,
 ) -> int:
     if not replenishing:
@@ -343,8 +349,15 @@ def calculate_purchase_quantity(
         # Forecast mode is independent of inventory thresholds. Once the
         # remaining-quota ETA crosses the lead time, replenish only the
         # calculated shortfall to the target runway.
-        if not forecast_trigger:
+        if not forecast_trigger and not forecast_fallback:
             return 0
+        if forecast_fallback:
+            # A sudden availability drop or an empty pool has no reliable ETA.
+            # Use the explicit emergency quantity, still respecting the order cap.
+            return min(
+                max(1, int(cfg.get("forecast_fallback_quantity") or 5)),
+                max(1, int(cfg["max_purchase_per_order"])),
+            )
         forecast = quota_forecast if isinstance(quota_forecast, dict) else {}
         target_minutes = max(
             float(cfg.get("forecast_interrupt_minutes") or 0),
@@ -1274,17 +1287,43 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             and quota_forecast.get("eta_minutes") is not None
             and float(quota_forecast["eta_minutes"]) <= float(cfg["forecast_interrupt_minutes"])
         )
+        # Forecast mode normally ignores inventory thresholds. A completely
+        # empty schedulable OAuth pool is the exception: without an account we
+        # cannot collect a quota window, so waiting for an ETA would deadlock
+        # replenishment indefinitely.
+        removed_accounts = int(quota_forecast.get("removed_accounts") or 0)
+        new_accounts = int(quota_forecast.get("new_accounts") or 0)
+        previous_account_count = max(0, healthy + removed_accounts - new_accounts)
+        drop_threshold = max(2, int(previous_account_count * 0.2 + 0.999999))
+        availability_drop = bool(
+            sample_due
+            and removed_accounts >= drop_threshold
+            and previous_account_count > 0
+        )
+        forecast_fallback = bool(
+            cfg["trigger_mode"] == "forecast"
+            and not forecast_trigger
+            and sample_due
+            and (healthy <= 0 or availability_drop)
+        )
         static_replenishing = (
             next_replenishing_state(healthy, cfg, bool(state.get("replenishing")))
             if cfg["trigger_mode"] == "inventory" else False
         )
-        replenishing = bool(forecast_trigger if cfg["trigger_mode"] == "forecast" else static_replenishing)
+        replenishing = bool(
+            (forecast_trigger or forecast_fallback)
+            if cfg["trigger_mode"] == "forecast" else static_replenishing
+        )
         result["healthy"] = healthy
         result["total"] = len(accounts)
         result["trigger_mode"] = cfg["trigger_mode"]
         result["replenishing"] = replenishing
         result["static_replenishing"] = static_replenishing
         result["forecast_trigger"] = forecast_trigger
+        result["forecast_fallback"] = forecast_fallback
+        result["forecast_fallback_reason"] = (
+            "availability_drop" if availability_drop else ("empty_pool" if healthy <= 0 else "")
+        )
         result["forecast_sampled"] = sample_due
         result["quota_forecast"] = quota_forecast
         state["replenishing"] = replenishing
@@ -1299,6 +1338,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             cfg,
             replenishing=replenishing,
             forecast_trigger=forecast_trigger,
+            forecast_fallback=forecast_fallback,
             quota_forecast=quota_forecast,
         )
         result["quantity"] = quantity
@@ -1343,7 +1383,7 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
             "provider_retry_count": 0,
             "created_at": _now(),
             "status": "creating",
-            "config_snapshot": {key: cfg[key] for key in ("push_group_id", "concurrency", "priority", "load_factor", "rate_multiplier", "model_whitelist", "auto_pause_on_expired", "product", "bugteam_product", "partial_retry_limit", "provider_priority")},
+            "config_snapshot": {key: cfg[key] for key in ("push_group_id", "concurrency", "priority", "load_factor", "rate_multiplier", "model_whitelist", "auto_pause_on_expired", "product", "bugteam_product", "partial_retry_limit", "provider_priority", "forecast_fallback_quantity")},
         }
         _save_state(state)
         order_result = _process_current_order(selected_api, cfg, state)
