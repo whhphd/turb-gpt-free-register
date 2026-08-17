@@ -462,11 +462,49 @@ def update_forecast(
     oldest_rate_accounts = _snapshot_rate_accounts(oldest)
     rate_cohort_keys = set(current_rate_accounts).intersection(oldest_rate_accounts)
     aggregate = _aggregate(current)
+    total_current_accounts = max(len(current_accounts), int(current.get("account_count") or 0))
+    quota_account_count = len(current_accounts)
+    estimated_full_accounts = max(0, total_current_accounts - quota_account_count)
+    # A healthy account can briefly appear in the pool before Sub2API returns
+    # its quota fields. Reuse the last known window schema so that this account
+    # contributes a full balance immediately, while rate calculations continue
+    # to use only real quota observations.
+    if estimated_full_accounts and not aggregate:
+        aggregate = _aggregate(oldest)
+        if not aggregate:
+            prior_forecast = previous_state.get("forecast") if isinstance(previous_state, dict) else None
+            prior_windows = prior_forecast.get("windows") if isinstance(prior_forecast, dict) else None
+            if isinstance(prior_windows, dict):
+                for window_key, value in prior_windows.items():
+                    if not isinstance(value, dict):
+                        continue
+                    capacity = max(1e-12, float(value.get("capacity_units_per_account") or 1.0))
+                    aggregate[str(window_key)] = {
+                        "accounts": 0,
+                        "remaining_units": 0.0,
+                        "capacity_units_sum": 0.0,
+                        "used_percent_sum": 0.0,
+                        "window_minutes": value.get("window_minutes") or 0.0,
+                        "reset_after_seconds": [],
+                        "_fallback_capacity": capacity,
+                    }
+    if estimated_full_accounts:
+        for item in aggregate.values():
+            known_accounts = int(item.get("accounts") or 0)
+            capacity = (
+                float(item.get("capacity_units_sum") or 0.0) / known_accounts
+                if known_accounts > 0
+                else float(item.get("_fallback_capacity") or 1.0)
+            )
+            capacity = max(1e-12, capacity)
+            item["accounts"] = known_accounts + estimated_full_accounts
+            item["remaining_units"] = float(item.get("remaining_units") or 0.0) + estimated_full_accounts * capacity
+            item["capacity_units_sum"] = float(item.get("capacity_units_sum") or 0.0) + estimated_full_accounts * capacity
+            item["estimated_full_accounts"] = estimated_full_accounts
     windows: dict[str, dict[str, Any]] = {}
     next_rates: dict[str, dict[str, Any]] = {}
     valid_etas: list[tuple[float, str]] = []
     safe_factor = max(1.0, float(safety_factor or 1.0))
-    total_current_accounts = max(0, int(current.get("account_count") or 0))
     min_required = max(2, int(min_samples or 3))
     previous_reliable_rates = _reliable_rates_from_state(previous_state)
     reliable_rates = dict(previous_reliable_rates)
@@ -561,6 +599,7 @@ def update_forecast(
             "rate_samples": rate_samples,
             "new_accounts": new_account_count,
             "removed_accounts": removed_account_count,
+            "estimated_full_accounts": int(item.get("estimated_full_accounts") or 0),
             "last_delta_units": round(consumed, 6),
             "reset_count": reset_count,
         }
@@ -609,6 +648,9 @@ def update_forecast(
         "windows": windows,
         "new_accounts": new_account_count,
         "removed_accounts": removed_account_count,
+        "estimated_full_accounts": estimated_full_accounts,
+        "quota_account_count": quota_account_count,
+        "account_count": total_current_accounts,
     }
     if window_key is not None and isinstance(windows.get(window_key), dict):
         forecast["rate_source"] = windows[window_key].get("rate_source")

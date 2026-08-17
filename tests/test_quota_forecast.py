@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from pathlib import Path
 
 from core.quota_forecast import collect_quota_snapshot, extract_quota_windows, update_forecast
 
@@ -364,6 +365,35 @@ class QuotaForecastTests(unittest.TestCase):
         self.assertEqual(window["new_accounts"], 1)
         self.assertAlmostEqual(window["rate_units_per_min"], 0.01, places=6)
         self.assertAlmostEqual(window["remaining_units"], 1.7, places=6)
+
+    def test_accounts_without_windows_are_counted_as_full_without_rate_effect(self):
+        def account(account_id, used=None):
+            row = {"id": account_id}
+            if used is not None:
+                row["extra"] = {
+                    "codex_7d_used_percent": used,
+                    "codex_7d_window_minutes": 10080,
+                    "codex_7d_reset_after_seconds": 600000,
+                }
+            return row
+
+        first = collect_quota_snapshot([account(1, 20)], sampled_at=0)
+        state, _ = update_forecast(None, first, min_samples=2, safety_factor=1.0)
+        second = collect_quota_snapshot([account(1, 30), account(2)], sampled_at=600)
+        _, forecast = update_forecast(state, second, min_samples=2, safety_factor=1.0)
+        window = forecast["windows"]["10080m"]
+        self.assertEqual(forecast["estimated_full_accounts"], 1)
+        self.assertEqual(window["estimated_full_accounts"], 1)
+        self.assertEqual(window["accounts"], 2)
+        self.assertAlmostEqual(window["remaining_units"], 1.7, places=6)
+        self.assertAlmostEqual(window["rate_units_per_min"], 0.01, places=6)
+
+    def test_forecast_ui_shows_full_balance_estimate(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "webui" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn("estimated_full_accounts", source)
+        self.assertIn("无窗口按满额", source)
 
     def test_unhealthy_account_keeps_contributing_to_pool_demand_rate(self):
         def account(account_id, used):

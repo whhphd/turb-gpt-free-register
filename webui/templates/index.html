@@ -8069,7 +8069,8 @@ async function codexUploadPushPoolOnFiles(ev) {
     const forecastWindow = forecast.bottleneck_window || '-';
     const forecastEta = forecast.eta_minutes == null ? '' : ` · ${Number(forecast.eta_minutes).toFixed(1)} 分钟`;
     const forecastChurn = Object.values(forecast.windows || {}).reduce((sum, item) => sum + Number(item.new_accounts || 0) + Number(item.removed_accounts || 0), 0);
-    const forecastNote = forecastChurn ? ` · 队列变动 ${forecastChurn}` : '';
+    const forecastEstimate = Number(forecast.estimated_full_accounts || 0);
+    const forecastNote = `${forecastChurn ? ` · 队列变动 ${forecastChurn}` : ''}${forecastEstimate ? ` · 满额估算 ${forecastEstimate}` : ''}`;
     set('#sogouRestockForecastV2', forecast.status === 'ready' ? `${forecastWindow}${forecastEta}${forecastNote}` : (forecast.status === 'no_rate' ? '暂无消耗' : '采样不足'));
     renderSogouRestockForecastMeta(forecast, cfg);
     syncSogouRestockTriggerModeUI();
@@ -8222,6 +8223,7 @@ async function codexUploadPushPoolOnFiles(ev) {
     if (row.provider_retry_count != null) parts.push(`同源重试 ${row.provider_retry_count}`);
     const forecast = row.quota_forecast || {};
     if (forecast.eta_minutes != null) parts.push(`额度 ETA ${Number(forecast.eta_minutes).toFixed(1)} 分钟`);
+    if (Number(forecast.estimated_full_accounts || 0) > 0) parts.push(`无窗口按满额 ${Number(forecast.estimated_full_accounts)} 个`);
     if (row.status) parts.push(`状态 ${row.status}`);
     if (row.reserved != null && row.action !== 'partial_finalized') parts.push(`已预留 ${row.reserved}`);
     if (row.partial_ready_since) {
