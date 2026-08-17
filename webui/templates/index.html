@@ -8217,6 +8217,20 @@ async function codexUploadPushPoolOnFiles(ev) {
       parts.push(`原因 ${row.reason}`);
     }
     if (row.healthy != null || row.total != null) parts.push(`健康 ${row.healthy ?? '-'} / 总数 ${row.total ?? '-'}`);
+    const healthChange = row.health_change || {};
+    const healthDecreased = Number(healthChange.decreased || 0);
+    if (healthDecreased > 0) {
+      const healthReasonLabels = {
+        quota_exhausted: '额度窗口用尽', state_error: '状态错误/授权异常',
+        unschedulable: '显式不可调度', pool_removed: '移出号池', other: '其他不可调度',
+      };
+      const reasons = Object.entries(healthChange.reasons || {})
+        .filter(([, count]) => Number(count) > 0)
+        .map(([reason, count]) => `${healthReasonLabels[reason] || '其他不可调度'} ${Number(count)}`)
+        .join('、');
+      parts.push(`健康减少 ${healthDecreased}`);
+      if (reasons) parts.push(`原因 ${reasons}`);
+    }
     if (row.quantity != null) parts.push(`计划补入 ${row.quantity}`);
     if (row.order_id) parts.push(`订单 ${row.order_id}`);
     if (row.provider) parts.push(`供应商 ${row.provider}`);

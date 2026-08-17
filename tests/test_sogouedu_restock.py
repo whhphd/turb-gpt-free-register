@@ -91,6 +91,42 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(cfg["target_healthy"], 9)
         self.assertEqual(cfg["model_whitelist"], ["gpt-5.5"])
 
+    def test_health_snapshot_explains_lost_accounts(self):
+        previous = {
+            "accounts": {
+                key: {"healthy": True} for key in ("quota", "error", "unsched", "other", "removed")
+            }
+        }
+        current_accounts = [
+            {
+                "id": "quota",
+                "status": "active",
+                "codex_7d_used_percent": 100,
+                "codex_7d_window_minutes": 10080,
+            },
+            {"id": "error", "status": "error", "error_message": "unauthorized"},
+            {"id": "unsched", "status": "active", "schedulable": False},
+            {"id": "other", "status": "active"},
+            {"id": "new", "status": "active"},
+        ]
+        current = restock._build_health_snapshot(
+            current_accounts,
+            [{"id": "new", "status": "active"}],
+        )
+        change = restock._compare_health_snapshots(previous, current)
+
+        self.assertIsNotNone(change)
+        self.assertEqual(change["decreased"], 5)
+        self.assertEqual(change["previous_healthy"], 5)
+        self.assertEqual(change["current_healthy"], 1)
+        self.assertEqual(change["reasons"], {
+            "quota_exhausted": 1,
+            "state_error": 1,
+            "unschedulable": 1,
+            "other": 1,
+            "pool_removed": 1,
+        })
+
     def test_enabled_providers_filter_priority_and_keep_legacy_defaults(self):
         cfg = restock.normalize_restock_config({
             "provider_priority": ["bugteam", "sogou"],
@@ -1489,6 +1525,9 @@ class SogouRestockTests(unittest.TestCase):
         self.assertIn('id="restockProviderBugTeamEnabledV2"', source)
         self.assertIn("enabled_providers:", source)
         self.assertIn("至少启用一家补池供应商", source)
+        self.assertIn("健康减少 ${healthDecreased}", source)
+        self.assertIn("额度窗口用尽", source)
+        self.assertIn("状态错误/授权异常", source)
 
     def test_bugteam_completed_download_uses_same_pool_push_path(self):
         class BugTeamFake:

@@ -25,7 +25,7 @@ from core.sub2api_pool_push import (
     normalize_upload_json_to_codex_entries,
     push_prepared_accounts_to_pool,
 )
-from core.quota_forecast import collect_quota_snapshot, update_forecast
+from core.quota_forecast import collect_quota_snapshot, extract_quota_windows, update_forecast
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +235,7 @@ def _load_state() -> dict[str, Any]:
     state.setdefault("last_recovery_scan_at", None)
     state.setdefault("recovery_cursor", None)
     state.setdefault("quota_forecast", {})
+    state.setdefault("health_snapshot", None)
     try:
         state["pending_restock_quantity"] = max(0, int(state.get("pending_restock_quantity") or 0))
     except (TypeError, ValueError):
@@ -336,6 +337,98 @@ def is_healthy_pool_account(account: dict[str, Any], *, now: float | None = None
         return False
     expiry = _parse_time(account.get("expires_at") or account.get("expired") or (account.get("credentials") or {}).get("expires_at"))
     return expiry is None or expiry > (now if now is not None else time.time())
+
+
+_HEALTH_ERROR_STATUSES = {"error", "unauthorized", "invalid", "banned", "deleted"}
+
+
+def _pool_account_key(account: dict[str, Any]) -> str:
+    """Return the stable pool ID used for health comparisons."""
+    if not isinstance(account, dict):
+        return ""
+    raw_id = account.get("id") or account.get("account_id") or account.get("uuid")
+    return str(raw_id).strip() if raw_id not in (None, "") else ""
+
+
+def _health_loss_reason(account: dict[str, Any]) -> str:
+    """Classify why an account is no longer part of the healthy inventory."""
+    if not isinstance(account, dict):
+        return "other"
+    status = str(account.get("status") or "").strip().lower()
+    error = str(
+        account.get("error_message")
+        or account.get("errorMessage")
+        or account.get("last_error")
+        or ""
+    ).strip()
+    if status in _HEALTH_ERROR_STATUSES or error:
+        return "state_error"
+    windows = extract_quota_windows(account)
+    if any(float(window.get("used_percent") or 0.0) >= 99.999 for window in windows.values()):
+        return "quota_exhausted"
+    schedulable = account.get("schedulable")
+    if schedulable is False or str(schedulable).strip().lower() == "false":
+        return "unschedulable"
+    if account.get("temp_unschedulable_reason") or account.get("tempUnschedulableReason"):
+        return "unschedulable"
+    return "other"
+
+
+def _build_health_snapshot(
+    accounts: list[dict[str, Any]],
+    healthy_accounts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a privacy-safe current health snapshot keyed by pool account ID."""
+    healthy_ids = {_pool_account_key(account) for account in healthy_accounts or []}
+    healthy_ids.discard("")
+    rows: dict[str, dict[str, Any]] = {}
+    for account in accounts or []:
+        key = _pool_account_key(account)
+        if not key:
+            continue
+        is_healthy = key in healthy_ids
+        row: dict[str, Any] = {"healthy": is_healthy}
+        if not is_healthy:
+            row["reason"] = _health_loss_reason(account)
+        rows[key] = row
+    for account in healthy_accounts or []:
+        key = _pool_account_key(account)
+        if key and key not in rows:
+            rows[key] = {"healthy": True}
+    return {"checked_at": _now(), "accounts": rows}
+
+
+def _compare_health_snapshots(
+    previous: Any,
+    current: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Summarize healthy accounts lost since the previous patrol."""
+    if not isinstance(previous, dict) or not isinstance(previous.get("accounts"), dict):
+        return None
+    previous_rows = previous["accounts"]
+    current_rows = current.get("accounts") if isinstance(current, dict) else {}
+    if not isinstance(current_rows, dict):
+        current_rows = {}
+    previous_healthy = {
+        key for key, row in previous_rows.items()
+        if isinstance(row, dict) and row.get("healthy") is True
+    }
+    current_healthy = {
+        key for key, row in current_rows.items()
+        if isinstance(row, dict) and row.get("healthy") is True
+    }
+    lost = previous_healthy - current_healthy
+    reasons: dict[str, int] = {}
+    for key in lost:
+        reason = "pool_removed" if key not in current_rows else str(current_rows[key].get("reason") or "other")
+        reasons[reason] = reasons.get(reason, 0) + 1
+    return {
+        "previous_healthy": len(previous_healthy),
+        "current_healthy": len(current_healthy),
+        "delta": len(current_healthy) - len(previous_healthy),
+        "decreased": len(lost),
+        "reasons": reasons,
+    }
 
 
 def count_healthy_accounts(accounts: list[dict[str, Any]], *, now: float | None = None) -> int:
@@ -1513,6 +1606,11 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         # rate-limited or otherwise unschedulable rows can still be ``active``.
         healthy_accounts = [account for account in active_accounts if is_healthy_pool_account(account)]
         healthy = len(healthy_accounts)
+        health_snapshot = _build_health_snapshot(accounts, healthy_accounts)
+        health_change = _compare_health_snapshots(state.get("health_snapshot"), health_snapshot)
+        state["health_snapshot"] = health_snapshot
+        if health_change is not None and health_change.get("decreased", 0) > 0:
+            result["health_change"] = health_change
         # Balance only includes healthy accounts. Demand rate uses the entire
         # monitored pool, with post-recovery active rows overlaying the first
         # full query, so a health transition cannot erase recent consumption.
