@@ -267,6 +267,12 @@ class SogouEduClient:
         body = self._request_json("POST", path, retry_network=False)
         return body if isinstance(body, dict) else {"data": body}
 
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        """取消未交付订单并释放锁款。"""
+        path = f"/api/customer/manual/orders/{order_id}/cancel"
+        body = self._request_json("POST", path, retry_network=False)
+        return body if isinstance(body, dict) else {"data": body}
+
     def list_recoveries(self, *, before_id: Any = None, limit: int = 100) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": max(1, min(100, int(limit or 100)))}
         if before_id not in (None, "", 0, "0"):

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core import sogouedu_restock as restock
+from core.sogouedu_client import SogouEduClient
 
 
 def _jwt(email: str = "sogou@example.com") -> str:
@@ -726,7 +727,16 @@ class SogouRestockTests(unittest.TestCase):
         pushed.assert_called_once()
         self.assertIsNone(restock._load_state()["current_order"])
 
-    def test_partial_order_waits_five_minutes_before_finalize(self):
+    def test_sogou_cancel_order_uses_manual_order_endpoint(self):
+        client = SogouEduClient()
+        with patch.object(client, "_request_json", return_value={"status": "cancelled"}) as request:
+            result = client.cancel_order("123")
+        request.assert_called_once_with(
+            "POST", "/api/customer/manual/orders/123/cancel", retry_network=False
+        )
+        self.assertEqual(result["status"], "cancelled")
+
+    def test_partial_order_waits_one_minute_before_finalize(self):
         restock.save_restock_config({"enabled": True, "order_poll_interval_sec": 1})
         state = restock._load_state()
         state["current_order"] = {
@@ -740,7 +750,7 @@ class SogouRestockTests(unittest.TestCase):
         with patch.object(fake, "order_status", return_value={
             "order": {"id": "partial-1", "status": "ready_partial", "reserved": 5},
             "status": "ready_partial",
-        }), patch.object(restock.time, "time", return_value=1199):
+        }), patch.object(restock.time, "time", return_value=959):
             result = restock.run_restock_cycle(client=fake)
 
         self.assertEqual(result["action"], "waiting")
@@ -762,7 +772,7 @@ class SogouRestockTests(unittest.TestCase):
         with patch.object(fake, "order_status", return_value={
             "order": {"id": "partial-2", "status": "waiting_inventory", "reserved": 5},
             "status": "waiting_inventory",
-        }), patch.object(restock.time, "time", return_value=1300):
+        }), patch.object(restock.time, "time", return_value=959):
             result = restock.run_restock_cycle(client=fake)
 
         self.assertEqual(result["action"], "waiting")
@@ -809,6 +819,42 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(current["quantity"], 5)
         self.assertEqual(current["created_at"], "1970-01-01T00:17:40+00:00")
         self.assertNotIn("order_id", current)
+
+    def test_sogou_zero_inventory_timeout_cancels_and_skips_to_next_provider(self):
+        cfg = restock.normalize_restock_config({
+            "provider_priority": ["sogou", "bugteam"],
+            "partial_retry_limit": 2,
+            "order_poll_interval_sec": 1,
+        })
+        state = restock._load_state()
+        state["current_order"] = {
+            "provider": "sogou",
+            "provider_index": 0,
+            "provider_retry_count": 0,
+            "order_id": "sogou-wait-1",
+            "quantity": 5,
+            "product": "oauth_7d",
+            "status": "waiting_inventory",
+            "created_at": 1000,
+        }
+        fake = FakeClient()
+
+        with patch.object(fake, "order_status", return_value={
+            "order_id": "sogou-wait-1",
+            "status": "waiting_inventory",
+            "reserved": 0,
+        }), patch.object(restock.time, "time", return_value=1060), patch.object(
+            restock, "_now", return_value="1970-01-01T00:17:40+00:00"
+        ):
+            result = restock._process_current_order(fake, cfg, state)
+
+        self.assertEqual(fake.cancel_calls, ["sogou-wait-1"])
+        self.assertEqual(result["action"], "provider_fallback_scheduled")
+        self.assertEqual(result["provider"], "bugteam")
+        self.assertEqual(result["reason"], "sogou:waiting_inventory_timeout")
+        current = restock._load_state()["current_order"]
+        self.assertEqual(current["provider"], "bugteam")
+        self.assertEqual(current["quantity"], 5)
 
     def test_bugteam_partial_settles_after_one_minute_then_cancels_remaining(self):
         cfg = restock.normalize_restock_config({
@@ -867,7 +913,7 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(fake.take_calls, 0)
         self.assertEqual(fake.cancel_calls, [])
 
-    def test_partial_order_finalizes_after_five_minutes(self):
+    def test_partial_order_finalizes_after_one_minute(self):
         restock.save_restock_config({"enabled": True, "order_poll_interval_sec": 1})
         state = restock._load_state()
         state["current_order"] = {
@@ -881,7 +927,7 @@ class SogouRestockTests(unittest.TestCase):
         with patch.object(fake, "order_status", return_value={
             "order": {"id": "partial-3", "status": "ready_partial", "reserved": 5},
             "status": "ready_partial",
-        }), patch.object(restock.time, "time", return_value=1200):
+        }), patch.object(restock.time, "time", return_value=960):
             result = restock.run_restock_cycle(client=fake)
 
         self.assertEqual(result["action"], "partial_finalized")

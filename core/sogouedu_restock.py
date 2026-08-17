@@ -41,9 +41,9 @@ _RUNNING = False
 _STOP = threading.Event()
 _WAKE = threading.Event()
 _WORKER: threading.Thread | None = None
-_PARTIAL_FINALIZE_WAIT_SEC = 300
+_PARTIAL_FINALIZE_WAIT_SEC = 60
 _PARTIAL_FINALIZE_RETRY_SEC = 30
-_BUGTEAM_WAITING_INVENTORY_TIMEOUT_SEC = 60
+_WAITING_INVENTORY_TIMEOUT_SEC = 60
 _BUGTEAM_PARTIAL_SETTLE_WAIT_SEC = 60
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -1022,11 +1022,11 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
             return {"handled": True, "action": "order_failed", "order_id": order_id}
         created_at = _parse_time(order.get("created_at"))
         if (
-            provider == "bugteam"
+            provider in {"bugteam", "sogou"}
             and status == "waiting_inventory"
             and reserved <= 0
             and created_at is not None
-            and time.time() - created_at >= _BUGTEAM_WAITING_INVENTORY_TIMEOUT_SEC
+            and time.time() - created_at >= _WAITING_INVENTORY_TIMEOUT_SEC
         ):
             cancelled = client.cancel_order(order_id)
             cancelled_status = _order_status(cancelled) or "cancelled"
@@ -1039,7 +1039,7 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
                 order_cfg,
                 state,
                 remaining=max(1, int(order.get("quantity") or 0)),
-                reason="bugteam:waiting_inventory_timeout",
+                reason=f"{provider}:waiting_inventory_timeout",
                 force_next_provider=True,
             )
             if followup:
@@ -1091,7 +1091,7 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
                     reserved=reserved,
                 )
                 _save_state(state)
-        if provider == "sogou" and status == "ready_partial" and reserved > 0:
+        if provider == "sogou" and status in {"ready_partial", "waiting_inventory"} and reserved > 0:
             partial_since = _parse_time(order.get("partial_ready_since"))
             if partial_since is None:
                 order["partial_ready_since"] = _now()
