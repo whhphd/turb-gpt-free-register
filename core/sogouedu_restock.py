@@ -429,11 +429,17 @@ def _account_order_delivery(state: dict[str, Any], order: dict[str, Any], delive
     return accounted
 
 
-def _provider_names(cfg: dict[str, Any]) -> list[str]:
+def _all_provider_names(cfg: dict[str, Any]) -> list[str]:
     values = cfg.get("provider_priority") if isinstance(cfg, dict) else None
     if not isinstance(values, list):
         values = ["sogou", "bugteam"]
     names = [str(value).strip().lower() for value in values if str(value).strip().lower() in {"sogou", "bugteam"}]
+    return list(dict.fromkeys(names)) or ["sogou", "bugteam"]
+
+
+def _provider_names(cfg: dict[str, Any]) -> list[str]:
+    """Return providers eligible for new orders and follow-up orders."""
+    names = _all_provider_names(cfg)
     enabled = cfg.get("enabled_providers") if isinstance(cfg, dict) else None
     if isinstance(enabled, list):
         enabled_set = {
@@ -574,7 +580,7 @@ def test_provider_connections() -> dict[str, Any]:
     """测试已配置供应商连接，只返回脱敏的连通性和商品摘要。"""
     cfg = load_restock_config()
     output: dict[str, Any] = {}
-    for provider in _provider_names(cfg):
+    for provider in _all_provider_names(cfg):
         if not _provider_configured(provider):
             output[provider] = {"configured": False, "ok": False, "error": "未配置供应商凭据"}
             continue
@@ -1477,7 +1483,9 @@ def run_restock_cycle(*, force: bool = False, client: Any = None) -> dict[str, A
         accounts = _pool_monitor.fetch_pool_accounts(group_id=cfg["monitor_group_id"], platform="openai", account_type="oauth")
         recovery_totals: dict[str, Any] = {"scanned": False, "repaired": 0, "recreated": 0}
         recovery_errors: list[dict[str, Any]] = []
-        for provider in _provider_names(cfg):
+        # Recovery/claim processing is independent from new-order routing;
+        # disabled providers still need their delivered accounts repaired.
+        for provider in _all_provider_names(cfg):
             if not _provider_configured(provider, injected_client=client if provider == "sogou" else None):
                 continue
             provider_client = _new_provider_client(provider, injected_client=client if provider == "sogou" else None)

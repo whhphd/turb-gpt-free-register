@@ -98,6 +98,7 @@ class SogouRestockTests(unittest.TestCase):
         })
         self.assertEqual(cfg["enabled_providers"], ["sogou"])
         self.assertEqual(restock._provider_names(cfg), ["sogou"])
+        self.assertEqual(restock._all_provider_names(cfg), ["bugteam", "sogou"])
 
         legacy = restock.normalize_restock_config({"provider_priority": ["bugteam", "sogou"]})
         self.assertEqual(legacy["enabled_providers"], ["sogou", "bugteam"])
@@ -105,6 +106,28 @@ class SogouRestockTests(unittest.TestCase):
 
         empty = restock.normalize_restock_config({"enabled_providers": []})
         self.assertEqual(empty["enabled_providers"], ["sogou", "bugteam"])
+
+    def test_disabled_provider_is_still_scanned_for_recoveries(self):
+        restock.save_restock_config({
+            "enabled": True,
+            "min_healthy": 0,
+            "target_healthy": 0,
+            "provider_priority": ["bugteam", "sogou"],
+            "enabled_providers": ["sogou"],
+        })
+        fake = FakeClient()
+        with patch.object(restock._pool_monitor, "fetch_pool_accounts", return_value=[]), patch.object(
+            restock, "_provider_configured", return_value=True
+        ), patch.object(restock, "_new_provider_client", return_value=fake), patch.object(
+            restock, "_process_recoveries", return_value={"scanned": True, "repaired": 0, "recreated": 0}
+        ) as recoveries:
+            result = restock.run_restock_cycle()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [call.kwargs["provider"] for call in recoveries.call_args_list],
+            ["bugteam", "sogou"],
+        )
 
     def test_worker_rechecks_immediately_after_delivery_or_followup(self):
         cfg = restock.normalize_restock_config({"monitor_interval_sec": 3, "order_poll_interval_sec": 3})
