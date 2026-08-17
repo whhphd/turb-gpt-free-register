@@ -927,15 +927,20 @@ class SogouRestockTests(unittest.TestCase):
         with patch.object(fake, "order_status", return_value={
             "order": {"id": "partial-3", "status": "ready_partial", "reserved": 5},
             "status": "ready_partial",
-        }), patch.object(restock.time, "time", return_value=960):
+        }), patch.object(fake, "finalize_order", side_effect=lambda order_id: (
+            fake.finalize_calls.append(order_id)
+            or {"order": {"id": order_id, "status": "completed", "reserved": 6}, "status": "completed"}
+        )), patch.object(restock.time, "time", return_value=960):
             result = restock.run_restock_cycle(client=fake)
 
         self.assertEqual(result["action"], "partial_finalized")
-        self.assertEqual(result["reserved"], 5)
+        self.assertEqual(result["reserved_before_finalize"], 5)
+        self.assertEqual(result["reserved"], 6)
         self.assertEqual(fake.finalize_calls, ["partial-3"])
         self.assertEqual(fake.take_calls, 0)
         current = restock._load_state()["current_order"]
         self.assertEqual(current["status"], "completed")
+        self.assertEqual(current["reserved"], 6)
         self.assertNotIn("partial_ready_since", current)
 
     def test_partial_finalized_exhausted_order_is_cleared(self):
@@ -1376,6 +1381,8 @@ class SogouRestockTests(unittest.TestCase):
         self.assertIn("const remaining = status === 'pushed'", source)
         self.assertIn("const error = status === 'pushed' ? ''", source)
         self.assertIn("provider_retry_scheduled: '同供应商重试'", source)
+        self.assertIn("结算前预留 ${row.reserved_before_finalize}", source)
+        self.assertIn("最终结算 ${row.reserved} 个", source)
 
     def test_bugteam_completed_download_uses_same_pool_push_path(self):
         class BugTeamFake:

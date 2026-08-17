@@ -8218,7 +8218,7 @@ async function codexUploadPushPoolOnFiles(ev) {
     const forecast = row.quota_forecast || {};
     if (forecast.eta_minutes != null) parts.push(`额度 ETA ${Number(forecast.eta_minutes).toFixed(1)} 分钟`);
     if (row.status) parts.push(`状态 ${row.status}`);
-    if (row.reserved != null) parts.push(`已预留 ${row.reserved}`);
+    if (row.reserved != null && row.action !== 'partial_finalized') parts.push(`已预留 ${row.reserved}`);
     if (row.partial_ready_since) {
       const started = parseDisplayDateTime(row.partial_ready_since).getTime();
       if (!Number.isNaN(started)) {
@@ -8227,7 +8227,12 @@ async function codexUploadPushPoolOnFiles(ev) {
         parts.push(`距超时处理 ${formatSogouRestockDuration(Math.max(0, 60 - elapsed))}`);
       }
     }
-    if (row.action === 'partial_finalized' && row.reserved != null) parts.push(`结算 ${row.reserved} 个`);
+    if (row.action === 'partial_finalized' && row.reserved != null) {
+      if (row.reserved_before_finalize != null && Number(row.reserved_before_finalize) !== Number(row.reserved)) {
+        parts.push(`结算前预留 ${row.reserved_before_finalize}`);
+      }
+      parts.push(`最终结算 ${row.reserved} 个`);
+    }
     const result = row.result || {};
     if (row.action === 'pushed' || result.success != null || result.failed != null) {
       parts.push(`推池成功 ${result.success || 0} / 失败 ${result.failed || 0}`);

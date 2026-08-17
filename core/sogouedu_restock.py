@@ -1118,6 +1118,15 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
                 _save_state(state)
                 finalized = client.finalize_order(order_id)
                 order["status"] = _order_status(finalized) or "finalizing"
+                final_reserved_raw = _order_value(
+                    finalized, "reserved", "reserved_count", "delivered_quantity", "delivered"
+                )
+                try:
+                    final_reserved = max(0, int(final_reserved_raw))
+                except (TypeError, ValueError):
+                    finalized_items = _order_items(finalized)
+                    final_reserved = len(finalized_items) if finalized_items else reserved
+                order["reserved"] = final_reserved
                 order["partial_finalized_at"] = _now()
                 order.pop("partial_ready_since", None)
                 order.pop("partial_finalize_last_attempt_at", None)
@@ -1127,14 +1136,15 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
                     order,
                     status="partial_finalized",
                     remote_status=order["status"],
-                    reserved=reserved,
+                    reserved=final_reserved,
                 )
                 _save_state(state)
                 return {
                     "handled": True,
                     "action": "partial_finalized",
                     "order_id": order_id,
-                    "reserved": reserved,
+                    "reserved_before_finalize": reserved,
+                    "reserved": final_reserved,
                     "status": order["status"],
                 }
         if (
