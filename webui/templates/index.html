@@ -8170,13 +8170,28 @@ async function codexUploadPushPoolOnFiles(ev) {
       forecast_waiting_sample: '等待下一次额度采样', ordered: '订单已创建', waiting: '等待订单', taken: '取货完成',
       partial_finalized: '部分结算完成', pushed: '推池完成', push_retry: '推池待重试',
       push_waiting: '等待有效账号', order_failed: '订单失败', provider_retry_scheduled: '同供应商重试',
-      provider_fallback_scheduled: '切换兜底供应商',
+      provider_fallback_scheduled: '切换兜底供应商', partial_delivery_retry: '部分取货待重试',
+      partial_cancel_retry: '取消剩余待重试',
     };
     const parts = [`[${formatSogouRestockLogTime(row.finished_at || row.started_at)}]`];
     parts.push(row.ok === false ? '失败' : (row.skipped ? '跳过' : '成功'));
     const action = actionLabels[row.action] || row.action;
     if (action) parts.push(action);
-    if (row.reason) parts.push(`原因 ${row.reason}`);
+    const partialDelivery = String(row.reason || '').match(/^(bugteam|sogou):partial_delivery:(\d+)\/(\d+)$/);
+    const waitingTimeout = String(row.reason || '').match(/^(bugteam|sogou):waiting_inventory_timeout$/);
+    if (partialDelivery) {
+      const delivered = Number(row.delivered ?? partialDelivery[2]) || 0;
+      const total = Number(partialDelivery[3]) || 0;
+      const remaining = Number(row.remaining ?? Math.max(0, total - delivered)) || 0;
+      parts.push(`部分交付 ${delivered}/${total}`);
+      parts.push(`推池成功 ${delivered} / 失败 0`);
+      parts.push(`剩余 ${remaining} 已取消并继续补单`);
+    } else if (waitingTimeout) {
+      parts.push('等待库存满 60 秒');
+      parts.push('原订单已取消');
+    } else if (row.reason) {
+      parts.push(`原因 ${row.reason}`);
+    }
     if (row.healthy != null || row.total != null) parts.push(`健康 ${row.healthy ?? '-'} / 总数 ${row.total ?? '-'}`);
     if (row.quantity != null) parts.push(`计划补入 ${row.quantity}`);
     if (row.order_id) parts.push(`订单 ${row.order_id}`);
@@ -8191,7 +8206,7 @@ async function codexUploadPushPoolOnFiles(ev) {
       if (!Number.isNaN(started)) {
         const elapsed = Math.max(0, (Date.now() - started) / 1000);
         parts.push(`部分备货已等 ${formatSogouRestockDuration(elapsed)}`);
-        parts.push(`距结算 ${formatSogouRestockDuration(Math.max(0, 300 - elapsed))}`);
+        parts.push(`距超时处理 ${formatSogouRestockDuration(Math.max(0, 60 - elapsed))}`);
       }
     }
     if (row.action === 'partial_finalized' && row.reserved != null) parts.push(`结算 ${row.reserved} 个`);

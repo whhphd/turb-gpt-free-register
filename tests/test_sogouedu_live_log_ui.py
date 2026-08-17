@@ -30,7 +30,7 @@ class SogouRestockLiveLogUiTests(unittest.TestCase):
         self.assertIn("partial_finalized: '部分结算完成'", self.source)
         self.assertIn("function formatSogouRestockDuration(seconds)", self.source)
         self.assertIn("部分备货已等 ${formatSogouRestockDuration(elapsed)}", self.source)
-        self.assertIn("距结算 ${formatSogouRestockDuration(Math.max(0, 300 - elapsed))}", self.source)
+        self.assertIn("距超时处理 ${formatSogouRestockDuration(Math.max(0, 60 - elapsed))}", self.source)
         self.assertIn("已预留 ${row.reserved}", self.source)
 
     def test_log_formatter_exposes_push_and_recovery_totals(self) -> None:
@@ -43,6 +43,15 @@ class SogouRestockLiveLogUiTests(unittest.TestCase):
         self.assertIn('id="restockPartialRetryLimitV2"', self.source)
         self.assertIn("provider_retry_scheduled: '同供应商重试'", self.source)
         self.assertIn("provider_fallback_scheduled: '切换兜底供应商'", self.source)
+
+    def test_partial_delivery_and_timeout_logs_are_human_readable(self) -> None:
+        self.assertIn("partial_delivery_retry: '部分取货待重试'", self.source)
+        self.assertIn("partial_cancel_retry: '取消剩余待重试'", self.source)
+        self.assertIn("部分交付 ${delivered}/${total}", self.source)
+        self.assertIn("推池成功 ${delivered} / 失败 0", self.source)
+        self.assertIn("剩余 ${remaining} 已取消并继续补单", self.source)
+        self.assertIn("等待库存满 60 秒", self.source)
+        self.assertIn("原订单已取消", self.source)
 
     def test_status_polling_does_not_overwrite_unsaved_config(self) -> None:
         self.assertIn("let SOGOU_RESTOCK_CONFIG_DIRTY = false;", self.source)
