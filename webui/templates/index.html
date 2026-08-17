@@ -8237,7 +8237,6 @@ async function codexUploadPushPoolOnFiles(ev) {
     if (row.provider_retry_count != null) parts.push(`同源重试 ${row.provider_retry_count}`);
     const forecast = row.quota_forecast || {};
     if (forecast.eta_minutes != null) parts.push(`额度 ETA ${Number(forecast.eta_minutes).toFixed(1)} 分钟`);
-    if (Number(forecast.estimated_full_accounts || 0) > 0) parts.push(`无窗口按满额 ${Number(forecast.estimated_full_accounts)} 个`);
     if (row.status) parts.push(`状态 ${row.status}`);
     if (row.reserved != null && row.action !== 'partial_finalized') parts.push(`已预留 ${row.reserved}`);
     if (row.partial_ready_since) {
