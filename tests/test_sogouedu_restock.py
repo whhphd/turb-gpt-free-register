@@ -810,6 +810,63 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(current["created_at"], "1970-01-01T00:17:40+00:00")
         self.assertNotIn("order_id", current)
 
+    def test_bugteam_partial_settles_after_one_minute_then_cancels_remaining(self):
+        cfg = restock.normalize_restock_config({
+            "provider_priority": ["bugteam", "sogou"],
+            "partial_retry_limit": 2,
+            "order_poll_interval_sec": 1,
+        })
+        state = restock._load_state()
+        state["current_order"] = {
+            "provider": "bugteam",
+            "provider_index": 0,
+            "provider_retry_count": 0,
+            "order_id": "bug-partial-1",
+            "quantity": 2,
+            "product": "team_1h",
+            "status": "partial",
+            "partial_ready_since": 1000,
+        }
+        restock._save_state(state)
+        fake = FakeClient()
+        with patch.object(fake, "order_status", return_value={
+            "order_id": "bug-partial-1",
+            "state": "partial",
+            "reserved": 1,
+        }), patch.object(fake, "take_order", return_value={
+            "accounts": [{"email": "bug-partial@example.com", "access_token": _jwt("bug-partial@example.com")}]
+        }), patch.object(restock, "push_prepared_accounts_to_pool", return_value={"success": 1, "failed": 0}), patch.object(
+            restock.time, "time", return_value=1060
+        ):
+            result = restock._process_current_order(fake, cfg, state)
+
+        self.assertEqual(fake.take_calls, 0)
+        self.assertEqual(fake.cancel_calls, ["bug-partial-1"])
+        self.assertEqual(result["action"], "provider_retry_scheduled")
+        current = restock._load_state()["current_order"]
+        self.assertEqual(current["provider"], "bugteam")
+        self.assertEqual(current["quantity"], 1)
+
+    def test_bugteam_partial_waits_before_one_minute(self):
+        cfg = restock.normalize_restock_config({"order_poll_interval_sec": 1})
+        state = restock._load_state()
+        state["current_order"] = {
+            "provider": "bugteam",
+            "order_id": "bug-partial-2",
+            "quantity": 2,
+            "status": "partial",
+            "partial_ready_since": 1000,
+        }
+        restock._save_state(state)
+        fake = FakeClient()
+        with patch.object(fake, "order_status", return_value={
+            "order_id": "bug-partial-2", "state": "partial", "reserved": 1,
+        }), patch.object(restock.time, "time", return_value=1059):
+            result = restock._process_current_order(fake, cfg, state)
+        self.assertEqual(result["action"], "waiting")
+        self.assertEqual(fake.take_calls, 0)
+        self.assertEqual(fake.cancel_calls, [])
+
     def test_partial_order_finalizes_after_five_minutes(self):
         restock.save_restock_config({"enabled": True, "order_poll_interval_sec": 1})
         state = restock._load_state()

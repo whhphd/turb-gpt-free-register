@@ -44,6 +44,7 @@ _WORKER: threading.Thread | None = None
 _PARTIAL_FINALIZE_WAIT_SEC = 300
 _PARTIAL_FINALIZE_RETRY_SEC = 30
 _BUGTEAM_WAITING_INVENTORY_TIMEOUT_SEC = 60
+_BUGTEAM_PARTIAL_SETTLE_WAIT_SEC = 60
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
@@ -938,6 +939,53 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
         _save_state(state)
         return {"handled": True, "action": "ordered", "order_id": order_id, "provider": provider}
 
+    # BugTeam 部分交付推池成功后，取消剩余数量可能因网络/供应商状态暂时失败。
+    # 单独保留这个状态，后续只重试取消，不会再次推送已交付账号。
+    if provider == "bugteam" and order.get("partial_cancel_pending") and not order.get("payload"):
+        try:
+            cancelled = client.cancel_order(order_id)
+            cancelled_status = _order_status(cancelled) or "cancelled"
+        except Exception as exc:
+            order["last_error"] = f"部分订单取消剩余失败: {type(exc).__name__}: {exc}"
+            order["updated_at"] = _now()
+            _upsert_order_history(
+                order,
+                status="partial_cancel_retry",
+                remote_status=order.get("remote_status") or order.get("status"),
+                delivered_quantity=int(order.get("partial_pushed_success") or 0),
+            )
+            _save_state(state)
+            return {"handled": True, "action": "partial_cancel_retry", "order_id": order_id}
+        order["status"] = cancelled_status
+        order["remote_status"] = cancelled_status
+        order["cancelled_at"] = _now()
+        order.pop("partial_cancel_pending", None)
+        remaining = max(0, int(order.get("partial_remaining_quantity") or 0))
+        order.pop("partial_remaining_quantity", None)
+        pushed_success = max(0, int(order.get("partial_pushed_success") or 0))
+        order.pop("partial_pushed_success", None)
+        if remaining > 0:
+            followup = _schedule_followup_order(
+                order,
+                order_cfg,
+                state,
+                remaining=remaining,
+                reason=f"bugteam:partial_delivery:{pushed_success}/{pushed_success + remaining}",
+            )
+            if followup:
+                followup["cancelled_status"] = cancelled_status
+                return followup
+        _upsert_order_history(
+            order,
+            status="pushed",
+            remote_status=cancelled_status,
+            delivered_quantity=pushed_success,
+            finished_at=_now(),
+        )
+        state["current_order"] = None
+        _save_state(state)
+        return {"handled": True, "action": "pushed", "order_id": order_id, "delivered": pushed_success}
+
     if not order.get("payload"):
         last_polled = _parse_time(order.get("last_polled_at"))
         if last_polled and time.time() - last_polled < cfg["order_poll_interval_sec"]:
@@ -1000,6 +1048,49 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
         if reserved <= 0:
             order.pop("partial_ready_since", None)
             order.pop("partial_finalize_last_attempt_at", None)
+        if provider == "bugteam" and status == "partial" and reserved > 0:
+            partial_since = _parse_time(order.get("partial_ready_since"))
+            if partial_since is None:
+                order["partial_ready_since"] = _now()
+                partial_since = _parse_time(order["partial_ready_since"])
+            elapsed = max(0.0, time.time() - (partial_since or time.time()))
+            last_attempt = _parse_time(order.get("partial_finalize_last_attempt_at"))
+            retry_ready = last_attempt is None or time.time() - last_attempt >= _PARTIAL_FINALIZE_RETRY_SEC
+            if elapsed >= _BUGTEAM_PARTIAL_SETTLE_WAIT_SEC and retry_ready:
+                order["partial_finalize_last_attempt_at"] = _now()
+                order["updated_at"] = _now()
+                _save_state(state)
+                try:
+                    delivery = client.take_order(order_id, take_url=order.get("take_url"))
+                    payload = _delivery_payload(delivery)
+                    if not payload:
+                        raise ValueError("BugTeam 部分订单取货响应未包含有效账号")
+                except Exception as exc:
+                    order["last_error"] = f"BugTeam 部分取货失败: {type(exc).__name__}: {exc}"
+                    order["updated_at"] = _now()
+                    _upsert_order_history(
+                        order,
+                        status="partial_delivery_retry",
+                        remote_status=status,
+                        reserved=reserved,
+                    )
+                    _save_state(state)
+                    return {"handled": True, "action": "partial_delivery_retry", "order_id": order_id}
+                order["payload"] = payload
+                order["status"] = "taken"
+                order["partial_finalized_at"] = _now()
+                order["partial_cancel_pending"] = True
+                order["partial_reserved"] = reserved
+                order.pop("partial_ready_since", None)
+                order.pop("partial_finalize_last_attempt_at", None)
+                order["updated_at"] = _now()
+                _upsert_order_history(
+                    order,
+                    status="partial_taken",
+                    remote_status=status,
+                    reserved=reserved,
+                )
+                _save_state(state)
         if provider == "sogou" and status == "ready_partial" and reserved > 0:
             partial_since = _parse_time(order.get("partial_ready_since"))
             if partial_since is None:
@@ -1073,7 +1164,11 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
             and reserved > 0
             and _order_items(response)
         )
-        if status not in {"ready", "completed", "success", "available", "fulfilled", "done"} and not partial_settled_ready:
+        if (
+            status not in {"ready", "completed", "success", "available", "fulfilled", "done"}
+            and not partial_settled_ready
+            and not order.get("payload")
+        ):
             order["updated_at"] = _now()
             _upsert_order_history(order, remote_status=status, reserved=reserved)
             _save_state(state)
@@ -1130,6 +1225,30 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
         return {"handled": True, "action": "push_retry", "order_id": order_id, "result": order["last_push"]}
     expected = max(1, int(order.get("quantity") or len(prepared)))
     if order.get("provider") and pushed_success < expected:
+        if provider == "bugteam" and order.get("partial_cancel_pending"):
+            remaining = expected - pushed_success
+            try:
+                cancelled = client.cancel_order(order_id)
+                cancelled_status = _order_status(cancelled) or "cancelled"
+            except Exception as exc:
+                order["partial_cancel_pending"] = True
+                order["partial_pushed_success"] = pushed_success
+                order["partial_remaining_quantity"] = remaining
+                order.pop("payload", None)
+                order["last_error"] = f"部分订单取消剩余失败: {type(exc).__name__}: {exc}"
+                order["updated_at"] = _now()
+                _upsert_order_history(
+                    order,
+                    status="partial_cancel_retry",
+                    remote_status=order.get("remote_status") or order.get("status"),
+                    delivered_quantity=pushed_success,
+                )
+                _save_state(state)
+                return {"handled": True, "action": "partial_cancel_retry", "order_id": order_id}
+            order["status"] = cancelled_status
+            order["remote_status"] = cancelled_status
+            order["cancelled_at"] = _now()
+            order.pop("partial_cancel_pending", None)
         _upsert_order_history(
             order,
             status="partial_pushed",
