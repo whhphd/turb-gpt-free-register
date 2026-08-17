@@ -3230,7 +3230,7 @@
           <span class="pool-monitor-meta">健康统计包含手动补入账号；错误、不可调度和过期账号不计入。额度速率只按连续采样仍存在的账号计算。</span>
         </div>
         <div class="pool-monitor-table-wrap">
-          <table class="pool-monitor-table"><thead><tr><th>订单</th><th>产品</th><th>数量</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody id="sogouRestockOrdersBodyV2"></tbody></table>
+          <table class="pool-monitor-table"><thead><tr><th>订单</th><th>产品</th><th>下单</th><th>成功</th><th>剩余</th><th>状态</th><th>时间</th><th>错误</th></tr></thead><tbody id="sogouRestockOrdersBodyV2"></tbody></table>
         </div>
         <section class="sogou-restock-log-section" aria-labelledby="sogouRestockLogTitleV2">
           <div class="sogou-restock-log-head">
@@ -8072,11 +8072,29 @@ async function codexUploadPushPoolOnFiles(ev) {
   function renderSogouRestockOrders(items) {
     const body = $('#sogouRestockOrdersBodyV2');
     if (!body) return;
-    body.innerHTML = (items || []).slice().reverse().map(row => `<tr>
-      <td>${esc(row.order_id || row.idempotency_key || '-')}</td><td>${esc(row.product || '-')}</td>
-      <td>${esc(row.quantity == null ? '-' : row.quantity)}</td><td>${esc(row.status || '-')}</td>
-      <td>${esc(formatDateTime(row.updated_at || row.created_at))}</td><td>${esc(row.last_error || '')}</td>
-    </tr>`).join('') || '<tr><td colspan="6" style="color:#c0c4cc">暂无订单记录</td></tr>';
+    const statusLabels = {
+      creating: '创建中', pending: '等待处理', waiting_inventory: '等待库存', ready_partial: '部分备货',
+      partial: '部分交付', taken: '已取货', pushed: '推池完成', push_retry: '推池重试',
+      provider_retry_scheduled: '同供应商重试', provider_fallback_scheduled: '切换兜底供应商',
+      order_failed: '订单失败', cancelled: '已取消', canceled: '已取消',
+    };
+    body.innerHTML = (items || []).slice().reverse().map(row => {
+      const status = String(row.status || '');
+      const ordered = Math.max(0, Number(row.quantity) || 0);
+      const delivered = Math.max(0, row.delivered_quantity == null
+        ? (status === 'pushed' ? ordered : 0)
+        : Number(row.delivered_quantity) || 0);
+      const remaining = status === 'pushed'
+        ? 0
+        : Math.max(0, row.remaining_quantity == null ? ordered - delivered : Number(row.remaining_quantity) || 0);
+      const error = status === 'pushed' ? '' : (row.last_error || '');
+      return `<tr>
+        <td>${esc(row.order_id || row.idempotency_key || '-')}</td><td>${esc(row.product || '-')}</td>
+        <td>${esc(ordered)}</td><td>${esc(delivered)}</td><td>${esc(remaining)}</td>
+        <td>${esc(statusLabels[status] || status || '-')}</td>
+        <td>${esc(formatDateTime(row.updated_at || row.created_at))}</td><td>${esc(error)}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="8" style="color:#c0c4cc">暂无订单记录</td></tr>';
   }
   const SOGOU_RESTOCK_STATUS_INTERVAL_MS = 5000;
   const SOGOU_RESTOCK_ORDERS_INTERVAL_MS = 5000;

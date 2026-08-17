@@ -878,17 +878,30 @@ def _schedule_followup_order(
     order["provider_retry_count"] = next_retry_count
     order["product"] = _provider_product(next_provider, cfg)
     order["quantity"] = remaining
-    order["remaining_quantity"] = remaining
     order["last_transition_reason"] = reason
     order["created_at"] = _now()
     order["updated_at"] = _now()
     for key in (
         "order_id",
         "payload",
+        "status_url",
+        "take_url",
         "last_polled_at",
+        "last_error",
+        "last_push",
+        "remote_status",
+        "reserved",
+        "delivered_quantity",
+        "remaining_quantity",
+        "transition_reason",
+        "finished_at",
         "partial_ready_since",
         "partial_finalize_last_attempt_at",
         "partial_finalized_at",
+        "partial_reserved",
+        "partial_cancel_pending",
+        "partial_pushed_success",
+        "partial_remaining_quantity",
         "cancelled_at",
         "pending_accounted_delivered",
     ):

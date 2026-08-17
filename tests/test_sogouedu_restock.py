@@ -1305,6 +1305,14 @@ class SogouRestockTests(unittest.TestCase):
             "order_id": "bugteam-1",
             "quantity": 4,
             "status": "completed",
+            "remote_status": "cancelled",
+            "reserved": 1,
+            "remaining_quantity": 3,
+            "delivered_quantity": 1,
+            "last_error": "cancelled",
+            "last_push": {"success": 1, "failed": 0},
+            "status_url": "/old-status",
+            "take_url": "/old-take",
         }
         restock._save_state(state)
 
@@ -1314,6 +1322,12 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(first["action"], "provider_retry_scheduled")
         self.assertEqual(first["provider"], "bugteam")
         self.assertEqual(first["provider_retry_count"], 1)
+        current = restock._load_state()["current_order"]
+        for stale_key in (
+            "remote_status", "reserved", "remaining_quantity", "delivered_quantity",
+            "last_error", "last_push", "status_url", "take_url",
+        ):
+            self.assertNotIn(stale_key, current)
 
         state["current_order"]["order_id"] = "bugteam-2"
         second = restock._schedule_followup_order(
@@ -1351,6 +1365,17 @@ class SogouRestockTests(unittest.TestCase):
         )
         self.assertEqual(reverse["provider"], "bugteam")
         self.assertEqual(restock._load_state()["current_order"]["product"], "team_1h")
+
+    def test_order_table_distinguishes_ordered_delivered_and_remaining(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "webui" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn("<th>下单</th><th>成功</th><th>剩余</th>", source)
+        self.assertIn("row.delivered_quantity == null", source)
+        self.assertIn("status === 'pushed' ? ordered : 0", source)
+        self.assertIn("const remaining = status === 'pushed'", source)
+        self.assertIn("const error = status === 'pushed' ? ''", source)
+        self.assertIn("provider_retry_scheduled: '同供应商重试'", source)
 
     def test_bugteam_completed_download_uses_same_pool_push_path(self):
         class BugTeamFake:
