@@ -3203,6 +3203,8 @@
           <label class="fld">推池分组 ID<input type="number" min="1" id="sogouRestockPushGroupV2"></label>
           <label class="fld">购买产品<select id="sogouRestockProductV2"><option value="oauth_7d">OAuth 7 天</option><option value="oauth_30d">OAuth 30 天</option></select></label>
           <label class="fld">供应商优先级<select id="restockProviderPriorityV2"><option value="sogou,bugteam">SogouEdu → BugTeam</option><option value="bugteam,sogou">BugTeam → SogouEdu</option></select></label>
+          <label class="fld">启用 SogouEdu<input type="checkbox" id="restockProviderSogouEnabledV2"><span class="hint">取消后不再向 SogouEdu 新下单或切换兜底</span></label>
+          <label class="fld">启用 BugTeam<input type="checkbox" id="restockProviderBugTeamEnabledV2"><span class="hint">取消后不再向 BugTeam 新下单或切换兜底</span></label>
           <label class="fld">BugTeam 商品<input type="text" id="bugteamRestockProductV2" placeholder="team_1h"></label>
           <label class="fld">同供应商补足重试<input type="number" min="0" max="5" id="restockPartialRetryLimitV2"></label>
           <label class="fld">最低健康库存<input type="number" min="0" id="sogouRestockMinV2"></label>
@@ -8048,6 +8050,9 @@ async function codexUploadPushPoolOnFiles(ev) {
       toggle('#sogouRestockPauseExpiredV2', cfg.auto_pause_on_expired);
       _sogouInput('#sogouRestockModelsV2', (cfg.model_whitelist || []).join('\n'));
       _sogouInput('#restockProviderPriorityV2', (cfg.provider_priority || ['sogou', 'bugteam']).join(','));
+      const enabledProviders = new Set(cfg.enabled_providers || ['sogou', 'bugteam']);
+      toggle('#restockProviderSogouEnabledV2', enabledProviders.has('sogou'));
+      toggle('#restockProviderBugTeamEnabledV2', enabledProviders.has('bugteam'));
       _sogouInput('#bugteamRestockProductV2', cfg.bugteam_product || 'team_1h');
       _sogouInput('#restockPartialRetryLimitV2', cfg.partial_retry_limit == null ? 2 : cfg.partial_retry_limit);
     }
@@ -8317,6 +8322,10 @@ async function codexUploadPushPoolOnFiles(ev) {
       rate_multiplier: num('#sogouRestockRateV2'), auto_pause_on_expired: !!($('#sogouRestockPauseExpiredV2') && $('#sogouRestockPauseExpiredV2').checked),
       model_whitelist: value('#sogouRestockModelsV2').split(/\r?\n|,/).map(x => x.trim()).filter(Boolean),
       provider_priority: value('#restockProviderPriorityV2').split(',').map(x => x.trim()).filter(Boolean),
+      enabled_providers: [
+        $('#restockProviderSogouEnabledV2')?.checked ? 'sogou' : '',
+        $('#restockProviderBugTeamEnabledV2')?.checked ? 'bugteam' : '',
+      ].filter(Boolean),
       bugteam_product: value('#bugteamRestockProductV2').trim() || 'team_1h',
       partial_retry_limit: num('#restockPartialRetryLimitV2'),
     };
@@ -8325,7 +8334,11 @@ async function codexUploadPushPoolOnFiles(ev) {
     const btn = $('#btnSogouRestockSaveV2');
     if (btn) btn.disabled = true;
     try {
-      await api('/api/pool-admin/sogou-restock/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(sogouRestockConfigPayload()) });
+      const payload = sogouRestockConfigPayload();
+      if (!payload.enabled_providers.length) {
+        throw new Error('至少启用一家补池供应商');
+      }
+      await api('/api/pool-admin/sogou-restock/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
       SOGOU_RESTOCK_CONFIG_DIRTY = false;
       showToast('自动补池配置已保存');
       await loadSogouRestock({ refreshConfig: true });

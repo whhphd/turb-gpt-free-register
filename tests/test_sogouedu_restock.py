@@ -91,6 +91,21 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(cfg["target_healthy"], 9)
         self.assertEqual(cfg["model_whitelist"], ["gpt-5.5"])
 
+    def test_enabled_providers_filter_priority_and_keep_legacy_defaults(self):
+        cfg = restock.normalize_restock_config({
+            "provider_priority": ["bugteam", "sogou"],
+            "enabled_providers": ["sogou"],
+        })
+        self.assertEqual(cfg["enabled_providers"], ["sogou"])
+        self.assertEqual(restock._provider_names(cfg), ["sogou"])
+
+        legacy = restock.normalize_restock_config({"provider_priority": ["bugteam", "sogou"]})
+        self.assertEqual(legacy["enabled_providers"], ["sogou", "bugteam"])
+        self.assertEqual(restock._provider_names(legacy), ["bugteam", "sogou"])
+
+        empty = restock.normalize_restock_config({"enabled_providers": []})
+        self.assertEqual(empty["enabled_providers"], ["sogou", "bugteam"])
+
     def test_worker_rechecks_immediately_after_delivery_or_followup(self):
         cfg = restock.normalize_restock_config({"monitor_interval_sec": 3, "order_poll_interval_sec": 3})
         self.assertEqual(
@@ -1414,6 +1429,27 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(reverse["provider"], "bugteam")
         self.assertEqual(restock._load_state()["current_order"]["product"], "team_1h")
 
+    def test_disabled_current_provider_skips_retry_and_uses_enabled_fallback(self):
+        cfg = restock.normalize_restock_config({
+            "provider_priority": ["bugteam", "sogou"],
+            "enabled_providers": ["sogou"],
+            "partial_retry_limit": 2,
+        })
+        state = restock._load_state()
+        order = {
+            "provider": "bugteam",
+            "provider_index": 0,
+            "provider_retry_count": 0,
+            "order_id": "bugteam-disabled-1",
+            "quantity": 2,
+            "product": "team_1h",
+        }
+        state["current_order"] = order
+        result = restock._schedule_followup_order(order, cfg, state, remaining=2, reason="bugteam:failed")
+        self.assertEqual(result["action"], "provider_fallback_scheduled")
+        self.assertEqual(result["provider"], "sogou")
+        self.assertEqual(result["provider_retry_count"], 0)
+
     def test_order_table_distinguishes_ordered_delivered_and_remaining(self):
         source = (
             Path(__file__).resolve().parents[1] / "webui" / "templates" / "index.html"
@@ -1426,6 +1462,10 @@ class SogouRestockTests(unittest.TestCase):
         self.assertIn("provider_retry_scheduled: '同供应商重试'", source)
         self.assertIn("结算前预留 ${row.reserved_before_finalize}", source)
         self.assertIn("最终结算 ${row.reserved} 个", source)
+        self.assertIn('id="restockProviderSogouEnabledV2"', source)
+        self.assertIn('id="restockProviderBugTeamEnabledV2"', source)
+        self.assertIn("enabled_providers:", source)
+        self.assertIn("至少启用一家补池供应商", source)
 
     def test_bugteam_completed_download_uses_same_pool_push_path(self):
         class BugTeamFake:

@@ -55,6 +55,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "target_healthy": 10,
     "max_purchase_per_order": 5,
     "provider_priority": ["sogou", "bugteam"],
+    # Both providers remain enabled for existing deployments. Operators can
+    # temporarily disable a provider without changing its priority order.
+    "enabled_providers": ["sogou", "bugteam"],
     "bugteam_product": str(getattr(_cfg, "BUGTEAM_PRODUCT", "team_1h") or "team_1h"),
     "partial_retry_limit": 2,
     "monitor_interval_sec": 3,
@@ -188,7 +191,19 @@ def normalize_restock_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(priority, list):
         priority = ["sogou", "bugteam"]
     priority = [str(item).strip().lower() for item in priority if str(item).strip().lower() in {"sogou", "bugteam"}]
-    cfg["provider_priority"] = list(dict.fromkeys(priority)) or ["sogou", "bugteam"]
+    priority = list(dict.fromkeys(priority)) or ["sogou", "bugteam"]
+    enabled = cfg.get("enabled_providers")
+    if not isinstance(enabled, list):
+        enabled = ["sogou", "bugteam"]
+    enabled = [str(item).strip().lower() for item in enabled if str(item).strip().lower() in {"sogou", "bugteam"}]
+    # Never persist an empty provider set: an accidental all-off save would
+    # otherwise make automatic restocking silently idle.
+    enabled = list(dict.fromkeys(enabled)) or ["sogou", "bugteam"]
+    for provider in enabled:
+        if provider not in priority:
+            priority.append(provider)
+    cfg["provider_priority"] = priority
+    cfg["enabled_providers"] = enabled
     models = cfg.get("model_whitelist")
     if not isinstance(models, list):
         models = []
@@ -419,6 +434,14 @@ def _provider_names(cfg: dict[str, Any]) -> list[str]:
     if not isinstance(values, list):
         values = ["sogou", "bugteam"]
     names = [str(value).strip().lower() for value in values if str(value).strip().lower() in {"sogou", "bugteam"}]
+    enabled = cfg.get("enabled_providers") if isinstance(cfg, dict) else None
+    if isinstance(enabled, list):
+        enabled_set = {
+            str(value).strip().lower()
+            for value in enabled
+            if str(value).strip().lower() in {"sogou", "bugteam"}
+        }
+        names = [name for name in names if name in enabled_set]
     return list(dict.fromkeys(names)) or ["sogou", "bugteam"]
 
 
@@ -830,19 +853,23 @@ def _schedule_followup_order(
     previous_order_id = str(order.get("order_id") or "")
     provider = str(order.get("provider") or "sogou").strip().lower()
     providers = _provider_names(cfg)
+    provider_enabled = provider in providers
     try:
         provider_index = providers.index(provider)
     except ValueError:
-        provider_index = max(0, int(order.get("provider_index") or 0))
+        provider_index = -1
     retry_count = max(0, int(order.get("provider_retry_count") or 0))
     retry_limit = max(0, int(cfg.get("partial_retry_limit") or 0))
-    if not force_next_provider and retry_count < retry_limit:
+    if not force_next_provider and provider_enabled and retry_count < retry_limit:
         next_provider = provider
         next_retry_count = retry_count + 1
         next_index = provider_index
         action = "provider_retry_scheduled"
     else:
-        next_index = provider_index + 1
+        # A provider disabled while an order was in flight can finish being
+        # polled, but it must not receive a retry or remain in the fallback
+        # chain. Start at the first currently enabled provider in that case.
+        next_index = provider_index + 1 if provider_enabled else 0
         if next_index >= len(providers):
             _upsert_order_history(
                 order,
