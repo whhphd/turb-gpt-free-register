@@ -8205,7 +8205,7 @@ async function codexUploadPushPoolOnFiles(ev) {
       parts.push(`推池成功 ${delivered} / 失败 0`);
       parts.push(`剩余 ${remaining} 已取消并继续补单`);
     } else if (waitingTimeout) {
-      parts.push('等待库存满 60 秒');
+      parts.push('等待库存满 10 秒');
       parts.push('原订单已取消');
     } else if (row.reason) {
       parts.push(`原因 ${row.reason}`);
@@ -8224,7 +8224,7 @@ async function codexUploadPushPoolOnFiles(ev) {
       if (!Number.isNaN(started)) {
         const elapsed = Math.max(0, (Date.now() - started) / 1000);
         parts.push(`部分备货已等 ${formatSogouRestockDuration(elapsed)}`);
-        parts.push(`距超时处理 ${formatSogouRestockDuration(Math.max(0, 60 - elapsed))}`);
+        parts.push(`距超时处理 ${formatSogouRestockDuration(Math.max(0, 30 - elapsed))}`);
       }
     }
     if (row.action === 'partial_finalized' && row.reserved != null) {
