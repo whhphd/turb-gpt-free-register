@@ -91,6 +91,31 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(cfg["target_healthy"], 9)
         self.assertEqual(cfg["model_whitelist"], ["gpt-5.5"])
 
+    def test_worker_rechecks_immediately_after_delivery_or_followup(self):
+        cfg = restock.normalize_restock_config({"monitor_interval_sec": 3, "order_poll_interval_sec": 3})
+        self.assertEqual(
+            restock._next_worker_wait_seconds(cfg, {"last_run": {"action": "pushed"}}),
+            1,
+        )
+        self.assertEqual(
+            restock._next_worker_wait_seconds(
+                cfg,
+                {"current_order": {"status": "creating"}, "last_run": {"action": "provider_retry_scheduled"}},
+            ),
+            1,
+        )
+        self.assertEqual(
+            restock._next_worker_wait_seconds(
+                cfg,
+                {"current_order": {"status": "pending"}, "last_run": {"action": "waiting"}},
+            ),
+            3,
+        )
+        self.assertEqual(
+            restock._next_worker_wait_seconds(cfg, {"last_run": {"action": "forecast_not_triggered"}}),
+            3,
+        )
+
     def test_trigger_mode_is_exclusive_and_legacy_forecast_is_migrated(self):
         inventory = restock.normalize_restock_config({"trigger_mode": "inventory", "forecast_enabled": True})
         self.assertEqual(inventory["trigger_mode"], "inventory")

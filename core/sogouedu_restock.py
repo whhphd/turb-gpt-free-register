@@ -57,7 +57,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "provider_priority": ["sogou", "bugteam"],
     "bugteam_product": str(getattr(_cfg, "BUGTEAM_PRODUCT", "team_1h") or "team_1h"),
     "partial_retry_limit": 2,
-    "monitor_interval_sec": 60,
+    "monitor_interval_sec": 3,
     "order_poll_interval_sec": 3,
     "recovery_poll_interval_sec": 30,
     "concurrency": int(getattr(_cfg, "SUB2API_POOL_CONCURRENCY", 50) or 50),
@@ -1664,13 +1664,31 @@ def set_restock_enabled(enabled: bool, *, fire_immediately: bool = True, **confi
     return cfg
 
 
+def _next_worker_wait_seconds(cfg: dict[str, Any], state: dict[str, Any]) -> int:
+    """Choose the next patrol delay without adding an idle gap after delivery.
+
+    A newly scheduled follow-up still needs one immediate pass to create its
+    provider order; an existing order keeps the normal status polling cadence.
+    """
+    current_order = state.get("current_order") if isinstance(state.get("current_order"), dict) else None
+    last_run = state.get("last_run") if isinstance(state.get("last_run"), dict) else {}
+    action = str(last_run.get("action") or "").strip().lower()
+    if current_order and action in {"provider_retry_scheduled", "provider_fallback_scheduled"}:
+        return 1
+    if current_order:
+        return max(1, int(cfg.get("order_poll_interval_sec") or 1))
+    if action in {"pushed", "order_failed"}:
+        return 1
+    return max(1, int(cfg.get("monitor_interval_sec") or 1))
+
+
 def _worker_loop() -> None:
     while not _STOP.is_set():
         cfg = load_restock_config()
         if cfg["enabled"]:
             run_restock_cycle()
             state = _load_state()
-            wait_sec = cfg["order_poll_interval_sec"] if state.get("current_order") else cfg["monitor_interval_sec"]
+            wait_sec = _next_worker_wait_seconds(cfg, state)
             _WAKE.wait(wait_sec)
         else:
             _WAKE.wait(5)
