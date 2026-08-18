@@ -87,6 +87,32 @@ class AccountImportParseTests(unittest.TestCase):
             "generic_api",
         )
 
+    def test_mailcom_email_password(self):
+        rec = parse_import_account_line("Fabulousuoi@kittymail.com----fqseAhc6JyG")
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["kind"], "mailcom")
+        self.assertEqual(rec["email"], "Fabulousuoi@kittymail.com")
+        self.assertEqual(rec["password"], "fqseAhc6JyG")
+
+    def test_mailcom_email_password_proxy(self):
+        rec = parse_import_account_line(
+            "a@mail.com----secret----http://user:pass@proxy.example:8080"
+        )
+        self.assertEqual(rec["kind"], "mailcom")
+        self.assertEqual(rec["proxy_url"], "http://user:pass@proxy.example:8080")
+
+    def test_gmail_password_is_not_auto_mailcom(self):
+        rec = parse_import_account_line("user@gmail.com----just-a-password")
+        self.assertIsNone(rec)
+
+    def test_mailcom_preferred_any_domain(self):
+        rec = parse_import_account_line(
+            "user@gmail.com----just-a-password",
+            preferred_source="mailcom",
+        )
+        self.assertEqual(rec["kind"], "mailcom")
+        self.assertEqual(rec["password"], "just-a-password")
+
 
 if __name__ == "__main__":
     unittest.main()

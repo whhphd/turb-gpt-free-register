@@ -113,16 +113,22 @@ def split_account_line(line: str) -> list[str]:
 
 
 def detect_import_kind(parts: list[str]) -> str:
-    """返回 generic_api / password_totp / outlook / unknown。"""
+    """返回 generic_api / password_totp / outlook / mailcom / unknown。"""
     if not parts or not _is_email(parts[0]):
         return "unknown"
     n = len(parts)
     if n == 1:
         return "unknown"
-    # 2 段：邮箱 + 取码地址 或 邮箱 + 密码（无 2FA 则 unknown，补跑难用）
+    # 2 段：邮箱 + 取码地址 或 邮箱 + mail.com 密码
     if n == 2:
         if _is_url(parts[1]):
             return "generic_api"
+        try:
+            from core.mailcom_client import is_mailcom_address
+            if is_mailcom_address(parts[0]) and parts[1]:
+                return "mailcom"
+        except Exception:
+            pass
         return "unknown"
     # 3 段
     if n == 3:
@@ -134,6 +140,12 @@ def detect_import_kind(parts: list[str]) -> str:
             return "generic_api"
         if _looks_like_totp(parts[2]) and not _looks_like_client_id(parts[1]) and not _is_url(parts[2]):
             return "password_totp"
+        try:
+            from core.mailcom_client import is_mailcom_address, looks_like_mailcom_proxy
+            if is_mailcom_address(parts[0]) and looks_like_mailcom_proxy(parts[2]):
+                return "mailcom"
+        except Exception:
+            pass
         # email----password----clientId 缺 refresh → unknown
         return "unknown"
     # 4+ 段
@@ -181,6 +193,9 @@ def parse_import_account_line(line: str, *, preferred_source: str | None = None)
                 return None
         if kind == "password_totp" and len(parts) < 3:
             return None
+        if kind == "mailcom":
+            if len(parts) < 2 or _is_url(parts[1]) or not parts[1].strip():
+                return None
 
     if kind == "unknown":
         return None
@@ -233,6 +248,19 @@ def parse_import_account_line(line: str, *, preferred_source: str | None = None)
         if token:
             rec["access_token"] = token
         rec["source"] = "password_totp"
+        return rec
+
+    if kind == "mailcom":
+        rec["password"] = parts[1].strip()
+        if not rec["password"]:
+            return None
+        if len(parts) >= 3 and parts[2].strip():
+            try:
+                from core.mailcom_client import normalize_mailcom_proxy
+                rec["proxy_url"] = normalize_mailcom_proxy(parts[2])
+            except Exception:
+                rec["proxy_url"] = parts[2].strip()
+        rec["source"] = "mailcom"
         return rec
 
     if kind == "outlook":

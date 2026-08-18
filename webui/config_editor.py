@@ -317,7 +317,15 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
-        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,cloudflare,gptmail,mailnest,cloudmail",
+        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,cloudflare,gptmail,mailnest,cloudmail,mailcom",
+    },
+    {
+        "key": "MAILCOM_USE_PROXY_POOL", "file": "email.py", "type": "bool", "group": "邮箱 / OTP",
+        "label": "mail.com接码走代理池", "help": "开启后，mail.com/kittymail 登录和收信从「代理池」抽一条并绑定到该邮箱；导入行已带代理时仍用导入代理",
+    },
+    {
+        "key": "MAILCOM_AUTO_ALIAS_COUNT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "mail.com导入后自动别名数", "help": "导入主邮箱后自动创建几个别名，用于同一收件箱多次注册。0=不自动创建；最大 9（含主邮箱一般不超过 10 个地址）",
     },
     {
         "key": "GPTMAIL_API_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",

@@ -225,7 +225,11 @@ def _account_has_mail_inbox(email: str) -> bool:
         return False
     try:
         from core import db
-        if db.get_generic_api_email_by_email(email) or db.get_outlook_by_email(email):
+        if (
+            db.get_generic_api_email_by_email(email)
+            or db.get_outlook_by_email(email)
+            or db.get_mailcom_email_by_email(email)
+        ):
             return True
     except Exception:
         pass
@@ -282,7 +286,7 @@ def _load_account_login_material(email: str) -> dict:
     # 注意：outlook/generic 导入的 password 是邮箱密码，不是 OpenAI 登录密码，不能拿去 password/verify。
     # 仅 password_totp（账密+2FA）或「无收信能力但账号上明确存了 OpenAI 密码+2FA」才走密码查活。
     is_openai_password_login = email_source == "password_totp" or (
-        bool(password) and bool(totp_secret) and email_source not in ("outlook", "generic_api") and not has_mail
+        bool(password) and bool(totp_secret) and email_source not in ("outlook", "generic_api", "mailcom") and not has_mail
     )
     prefer_password = bool(password) and is_openai_password_login
     return {

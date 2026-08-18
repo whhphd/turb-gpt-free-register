@@ -22,7 +22,8 @@ USE_EMAIL_SERVICE = False
 #   "gptmail"           — GPTMail 临时邮箱 API（运行时随机生成邮箱并自动收码）
 #   "mailnest"          — MailNest/迈巢临时邮箱 API（运行时购买邮箱并自动收码）
 #   "cloudmail"         — CloudMail/Cloud Mail API（自动从平台获取域名并随机生成邮箱）
-EMAIL_SOURCE = "outlook,generic_api,mailnest"
+#   "mailcom"           — mail.com / kittymail 等品牌邮箱（邮箱----密码，走 mail.com 网页协议收码）
+EMAIL_SOURCE = "outlook,generic_api,mailnest,mailcom"
 
 
 # ============================================================
@@ -147,5 +148,36 @@ CLOUDMAIL_AUTO_ADD_USER = True
 # 随机邮箱 local-part 长度。
 CLOUDMAIL_RANDOM_LOCAL_LENGTH = 12
 
+
+# ============================================================
+# mail.com / kittymail 等品牌邮箱（EMAIL_SOURCE 含 mailcom）
+# 导入格式：邮箱----密码    或    邮箱----密码----http://user:pass@host:port
+# ============================================================
+
+MAILCOM_ACCOUNTS_FILE = "用于注册的mail邮箱.txt"
+
+# True：接码协议从 PROXY_POOL 抽一条代理并绑定到该邮箱（登录/收信始终同出口）
+# False：仅使用导入行里的代理；没写代理则直连
+MAILCOM_USE_PROXY_POOL = False
+
+# 导入主邮箱后自动创建别名数量（0=不自动，只导入主邮箱；最大 9）
+# 主邮箱 + 别名合计一般不超过 10
+MAILCOM_AUTO_ALIAS_COUNT = 9
+
+# 自动识别「邮箱----密码」时，仅这些域名当作 mail.com 体系，避免误吃 gmail。
+MAILCOM_DOMAINS = [
+    "mail.com", "email.com", "usa.com", "myself.com", "post.com",
+    "consultant.com", "engineer.com", "kittymail.com", "europe.com",
+    "asia.com", "america.com", "london.com", "tokyo.com", "techie.com",
+    "geek.com", "dr.com", "lawyer.com", "accountant.com", "chef.com",
+    "cool.com", "cute.com", "love.com", "happy.com", "workmail.com",
+    "writeme.com", "teacher.com", "priest.com", "minister.com",
+    "contractor.net", "iname.com", "mail.org", "email.org",
+    "reborn.com",
+]
+
+# 额外品牌域名，每行一个；与上面内置列表合并。
+MAILCOM_EXTRA_DOMAINS = []
+
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str', 'CLOUDFLARE_API_BASE': 'str', 'CLOUDFLARE_API_KEY': 'str', 'CLOUDFLARE_AUTH_MODE': 'str', 'CLOUDFLARE_CUSTOM_AUTH': 'str', 'CLOUDFLARE_PATH_DOMAINS': 'str', 'CLOUDFLARE_PATH_ACCOUNTS': 'str', 'CLOUDFLARE_PATH_TOKEN': 'str', 'CLOUDFLARE_PATH_MESSAGES': 'str', 'CLOUDFLARE_DEFAULT_DOMAINS': 'list_str_multiline', 'CLOUDFLARE_REQUEST_TIMEOUT': 'int', 'CLOUDFLARE_NAME_LENGTH': 'int', 'CLOUDMAIL_API_BASE': 'str', 'CLOUDMAIL_ADMIN_EMAIL': 'str', 'CLOUDMAIL_PASSWORD': 'str', 'CLOUDMAIL_TOKEN_PATH': 'str', 'CLOUDMAIL_AUTH_TOKEN': 'str', 'CLOUDMAIL_DOMAINS': 'list_str_multiline', 'CLOUDMAIL_AUTO_ADD_USER': 'bool', 'CLOUDMAIL_RANDOM_LOCAL_LENGTH': 'int'})
+apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str', 'CLOUDFLARE_API_BASE': 'str', 'CLOUDFLARE_API_KEY': 'str', 'CLOUDFLARE_AUTH_MODE': 'str', 'CLOUDFLARE_CUSTOM_AUTH': 'str', 'CLOUDFLARE_PATH_DOMAINS': 'str', 'CLOUDFLARE_PATH_ACCOUNTS': 'str', 'CLOUDFLARE_PATH_TOKEN': 'str', 'CLOUDFLARE_PATH_MESSAGES': 'str', 'CLOUDFLARE_DEFAULT_DOMAINS': 'list_str_multiline', 'CLOUDFLARE_REQUEST_TIMEOUT': 'int', 'CLOUDFLARE_NAME_LENGTH': 'int', 'CLOUDMAIL_API_BASE': 'str', 'CLOUDMAIL_ADMIN_EMAIL': 'str', 'CLOUDMAIL_PASSWORD': 'str', 'CLOUDMAIL_TOKEN_PATH': 'str', 'CLOUDMAIL_AUTH_TOKEN': 'str', 'CLOUDMAIL_DOMAINS': 'list_str_multiline', 'CLOUDMAIL_AUTO_ADD_USER': 'bool', 'CLOUDMAIL_RANDOM_LOCAL_LENGTH': 'int', 'MAILCOM_ACCOUNTS_FILE': 'str', 'MAILCOM_USE_PROXY_POOL': 'bool', 'MAILCOM_AUTO_ALIAS_COUNT': 'int', 'MAILCOM_DOMAINS': 'list_str_multiline', 'MAILCOM_EXTRA_DOMAINS': 'list_str_multiline'})

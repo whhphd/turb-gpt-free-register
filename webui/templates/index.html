@@ -3325,6 +3325,7 @@
             <button type="button" class="outlook-v2-select-item" data-value="outlook" role="option">Outlook 邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">通用 API 邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="cloudflare_domain" role="option">域名邮箱池</button>
+            <button type="button" class="outlook-v2-select-item" data-value="mailcom" role="option">mail.com 邮箱池</button>
           </div>
           <input type="hidden" id="poolSourceV2" value="all">
         </div>
@@ -3336,6 +3337,7 @@
         <button type="button" class="jobs-tb-btn" id="btnFailSelectedOutlookV2" disabled title="批量标记选中的邮箱为失败">标失败</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedOutlookV2" disabled title="批量删除选中的邮箱素材">删除选中</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="copyAllEmailsV2" title="复制当前页全部邮箱素材">复制全部邮箱素材</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnMailcomAliasesV2" disabled title="为选中的 mail.com 主邮箱创建别名，用于同一收件箱多次注册">创建别名</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportOutlookV2" title="导入邮箱素材">导入</button>
       </div>
       <div class="outlook-table-v2-wrap">
@@ -3436,6 +3438,7 @@
             <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">邮箱----取码 / MFA----取码</button>
             <button type="button" class="outlook-v2-select-item" data-value="password_totp" role="option">邮箱----密码----2FA</button>
             <button type="button" class="outlook-v2-select-item" data-value="outlook" role="option">Outlook 邮箱池</button>
+            <button type="button" class="outlook-v2-select-item" data-value="mailcom" role="option">mail.com 邮箱----密码</button>
           </div>
           <input type="hidden" id="importSourceV2" value="auto">
         </div>
@@ -3447,7 +3450,7 @@
       </label>
       <label class="outlook-import-field">
         <span>账号列表</span>
-        <textarea id="importTextV2" placeholder="邮箱----https://取码接口地址&#10;邮箱----MFA密钥----https://取码接口地址&#10;邮箱----密码----2FA密钥&#10;邮箱----密码----clientId----refreshToken"></textarea>
+        <textarea id="importTextV2" placeholder="邮箱----https://取码接口地址&#10;邮箱----MFA密钥----https://取码接口地址&#10;邮箱----密码----2FA密钥&#10;邮箱----密码----clientId----refreshToken&#10;邮箱----密码   （mail.com / kittymail）"></textarea>
       </label>
     </div>
     <div class="outlook-import-foot">
@@ -6256,6 +6259,7 @@ const POOL_SOURCE_LABELS = {
   outlook: 'Outlook 邮箱池',
   generic_api: '通用 API 邮箱池',
   cloudflare_domain: '域名邮箱池',
+  mailcom: 'mail.com 邮箱池',
 };
 function setPoolSourceV2(val) {
   const hidden = document.getElementById('poolSourceV2');
@@ -6277,7 +6281,7 @@ function getOutlookQuery() {
 }
 function poolKey(r) { return `${r.source || getPoolSource() || 'outlook'}|${r.email || ''}`; }
 function poolLabel(src) {
-  return ({outlook:'Outlook', generic_api:'通用API', cloudflare_domain:'域名邮箱'})[src] || src || '-';
+  return ({outlook:'Outlook', generic_api:'通用API', cloudflare_domain:'域名邮箱', mailcom:'mail.com'})[src] || src || '-';
 }
 async function loadOutlook() {
   try {
@@ -6342,8 +6346,8 @@ function renderOutlook() {
     <tr>
       <td class="col-check"><input type="checkbox" class="outlook-row-check" data-email="${email}" data-source="${src}" ${OUTLOOK_SELECTED.has(poolKey(r)) ? 'checked' : ''}></td>
       <td class="col-email" title="${email}">
-        <div class="acc-v2-email">${email || '-'}</div>
-        <div class="acc-v2-sub" title="${esc(r.copy_line || '')}">${esc(short(r.copy_line, 70))}</div>
+        <div class="acc-v2-email">${email || '-'}${r.is_alias ? ' <span class="pill status-used" title="mail.com 别名">别名</span>' : ''}</div>
+        <div class="acc-v2-sub" title="${esc(r.copy_line || '')}">${esc(r.is_alias && r.login_email ? ('主邮箱 ' + r.login_email) : short(r.copy_line, 70))}</div>
       </td>
       <td class="col-source">${esc(poolLabel(r.source))}</td>
       <td class="col-status">${pill(r.status)}</td>
@@ -6372,6 +6376,7 @@ function updateOutlookSelectionUi(pageRows = null) {
     'btnMarkSelectedOutlookAvailableV2',
     'btnDisableSelectedOutlookV2',
     'btnFailSelectedOutlookV2',
+    'btnMailcomAliasesV2',
   ].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = none;
@@ -6491,6 +6496,7 @@ async function onOutlookBodyClick(e) {
   bind('btnFailSelectedOutlookV2', () => bulkMarkOutlookStatus('failed'));
   bind('btnDeleteSelectedOutlookV2', deleteSelectedOutlook);
   bind('btnImportOutlookV2', openOutlookImportModal);
+  bind('btnMailcomAliasesV2', createMailcomAliases);
   bind('copyAllEmailsV2', () => copyText(OUTLOOK.map(r=>r.copy_line).filter(Boolean).join('\n')));
   document.addEventListener('click', (e) => {
     if (e.target.closest('.outlook-table-v2 .acc-v2-more')) return;
@@ -6502,8 +6508,11 @@ async function onOutlookBodyClick(e) {
 })();
 
 const IMPORT_SOURCE_LABELS = {
+  auto: '自动识别格式',
   outlook: 'Outlook 邮箱池',
   generic_api: '通用 API 取码邮箱',
+  password_totp: '邮箱----密码----2FA',
+  mailcom: 'mail.com 邮箱----密码',
 };
 function setImportSourceV2(val) {
   const hidden = document.getElementById('importSourceV2');
@@ -6518,6 +6527,10 @@ function setImportSourceV2(val) {
       item.classList.toggle('is-active', item.dataset.value === next);
     });
   }
+  const registeredEl = document.getElementById('importAsRegisteredV2');
+  if (registeredEl && next === 'mailcom') {
+    registeredEl.checked = false;
+  }
 }
 function openOutlookImportModal() {
   const modal = $('#outlookImportModal');
@@ -6525,8 +6538,8 @@ function openOutlookImportModal() {
   const result = $('#importResultV2');
   if (result) result.innerHTML = '';
   const pool = getPoolSource();
-  if (pool === 'outlook' || pool === 'generic_api') setImportSourceV2(pool);
-  else setImportSourceV2('outlook');
+  if (pool === 'outlook' || pool === 'generic_api' || pool === 'mailcom') setImportSourceV2(pool);
+  else setImportSourceV2('auto');
   modal.classList.remove('hidden');
   updateModalScrollLock();
   const ta = $('#importTextV2');
@@ -6580,6 +6593,29 @@ function bindOutlookImportModal() {
   }
   if (submitBtn) submitBtn.addEventListener('click', () => doImportOutlook());
 }
+async function createMailcomAliases() {
+  const items = Array.from(OUTLOOK_SELECTED).map(key => {
+    const [source, ...rest] = key.split('|');
+    return {source, email: rest.join('|')};
+  }).filter(it => it.email && (it.source === 'mailcom' || getPoolSource() === 'mailcom'));
+  if (!items.length) { showToast('请先在 mail.com 邮箱池勾选主邮箱'); return; }
+  const raw = prompt('为每个选中主邮箱创建几个新别名？(0-9，0=只同步已有别名)', '3');
+  if (raw === null) return;
+  const count = Math.max(0, Math.min(9, parseInt(raw, 10) || 0));
+  try {
+    const r = await api('/api/outlook/mailcom-aliases', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({emails: items.map(it => it.email), count}),
+    });
+    const failN = (r.failed || []).length;
+    showToast(`别名完成：新建 ${r.created || 0}，同步已有 ${r.imported_existing || 0}${failN ? `，失败 ${failN}` : ''}`);
+    if (failN && r.failed[0] && r.failed[0].error) showToast(r.failed[0].error);
+    loadOutlook(); loadSummary();
+  } catch (err) {
+    showToast('创建别名失败: ' + err.message);
+  }
+}
 async function doImportOutlook() {
   const textEl = $('#importTextV2');
   const sourceEl = $('#importSourceV2');
@@ -6595,13 +6631,18 @@ async function doImportOutlook() {
     const r = await api('/api/outlook/import', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text, source, as_registered}) });
     const mode = r.as_registered ? '已注册账号' : '邮箱池素材';
     const kinds = Array.isArray(r.kinds) && r.kinds.length ? `，类型=${r.kinds.join('+')}` : '';
-    const msg = `按 ${mode} 导入：解析 ${r.parsed} 行，新增 ${r.inserted}，跳过 ${r.skipped}${kinds}${r.as_registered ? '；可到“账号”页选择后批量补跑 Codex' : ''}`;
+    let msg = `按 ${mode} 导入：解析 ${r.parsed} 行，新增 ${r.inserted}，跳过 ${r.skipped}${kinds}${r.as_registered ? '；可到“账号”页选择后批量补跑 Codex' : ''}`;
+    if (!r.as_registered && (r.alias_created || r.alias_synced || (r.alias_failed || []).length)) {
+      msg += `；自动别名 新建 ${r.alias_created || 0}，同步 ${r.alias_synced || 0}`;
+      if ((r.alias_failed || []).length) msg += `，失败 ${(r.alias_failed || []).length}`;
+    }
     if (resultEl) resultEl.innerHTML = `<div class="banner info">${esc(msg)}</div>`;
     if (textEl) textEl.value = '';
     // 邮箱池筛选：有 outlook/generic 时切过去；纯 password_totp 只刷新账号页
     if (Array.isArray(r.kinds)) {
       if (r.kinds.includes('outlook')) setPoolSourceV2('outlook');
       else if (r.kinds.includes('generic_api')) setPoolSourceV2('generic_api');
+      else if (r.kinds.includes('mailcom')) setPoolSourceV2('mailcom');
     }
     loadOutlook(); loadAccounts(); loadSummary();
     showToast(`导入完成：新增 ${r.inserted}，跳过 ${r.skipped}`);

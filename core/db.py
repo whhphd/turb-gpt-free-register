@@ -30,6 +30,8 @@ _OUTLOOK_JSON = _PROJECT_ROOT / "用于注册的邮箱.json"
 _OUTLOOK_TXT = _PROJECT_ROOT / "用于注册的邮箱.txt"
 _GENERIC_API_EMAIL_JSON = _PROJECT_ROOT / "用于注册的API邮箱.json"
 _GENERIC_API_EMAIL_TXT = _PROJECT_ROOT / "用于注册的API邮箱.txt"
+_MAILCOM_EMAIL_JSON = _PROJECT_ROOT / "用于注册的mail邮箱.json"
+_MAILCOM_EMAIL_TXT = _PROJECT_ROOT / "用于注册的mail邮箱.txt"
 _ACCOUNTS_JSON = _PROJECT_ROOT / "注册成功的邮箱.json"
 _ACCOUNTS_TXT = _PROJECT_ROOT / "注册成功的邮箱.txt"
 _TOKENS_TXT = _PROJECT_ROOT / "注册成功的token.txt"
@@ -127,6 +129,21 @@ def _sync_generic_api_email_txt(rows: list[dict]) -> None:
     available_rows = [r for r in rows if r.get("status") == "available"]
     lines = [_generic_api_email_line(r) for r in sorted(available_rows, key=lambda x: int(x.get("id") or 0))]
     _GENERIC_API_EMAIL_TXT.write_text(("\n".join(lines) + ("\n" if lines else "")), encoding="utf-8")
+
+
+def _mailcom_email_line(row: dict) -> str:
+    email = row.get("email") or ""
+    password = row.get("password") or ""
+    proxy = (row.get("proxy_url") or "").strip()
+    if proxy:
+        return "----".join([email, password, proxy])
+    return "----".join([email, password])
+
+
+def _sync_mailcom_email_txt(rows: list[dict]) -> None:
+    available_rows = [r for r in rows if r.get("status") == "available"]
+    lines = [_mailcom_email_line(r) for r in sorted(available_rows, key=lambda x: int(x.get("id") or 0))]
+    _MAILCOM_EMAIL_TXT.write_text(("\n".join(lines) + ("\n" if lines else "")), encoding="utf-8")
 
 
 def _sync_accounts_txt(rows: list[dict]) -> None:
@@ -489,6 +506,43 @@ def _save_generic_api_emails(rows: list[dict]) -> None:
         row["copy_line"] = _generic_api_email_line(row)
     _write_json(_GENERIC_API_EMAIL_JSON, rows)
     _sync_generic_api_email_txt(rows)
+
+
+def _load_mailcom_emails() -> list[dict]:
+    rows = _read_json(_MAILCOM_EMAIL_JSON, [])
+    return rows if isinstance(rows, list) else []
+
+
+def _save_mailcom_emails(rows: list[dict]) -> None:
+    for row in rows:
+        row["copy_line"] = _mailcom_email_line(row)
+    _write_json(_MAILCOM_EMAIL_JSON, rows)
+    _sync_mailcom_email_txt(rows)
+
+
+def _decorate_mailcom_email(row: dict, account_by_email: dict[str, dict] | None = None) -> dict:
+    out = dict(row)
+    out["copy_line"] = _mailcom_email_line(out)
+    out["password"] = out.get("password") or ""
+    out["proxy_url"] = out.get("proxy_url") or ""
+    out["login_email"] = out.get("login_email") or out.get("email") or ""
+    out["is_alias"] = bool(out.get("login_email") and out["login_email"].lower() != (out.get("email") or "").lower())
+    out["client_id"] = out.get("client_id") or ""
+    out["refresh_token"] = out.get("refresh_token") or ""
+    account = None
+    if account_by_email is not None:
+        account = account_by_email.get((out.get("email") or "").lower())
+    if account:
+        out["registered_account_id"] = account.get("id")
+        out["access_token"] = account.get("access_token")
+        out["access_token_preview"] = (
+            (account.get("access_token") or "")[:40] + "..."
+            if account.get("access_token")
+            else ""
+        )
+        out["account_copy_line"] = _account_line(account)
+        out["totp_secret"] = account.get("totp_secret")
+    return out
 
 
 def _load_accounts() -> list[dict]:
@@ -1602,6 +1656,7 @@ def import_registered_email_accounts(
         accounts = _load_accounts()
         outlook_rows = _load_outlook()
         generic_rows = _load_generic_api_emails()
+        mailcom_rows = _load_mailcom_emails()
         inserted = skipped = 0
 
         for raw in records:
@@ -1634,7 +1689,7 @@ def import_registered_email_accounts(
                 .strip()
                 .lower()
             )
-            if row_source not in ("outlook", "generic_api", "password_totp"):
+            if row_source not in ("outlook", "generic_api", "password_totp", "mailcom"):
                 skipped += 1
                 if return_details:
                     details.append({"email": email, "status": "skipped", "reason": f"bad_source:{row_source}"})
@@ -1683,6 +1738,37 @@ def import_registered_email_accounts(
                 # 不进 outlook/generic 池；账号本身带 password + totp 即可补跑
                 original_line = "----".join([email, password, totp_secret])
                 pool_row = None
+            elif row_source == "mailcom":
+                if not password:
+                    skipped += 1
+                    if return_details:
+                        details.append({"email": email, "status": "skipped", "reason": "missing_password"})
+                    continue
+                proxy_url = (raw.get("proxy_url") or raw.get("proxy") or "").strip()
+                pool_row = _find_by_email(mailcom_rows, email)
+                if pool_row is None:
+                    pool_row = {
+                        "id": _next_id(mailcom_rows),
+                        "email": email,
+                        "password": password,
+                        "proxy_url": proxy_url,
+                        "session": {},
+                        "status": "used",
+                        "used_at": now,
+                        "note": "导入为已注册账号，用于 Codex 授权",
+                        "imported_at": now,
+                    }
+                    mailcom_rows.append(pool_row)
+                else:
+                    pool_row["password"] = password or pool_row.get("password")
+                    if proxy_url:
+                        pool_row["proxy_url"] = proxy_url
+                pool_row["status"] = "used"
+                pool_row["used_at"] = pool_row.get("used_at") or now
+                pool_row["completed_at"] = pool_row.get("completed_at") or now
+                pool_row["note"] = pool_row.get("note") or "导入为已注册账号，用于 Codex 授权"
+                pool_row["copy_line"] = _mailcom_email_line(pool_row)
+                original_line = _mailcom_email_line(pool_row)
             else:
                 client_id = (raw.get("client_id") or raw.get("clientId") or "").strip()
                 refresh_token = (raw.get("refresh_token") or raw.get("refreshToken") or "").strip()
@@ -1774,6 +1860,7 @@ def import_registered_email_accounts(
 
         _save_outlook(outlook_rows)
         _save_generic_api_emails(generic_rows)
+        _save_mailcom_emails(mailcom_rows)
         _save_accounts(accounts)
         if return_details:
             return inserted, skipped, details
@@ -2015,6 +2102,180 @@ def get_generic_api_email_by_email(email: str) -> dict | None:
     with _LOCK:
         row = _find_by_email(_load_generic_api_emails(), email)
         return _decorate_generic_api_email(row) if row else None
+
+
+def import_mailcom_emails(records: list[dict]) -> tuple[int, int]:
+    """批量导入 mail.com 邮箱。records: {email, password[, proxy_url, login_email]}。"""
+    inserted, skipped, _primaries = import_mailcom_emails_ex(records)
+    return inserted, skipped
+
+
+def import_mailcom_emails_ex(records: list[dict]) -> tuple[int, int, list[str]]:
+    """同 import_mailcom_emails，额外返回新导入的主邮箱列表（不含别名）。"""
+    with _LOCK:
+        rows = _load_mailcom_emails()
+        inserted = skipped = 0
+        primaries: list[str] = []
+        for raw in records:
+            email = (raw.get("email") or "").strip()
+            password = (raw.get("password") or "").strip()
+            if not email or not password:
+                skipped += 1
+                continue
+            if _find_by_email(rows, email):
+                skipped += 1
+                continue
+            login_email = (raw.get("login_email") or "").strip() or email
+            row = {
+                "id": _next_id(rows),
+                "email": email,
+                "password": password,
+                "proxy_url": (raw.get("proxy_url") or raw.get("proxy") or "").strip(),
+                "login_email": login_email,
+                "session": {},
+                "status": "available",
+                "used_at": None,
+                "note": (raw.get("note") or None),
+                "imported_at": _now(),
+            }
+            row["copy_line"] = _mailcom_email_line(row)
+            rows.append(row)
+            inserted += 1
+            if login_email.lower() == email.lower():
+                primaries.append(email)
+        _save_mailcom_emails(rows)
+        return inserted, skipped, primaries
+
+
+def claim_next_mailcom_email() -> dict | None:
+    with _LOCK:
+        rows = sorted(_load_mailcom_emails(), key=lambda x: int(x.get("id") or 0))
+        row = next((r for r in rows if r.get("status") == "available"), None)
+        if row is None:
+            return None
+        row["status"] = "used"
+        row["used_at"] = _now()
+        row["note"] = None
+        _save_mailcom_emails(rows)
+        return _decorate_mailcom_email(row)
+
+
+def release_mailcom_email(email: str, status: str = "available", note: str | None = None) -> None:
+    with _LOCK:
+        rows = _load_mailcom_emails()
+        row = _find_by_email(rows, email)
+        if row is None:
+            return
+        row["status"] = status
+        if status == "available":
+            row["used_at"] = None
+        elif status in ("used", "failed", "disabled"):
+            row["used_at"] = row.get("used_at") or _now()
+        if note is not None:
+            row["note"] = note
+        _save_mailcom_emails(rows)
+
+
+def release_unconsumed_mailcom_email(email: str, note: str | None = None) -> bool:
+    with _LOCK:
+        if _find_by_email(_load_accounts(), email) is not None:
+            return False
+        rows = _load_mailcom_emails()
+        row = _find_by_email(rows, email)
+        if row is None or row.get("status") != "used":
+            return False
+        row["status"] = "available"
+        row["used_at"] = None
+        if note is not None:
+            row["note"] = note
+        _save_mailcom_emails(rows)
+        return True
+
+
+def delete_mailcom_email(email: str) -> bool:
+    with _LOCK:
+        rows = _load_mailcom_emails()
+        target = (email or "").lower()
+        hit = _find_by_email(rows, email)
+        if hit is None:
+            return False
+        login = (hit.get("login_email") or hit.get("email") or "").strip().lower()
+        cascade_primary = login == target
+        new_rows = []
+        for r in rows:
+            addr = (r.get("email") or "").lower()
+            parent = (r.get("login_email") or addr).lower()
+            if addr == target:
+                continue
+            if cascade_primary and parent == target:
+                continue
+            new_rows.append(r)
+        _save_mailcom_emails(new_rows)
+        return True
+
+
+def list_mailcom_email_pool(status: str | None = None, limit: int = 500) -> list[dict]:
+    with _LOCK:
+        account_by_email = {
+            (a.get("email") or "").lower(): a
+            for a in _load_accounts()
+        }
+        rows = _load_mailcom_emails()
+        if status:
+            rows = [r for r in rows if r.get("status") == status]
+        rows = sorted(rows, key=lambda x: int(x.get("id") or 0), reverse=True)
+        return [_decorate_mailcom_email(r, account_by_email) for r in rows[:limit]]
+
+
+def mailcom_email_pool_summary() -> dict:
+    with _LOCK:
+        out = {"available": 0, "used": 0, "failed": 0}
+        for row in _load_mailcom_emails():
+            status = row.get("status") or "available"
+            out[status] = out.get(status, 0) + 1
+        out["total"] = sum(v for k, v in out.items() if k != "total")
+        return out
+
+
+def get_mailcom_email_by_email(email: str) -> dict | None:
+    with _LOCK:
+        row = _find_by_email(_load_mailcom_emails(), email)
+        return _decorate_mailcom_email(row) if row else None
+
+
+def list_mailcom_related(login_email: str) -> list[dict]:
+    """主邮箱及其别名行。"""
+    key = (login_email or "").strip().lower()
+    if not key:
+        return []
+    with _LOCK:
+        out = []
+        for row in _load_mailcom_emails():
+            email = (row.get("email") or "").strip().lower()
+            parent = (row.get("login_email") or email).strip().lower()
+            if email == key or parent == key:
+                out.append(_decorate_mailcom_email(row))
+        return out
+
+
+def update_mailcom_session(email: str, session: dict) -> None:
+    with _LOCK:
+        rows = _load_mailcom_emails()
+        row = _find_by_email(rows, email)
+        if row is None:
+            return
+        row["session"] = dict(session or {})
+        _save_mailcom_emails(rows)
+
+
+def update_mailcom_proxy(email: str, proxy_url: str) -> None:
+    with _LOCK:
+        rows = _load_mailcom_emails()
+        row = _find_by_email(rows, email)
+        if row is None:
+            return
+        row["proxy_url"] = str(proxy_url or "").strip()
+        _save_mailcom_emails(rows)
 
 
 def disable_bad_available_generic_api_emails(

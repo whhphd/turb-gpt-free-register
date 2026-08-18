@@ -590,8 +590,9 @@
           <select id="importSource">
             <option value="outlook">Outlook 邮箱池</option>
             <option value="generic_api">通用 API 取码邮箱</option>
+            <option value="mailcom">mail.com 邮箱----密码</option>
           </select>
-          <span class="hint">注册来源可在配置里填多个，例如：outlook,generic_api</span>
+          <span class="hint">注册来源可在配置里填多个，例如：outlook,generic_api,mailcom</span>
         </label>
         <label style="display:flex;gap:8px;align-items:center;margin:8px 0;color:var(--text);font-size:13px;">
           <input id="importAsRegistered" type="checkbox" style="width:auto;min-height:auto;">
@@ -611,6 +612,7 @@
               <option value="outlook">Outlook 邮箱池</option>
               <option value="generic_api">通用 API 邮箱池</option>
               <option value="cloudflare_domain">域名邮箱池</option>
+              <option value="mailcom">mail.com 邮箱池</option>
             </select>
             <input id="qOutlook" placeholder="搜索邮箱、状态…">
           </div>
@@ -2400,7 +2402,7 @@ $('#copyAllLines').addEventListener('click', async () => {
 // ---------- 邮箱池 ----------
 function poolKey(r) { return `${r.source || $('#poolSource')?.value || 'outlook'}|${r.email || ''}`; }
 function poolLabel(src) {
-  return ({outlook:'Outlook', generic_api:'通用API', cloudflare_domain:'域名邮箱'})[src] || src || '-';
+  return ({outlook:'Outlook', generic_api:'通用API', cloudflare_domain:'域名邮箱', mailcom:'mail.com'})[src] || src || '-';
 }
 async function loadOutlook() {
   try {
