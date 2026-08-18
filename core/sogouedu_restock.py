@@ -1230,7 +1230,18 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
                     reserved=reserved,
                 )
                 _save_state(state)
-        if provider == "sogou" and status in {"ready_partial", "waiting_inventory"} and reserved > 0:
+        if provider == "sogou" and order.get("partial_finalized_at"):
+            # A successful finalize request is asynchronous: Sogou may keep
+            # returning waiting_inventory while it prepares the settled file.
+            # Keep polling, but never submit the same settlement again.
+            order.pop("partial_ready_since", None)
+            order.pop("partial_finalize_last_attempt_at", None)
+        if (
+            provider == "sogou"
+            and not order.get("partial_finalized_at")
+            and status in {"ready_partial", "waiting_inventory"}
+            and reserved > 0
+        ):
             partial_since = _parse_time(order.get("partial_ready_since"))
             if partial_since is None:
                 order["partial_ready_since"] = _now()

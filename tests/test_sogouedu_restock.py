@@ -1060,6 +1060,43 @@ class SogouRestockTests(unittest.TestCase):
         self.assertEqual(current["reserved"], 6)
         self.assertNotIn("partial_ready_since", current)
 
+    def test_partial_order_does_not_finalize_again_while_supplier_is_still_waiting(self):
+        cfg = restock.normalize_restock_config({"order_poll_interval_sec": 1})
+        state = restock._load_state()
+        state["current_order"] = {
+            "provider": "sogou",
+            "order_id": "partial-once",
+            "quantity": 10,
+            "status": "ready_partial",
+            "partial_ready_since": 1000,
+        }
+        fake = FakeClient()
+        waiting_response = {
+            "order": {
+                "id": "partial-once",
+                "status": "waiting_inventory",
+                "reserved": 6,
+            },
+            "status": "waiting_inventory",
+        }
+        with patch.object(fake, "order_status", return_value=waiting_response), patch.object(
+            fake,
+            "finalize_order",
+            side_effect=lambda order_id: (
+                fake.finalize_calls.append(order_id)
+                or {"order": {"id": order_id, "status": "waiting_inventory", "reserved": 6}}
+            ),
+        ), patch.object(restock.time, "time", side_effect=[1030, 1060]):
+            first = restock._process_current_order(fake, cfg, state)
+            second = restock._process_current_order(fake, cfg, state)
+
+        self.assertEqual(first["action"], "partial_finalized")
+        self.assertEqual(second["action"], "waiting")
+        self.assertEqual(fake.finalize_calls, ["partial-once"])
+        current = state["current_order"]
+        self.assertIn("partial_finalized_at", current)
+        self.assertNotIn("partial_ready_since", current)
+
     def test_partial_finalized_exhausted_order_is_cleared(self):
         restock.save_restock_config({"enabled": True, "order_poll_interval_sec": 1})
         state = restock._load_state()
