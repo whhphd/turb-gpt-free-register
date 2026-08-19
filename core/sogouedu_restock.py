@@ -45,6 +45,7 @@ _PARTIAL_FINALIZE_WAIT_SEC = 30
 _PARTIAL_FINALIZE_RETRY_SEC = 30
 _WAITING_INVENTORY_TIMEOUT_SEC = 10
 _BUGTEAM_PARTIAL_SETTLE_WAIT_SEC = 30
+_SOGOU_PARTIAL_SETTLEMENT_TIMEOUT_SEC = 30
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
@@ -1316,6 +1317,52 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
                 "reserved": reserved,
                 "reason": "部分结算后无可交付账号",
             }
+        finalized_at = _parse_time(order.get("partial_finalized_at"))
+        sogou_partial_timed_out = bool(
+            provider == "sogou"
+            and finalized_at is not None
+            and status in {"ready_partial", "waiting_inventory", "partial", "finalizing"}
+            and time.time() - finalized_at >= _SOGOU_PARTIAL_SETTLEMENT_TIMEOUT_SEC
+        )
+        if sogou_partial_timed_out and not order.get("payload"):
+            delivery = client.take_order(order_id, take_url=order.get("take_url"))
+            payload = _delivery_payload(delivery)
+            has_accounts = bool(
+                (isinstance(payload, list) and payload)
+                or (isinstance(payload, dict) and payload.get("accounts"))
+            )
+            if has_accounts:
+                order["payload"] = payload
+                order["status"] = "taken"
+                order["updated_at"] = _now()
+                _upsert_order_history(
+                    order,
+                    status="taken",
+                    remote_status=status,
+                    reserved=reserved,
+                    transition_reason="partial_settlement_timeout_take",
+                )
+                _save_state(state)
+            else:
+                cancelled = client.cancel_order(order_id)
+                cancelled_status = _order_status(cancelled) or "cancelled"
+                order["status"] = cancelled_status
+                order["remote_status"] = cancelled_status
+                order["cancelled_at"] = _now()
+                order["updated_at"] = _now()
+                remaining = max(1, int(order.get("quantity") or 0))
+                followup = _schedule_followup_order(
+                    order,
+                    order_cfg,
+                    state,
+                    remaining=remaining,
+                    reason="sogou:partial_settlement_timeout",
+                    force_next_provider=True,
+                )
+                if followup:
+                    followup["cancelled_status"] = cancelled_status
+                    followup["reserved_before_cancel"] = reserved
+                    return followup
         # Sogou 部分结算完成后仍返回 partial；只要响应带有预留账号，
         # 该状态也已经可以取货。否则会在 partial 状态下无限等待。
         partial_settled_ready = bool(
@@ -1344,12 +1391,13 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
             return waiting
         order.pop("partial_ready_since", None)
         order.pop("partial_finalize_last_attempt_at", None)
-        response = client.take_order(order_id, take_url=order.get("take_url"))
-        order["payload"] = _delivery_payload(response)
-        order["status"] = "taken"
-        order["updated_at"] = _now()
-        _upsert_order_history(order, status="taken", remote_status=status, reserved=reserved)
-        _save_state(state)
+        if not order.get("payload"):
+            response = client.take_order(order_id, take_url=order.get("take_url"))
+            order["payload"] = _delivery_payload(response)
+            order["status"] = "taken"
+            order["updated_at"] = _now()
+            _upsert_order_history(order, status="taken", remote_status=status, reserved=reserved)
+            _save_state(state)
 
     payload = _delivery_payload(order.get("payload"))
     if payload is not order.get("payload"):
