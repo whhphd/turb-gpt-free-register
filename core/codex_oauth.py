@@ -45,7 +45,16 @@ from core.openai_auth import (
     request_sentinel_token,
     build_sentinel_header,
     network_preflight,
+    extract_auth_continue,
+    needs_email_otp_step,
+    needs_totp_step,
+    verify_login_password,
+    verify_login_totp,
+    send_email_otp,
+    follow_authorize,
+    validate_email_otp,
 )
+from core.totp_login import generate_totp_code, load_totp_secret
 from core import sms_provider
 from curl_cffi import requests as curl_requests
 
@@ -142,7 +151,7 @@ def _build_authorize_url(state: str, code_challenge: str, prompt: str = "login")
     return f"{_cfg.CODEX_AUTH_URL}?{urlencode(params)}"
 
 
-def _ensure_oai_context_url(auth_url: str, session: BrowserSession) -> str:
+def _ensure_oai_context_url(auth_url: str, session: BrowserSession, email: str = "") -> str:
     """在 Codex OAuth 授权 URL 上补齐前端同源上下文参数，保持 oai-did 连续。"""
     try:
         parsed = urlparse(auth_url)
@@ -153,6 +162,10 @@ def _ensure_oai_context_url(auth_url: str, session: BrowserSession) -> str:
             "auth_session_logging_id": session.auth_session_logging_id,
             "screen_hint": "login_or_signup",
         }
+        hint = str(email or "").strip()
+        if hint:
+            additions["login_hint"] = hint
+            additions["ccaps"] = "login_methods"
         for key, value in additions.items():
             if not params.get(key):
                 params[key] = [value]
@@ -163,6 +176,50 @@ def _ensure_oai_context_url(auth_url: str, session: BrowserSession) -> str:
         return parsed._replace(query=query).geturl()
     except Exception:
         return auth_url
+
+
+def _codex_sso_authorize_url(auth_url: str, session: BrowserSession, email: str = "") -> str:
+    """Codex authorize 不要带 prompt=login / screen_hint=login_or_signup。
+
+    可带 login_hint，方便落到 /log-in 后继续提交邮箱。
+    prompt=login 会强制新开登录链，和 ChatGPT Web 已登录态叠在一起，
+    页面可能显示 /add-phone，会话却停在 /log-in。
+    """
+    try:
+        parsed = urlparse(auth_url)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        for key in ("prompt", "screen_hint", "ccaps"):
+            params.pop(key, None)
+        hint = str(email or "").strip()
+        if hint:
+            params["login_hint"] = [hint]
+        else:
+            params.pop("login_hint", None)
+        params["ext-oai-did"] = [session.device_id]
+        params["auth_session_logging_id"] = [session.auth_session_logging_id]
+        return parsed._replace(query=urlencode(params, doseq=True)).geturl()
+    except Exception:
+        return auth_url
+
+
+def _log_auth_session_cookie(session: BrowserSession, where: str) -> None:
+    raw = ""
+    try:
+        raw = str(session.session.cookies.get("oai-client-auth-session") or "")
+    except Exception:
+        raw = ""
+    if not raw:
+        logger.info("[Codex] %s auth-session: 无 cookie", where)
+        return
+    payload = _decode_jwt_segment(raw.split(".")[0])
+    logger.info(
+        "[Codex] %s auth-session dest=%s app=%s email=%s keys=%s",
+        where,
+        payload.get("destination_app_name") or "-",
+        payload.get("app_name_enum") or "-",
+        payload.get("email") or "-",
+        list(payload.keys())[:12],
+    )
 
 
 # ============================================================
@@ -829,6 +886,8 @@ def _response_text(resp) -> str:
 
 def _phone_failure_reason(text: str, status_code: int | None = None) -> str:
     low = str(text or '').lower()
+    if 'invalid_auth_step' in low or 'invalid authorization step' in low:
+        return 'invalid_auth_step'
     if 'whatsapp' in low or 'whats app' in low:
         return 'whatsapp_channel'
     if any(k in low for k in (
@@ -844,7 +903,10 @@ def _phone_failure_reason(text: str, status_code: int | None = None) -> str:
         return 'delivery_refused'
     if any(k in low for k in ('too many', 'rate limit', 'throttle', 'limited', '频繁', '限流')):
         return 'send_limited'
-    if any(k in low for k in ('already used', 'used too many', 'maximum', '上限', '已被使用')):
+    if any(k in low for k in (
+        'already used', 'already in use', 'phone_number_in_use',
+        'used too many', 'maximum', '上限', '已被使用',
+    )):
         return 'phone_used_or_max'
     if status_code and status_code >= 500:
         return 'server_error'
@@ -862,25 +924,84 @@ def _bootstrap_authorize(
     state: str,
     code_challenge: str | None = None,
     auth_url: str | None = None,
-) -> None:
+    email: str = "",
+    *,
+    resume_sso: bool = False,
+) -> str:
     """
-    GET Codex authorize URL 并跟随重定向，落到登录页，建立 auth.openai.com cookies
-    （含 oai-client-auth-session：内含 Codex 目标 + 后续要用的 workspace 列表）。
+    GET Codex authorize URL 并跟随重定向。
+    resume_sso=True：Web OTP 已登录，走 SSO，不再强制 prompt=login。
     """
     # 默认使用调用方传入的 CPA 授权地址；未传时才走保留的本地 PKCE 生成逻辑。
     if not auth_url:
         if not code_challenge:
             raise RuntimeError("[Codex] 本地生成授权地址需要 code_challenge")
         auth_url = _build_authorize_url(state, code_challenge, prompt="login")
-    auth_url = _ensure_oai_context_url(auth_url, session)
+    if resume_sso:
+        auth_url = _codex_sso_authorize_url(auth_url, session, email=email)
+    else:
+        auth_url = _ensure_oai_context_url(auth_url, session, email=email)
     headers = session.get_auth_navigate_headers(referer="https://chatgpt.com/")
-    logger.info("[Codex] 跟随 Codex authorize URL 建立会话...")
+    logger.info("[Codex] 跟随 Codex authorize URL 建立会话 resume_sso=%s", resume_sso)
     logger.info(f"[Codex] 完整授权地址: {auth_url}")
     resp = _with_net_retry(
         "bootstrap authorize",
         lambda: session.get(auth_url, headers=headers, allow_redirects=True),
     )
-    logger.debug(f"[Codex] authorize 落点: {getattr(resp, 'url', '')}, status={getattr(resp, 'status_code', '')}")
+    final_url = str(getattr(resp, "url", "") or "")
+    logger.info("[Codex] authorize 落点: %s status=%s", final_url[:200], getattr(resp, "status_code", ""))
+    _log_auth_session_cookie(session, "bootstrap 后")
+    return final_url
+
+
+def _request_passwordless_login_otp(session: BrowserSession, email: str) -> dict:
+    """密码页点「使用一次性验证码」：POST continue + intent，触发真正发码。"""
+    sentinel_resp = request_sentinel_token(session, "authorize_continue")
+    sentinel_header, so_header = build_sentinel_header(session, sentinel_resp, "authorize_continue")
+    payload = {
+        "username": {"kind": "email", "value": email},
+        "intent": "passwordless_login_send_otp",
+    }
+    logger.info("[Codex] 密码页提交 passwordless_login_send_otp：%s", email)
+    resp = _post_json(
+        session,
+        "https://auth.openai.com/api/accounts/authorize/continue",
+        payload,
+        referer="https://auth.openai.com/log-in/password",
+        sentinel_header=sentinel_header,
+        so_header=so_header,
+    )
+    data = _resp_json(resp)
+    continue_url, page_type = extract_auth_continue(data)
+    logger.info(
+        "[Codex] passwordless OTP continue status=%s page=%s continue=%s body=%s",
+        getattr(resp, "status_code", ""),
+        page_type or "-",
+        (continue_url or "")[:160],
+        str(data)[:240],
+    )
+    if getattr(resp, "status_code", 0) not in (200, 204) or _classify_auth_step(data) == "password":
+        headers = session.get_auth_headers(referer="https://auth.openai.com/log-in/password")
+        headers["content-type"] = "application/x-www-form-urlencoded"
+        form = urlencode({"intent": "passwordless_login_send_otp", "username": email})
+        resp2 = session.post(
+            "https://auth.openai.com/log-in/password",
+            headers=headers,
+            data=form,
+            allow_redirects=True,
+        )
+        final_url = str(getattr(resp2, "url", "") or "")
+        logger.info(
+            "[Codex] passwordless form 落点: %s status=%s",
+            final_url[:200],
+            getattr(resp2, "status_code", ""),
+        )
+        if "email-verification" in final_url.lower() or "email_otp" in final_url.lower():
+            return {
+                "page": {"type": "email_otp_verification"},
+                "continue_url": final_url,
+            }
+    return data
 
 
 # ============================================================
@@ -904,7 +1025,13 @@ def _submit_email(session: BrowserSession, email: str) -> None:
         raise RuntimeError(
             f"[Codex] 提交邮箱失败 status={resp.status_code}: {(resp.text or '')[:300]}"
         )
-    logger.info(f"[Codex] 已提交邮箱 {email}，等待邮箱 OTP")
+    data = _resp_json(resp)
+    continue_url, page_type = extract_auth_continue(data)
+    logger.info(
+        "[Codex] 已提交邮箱 %s，page=%s continue=%s",
+        email, page_type or "-", (continue_url or "")[:160],
+    )
+    return data
 
 
 # ============================================================
@@ -939,7 +1066,272 @@ def _submit_email_otp(session: BrowserSession, code: str) -> None:
         raise RuntimeError(
             f"[Codex] 邮箱 OTP 验证失败 status={resp.status_code}: {(resp.text or '')[:300]}"
         )
-    logger.info("[Codex] 邮箱 OTP 验证通过")
+    data = _resp_json(resp)
+    continue_url, page_type = extract_auth_continue(data)
+    logger.info("[Codex] 邮箱 OTP 验证通过 page=%s continue=%s", page_type or "-", (continue_url or "")[:160])
+    return data
+
+
+def _classify_auth_step(payload: dict | None, extra_url: str = "") -> str:
+    """把 authorize/continue 类响应当成协议登录的下一步。"""
+    continue_url, page_type = extract_auth_continue(payload)
+    text = f"{page_type} {continue_url} {extra_url}".lower()
+    if "create-account" in text:
+        return "signup"
+    if needs_totp_step(page_type, continue_url):
+        return "totp"
+    if needs_email_otp_step(page_type, continue_url):
+        return "email_otp"
+    if any(k in text for k in (
+        "add-phone", "add_phone", "phone-verification", "phone_verification",
+        "phone-otp", "phone_otp",
+    )):
+        return "phone"
+    if any(k in text for k in (
+        "localhost:1455",
+        "sign-in-with-chatgpt",
+        "/codex/consent",
+    )):
+        return "workspace"
+    if "password" in text:
+        return "password"
+    if "/log-in" in text:
+        return "login_email"
+    return "unknown"
+
+
+def _load_codex_login_material(email: str) -> dict:
+    """复用查活素材判定：outlook/mail 密码不是 OpenAI 密码。"""
+    try:
+        from core.account_liveness import _load_account_login_material
+        return _load_account_login_material(email)
+    except Exception:
+        return {
+            "password": "",
+            "totp_secret": None,
+            "prefer_password": False,
+            "has_mail": False,
+        }
+
+
+def _login_via_chatgpt_web_otp(session: BrowserSession, email: str, otp_provider) -> dict:
+    """用查活同款 ChatGPT Web OAuth 发码：authorize(login_hint) → /email-verification。
+
+    Codex CLI client_id 的 authorize 会落到 /log-in/password，在那里打 email-otp/send
+    即使 200 也不会发信。OTP 是 Web authorize 重定向进验证码页时触发的。
+    """
+    from core.chatgpt_auth import get_csrf_token, get_providers, signin_openai
+    from core.account_export import follow_oauth_callback
+
+    get_providers(session)
+    csrf = get_csrf_token(session)
+    auth_url = signin_openai(session, csrf, email)
+    otp_after_ts = time.time()
+    logger.info("[Codex] ChatGPT Web authorize 发码：%s", email)
+    final_url = follow_authorize(session, auth_url)
+    logger.info("[Codex] ChatGPT Web authorize 落点: %s", str(final_url or "")[:200])
+    if "email-verification" not in str(final_url or "").lower():
+        raise RuntimeError(
+            f"[Codex] ChatGPT Web 登录未落到 email-verification，无法发码: {final_url}"
+        )
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            logger.info("[Codex] 等待邮箱 OTP：%s（第 %s/3 次）", email, attempt)
+            code = otp_provider(email, after_ts=otp_after_ts)
+            data = validate_email_otp(session, str(code or "").strip())
+            continue_url, page_type = extract_auth_continue(data)
+            logger.info(
+                "[Codex] ChatGPT Web OTP 通过 page=%s continue=%s",
+                page_type or "-",
+                (continue_url or "")[:160],
+            )
+            if continue_url:
+                follow_oauth_callback(
+                    session,
+                    continue_url,
+                    referer="https://auth.openai.com/email-verification",
+                )
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= 3:
+                break
+            logger.warning(
+                "[Codex] 未收到/无效 OTP，在 email-verification 重发（下一轮 %s/3）：%s",
+                attempt + 1,
+                str(exc)[:180],
+            )
+            otp_after_ts = time.time()
+            send_email_otp(session, referer="https://auth.openai.com/email-verification")
+            human_delay("api")
+    raise last_exc if last_exc else RuntimeError("[Codex] 等待邮箱 OTP 失败")
+
+
+def _wait_and_submit_email_otp(session: BrowserSession, email: str, otp_provider, *, after_ts: float) -> dict:
+    """等邮箱 OTP 并提交；收不到就重新提交邮箱触发重发。"""
+    email_otp = None
+    otp_after_ts = after_ts
+    max_email_otp_attempts = 3
+    for email_otp_attempt in range(1, max_email_otp_attempts + 1):
+        logger.info("[Codex] 等待邮箱 OTP：%s（第 %s/%s 次）", email, email_otp_attempt, max_email_otp_attempts)
+        try:
+            email_otp = otp_provider(email, after_ts=otp_after_ts)
+            break
+        except Exception as exc:
+            if email_otp_attempt >= max_email_otp_attempts:
+                raise
+            logger.warning(
+                "[Codex] 一直未收到邮箱 OTP，重新提交邮箱触发重发后继续等待（下一轮 %s/%s）：%s: %s",
+                email_otp_attempt + 1,
+                max_email_otp_attempts,
+                type(exc).__name__,
+                str(exc)[:180],
+            )
+            otp_after_ts = time.time()
+            _request_passwordless_login_otp(session, email)
+            human_delay("api")
+    logger.info("[Codex] 邮箱 OTP 收到：%s", email_otp)
+    human_delay("otp_input")
+    return _submit_email_otp(session, email_otp)
+
+
+def _complete_protocol_login(
+    session: BrowserSession,
+    email: str,
+    otp_provider,
+    *,
+    start_url: str = "",
+) -> dict:
+    """协议登录：按 continue 页走邮箱 OTP / 密码 / TOTP，不预设只有 OTP。"""
+    material = _load_codex_login_material(email)
+    start = str(start_url or "").lower()
+    if "email-verification" in start or "email_otp" in start:
+        logger.info("[Codex] authorize 已落到验证码页，直接等 OTP：%s", str(start_url)[:160])
+        data = {
+            "page": {"type": "email_otp_verification"},
+            "continue_url": start_url,
+        }
+        step = "email_otp"
+    elif "log-in/password" in start or (start.endswith("/password") and "create-account" not in start):
+        logger.info("[Codex] authorize 已落到密码页，改走一次性邮箱码：%s", str(start_url)[:160])
+        data = {"page": {"type": "login_password"}, "continue_url": start_url}
+        step = "password"
+    elif "/log-in" in start:
+        logger.info("[Codex] authorize 已落到登录页，在 Codex 链上提交邮箱：%s", str(start_url)[:160])
+        data = _submit_email(session, email) or {}
+        human_delay("form")
+        step = _classify_auth_step(data)
+    else:
+        data = _submit_email(session, email) or {}
+        human_delay("form")
+        step = _classify_auth_step(data)
+    if step == "signup":
+        raise RuntimeError(f"[Codex] 邮箱提交后落入注册页，拒绝继续: {extract_auth_continue(data)}")
+    if step == "unknown":
+        # 旧版 continue 常不带 page，此时 OTP 邮件通常已发出
+        step = "email_otp"
+        logger.info("[Codex] 提交邮箱后无明确 page，按邮箱 OTP 处理")
+
+    for _hop in range(6):
+        if step in {"phone", "workspace"}:
+            return data
+        if step == "password":
+            if material.get("prefer_password") and material.get("password"):
+                logger.info("[Codex] 登录落到密码页，使用账号 OpenAI 密码")
+                data = verify_login_password(session, str(material.get("password") or "")) or {}
+            else:
+                logger.info("[Codex] 登录落到密码页，改走一次性邮箱码")
+                data = _request_passwordless_login_otp(session, email) or {}
+                step = _classify_auth_step(data, str(data.get("continue_url") or ""))
+                if step != "email_otp":
+                    logger.warning("[Codex] passwordless 未落到验证码页 step=%s，仍按 OTP 等待", step)
+                    step = "email_otp"
+                data = _wait_and_submit_email_otp(session, email, otp_provider, after_ts=time.time()) or {}
+            step = _classify_auth_step(data)
+            if step == "unknown":
+                return data
+            continue
+        if step == "email_otp":
+            data = _wait_and_submit_email_otp(session, email, otp_provider, after_ts=time.time()) or {}
+            step = _classify_auth_step(data)
+            if step == "unknown":
+                return data
+            continue
+        if step == "totp":
+            secret = material.get("totp_secret") or load_totp_secret(email, None)
+            if not secret:
+                raise RuntimeError(f"[Codex] 需要 TOTP/2FA，但账号 {email} 无 totp_secret")
+            logger.info("[Codex] 检测到 TOTP 页，使用本地 totp_secret")
+            code = generate_totp_code(secret, wait_near_boundary=True)
+            continue_url, _page_type = extract_auth_continue(data)
+            data = verify_login_totp(session, code, challenge_url=continue_url) or {}
+            step = _classify_auth_step(data)
+            if step == "unknown":
+                return data
+            continue
+        raise RuntimeError(f"[Codex] 未知登录步骤 step={step} payload={str(data)[:200]}")
+    return data
+
+
+def _probe_phone_required(session: BrowserSession) -> bool:
+    """登录后探测是否还停在绑号页；已到 consent/workspace 则不算需要绑号。"""
+    headers = session.get_auth_navigate_headers(referer="https://auth.openai.com/")
+    try:
+        resp = session.get("https://auth.openai.com/add-phone", headers=headers, allow_redirects=True)
+    except Exception as exc:
+        logger.info("[Codex] 探测绑号页失败，按不需要绑号处理：%s", str(exc)[:160])
+        return False
+    url = str(getattr(resp, "url", "") or "").lower()
+    if any(k in url for k in ("add-phone", "phone-verification", "phone-otp", "phone_otp")):
+        return True
+    if any(k in url for k in ("consent", "workspace", "callback", "localhost")):
+        return False
+    body = (getattr(resp, "text", "") or "")[:4000].lower()
+    return "add-phone" in body and any(k in body for k in ("phone number", "phone_number", 'name="phonenumber"'))
+
+
+def _continue_codex_login_after_authorize(
+    session: BrowserSession,
+    email: str,
+    otp_provider,
+    landed: str,
+) -> dict:
+    """Codex authorize 落点后的登录续步。停在 /log-in 时要提交邮箱，不能去接码。"""
+    step = _classify_auth_step({"continue_url": landed}, landed)
+    logger.info("[Codex] authorize 后续步 step=%s url=%s", step, str(landed or "")[:160])
+    if step in {"phone", "workspace"}:
+        return {"continue_url": landed or ""}
+    return _complete_protocol_login(session, email, otp_provider, start_url=landed) or {"continue_url": landed or ""}
+
+
+class PhoneOtpNeedReauth(RuntimeError):
+    """短信已发出或授权步已死，本会话不能再换号；换号次数仍计入 SMS_MAX_RETRIES。"""
+
+    def __init__(self, message: str, *, sms_attempts_used: int):
+        super().__init__(message)
+        self.sms_attempts_used = int(sms_attempts_used)
+
+
+def _do_phone_verification_if_needed(
+    session: BrowserSession,
+    last_payload: dict | None = None,
+    *,
+    sms_attempt_start: int = 1,
+) -> bool:
+    """只在登录响应或探测确认要绑号时才接码；已过登录则跳过。"""
+    step = _classify_auth_step(last_payload)
+    if step == "workspace":
+        logger.info("[Codex] 登录后已到 consent/workspace，跳过手机号")
+        return False
+    if step in {"login_email", "email_otp", "password", "signup", "totp"}:
+        logger.info("[Codex] 仍在登录步骤 step=%s，跳过手机号", step)
+        return False
+    if step != "phone" and not _probe_phone_required(session):
+        logger.info("[Codex] 未检测到绑号页，跳过手机号")
+        return False
+    _do_phone_verification(session, sms_attempt_start=sms_attempt_start)
+    return True
 
 
 # ============================================================
@@ -960,30 +1352,117 @@ def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "
     time.sleep(seconds)
 
 
-def _do_phone_verification(session: BrowserSession) -> None:
+def _auth_page_step(url: str) -> str:
+    text = str(url or "").lower()
+    if "add-phone" in text:
+        return "add_phone"
+    if any(k in text for k in ("phone-verification", "phone-otp", "phone_otp")):
+        return "phone_otp"
+    if "/log-in" in text:
+        return "login"
+    if any(k in text for k in ("localhost:1455", "sign-in-with-chatgpt", "/codex/consent")):
+        return "workspace"
+    return "other"
+
+
+def _navigate_auth_page(session: BrowserSession, url: str, *, referer: str = "https://auth.openai.com/") -> str:
+    headers = session.get_auth_navigate_headers(referer=referer)
+    resp = session.get(url, headers=headers, allow_redirects=True)
+    return str(getattr(resp, "url", "") or "")
+
+
+def _ensure_add_phone_step(session: BrowserSession) -> str:
+    """换号前必须真正回到 add-phone 输入页，再买号。
+
+    对齐指纹浏览器：GET /add-phone（验证码页则相当于点 Change）。
+    第一次 send 成功后会话会进 phone-otp；协议若不复位就再 POST send，会 invalid_auth_step。
+    落到 /log-in 或仍停在验证码页时不能买下一个号。
+    """
+    referers = (
+        "https://auth.openai.com/",
+        "https://auth.openai.com/phone-verification",
+    )
+    landed = ""
+    step = "other"
+    for referer in referers:
+        landed = _navigate_auth_page(
+            session,
+            "https://auth.openai.com/add-phone",
+            referer=referer,
+        )
+        step = _auth_page_step(landed)
+        logger.info("[Codex] 复位 add-phone 落点: %s step=%s referer=%s", landed[:160], step, referer)
+        if step == "add_phone":
+            return landed
+        if step == "login":
+            raise RuntimeError("换号前会话已回到登录页，停止买号")
+        if step == "workspace":
+            raise RuntimeError("换号前已离开绑号流程，停止买号")
+    raise RuntimeError(
+        f"换号前未能回到 add-phone（step={step} url={landed[:160]}），停止买号"
+    )
+
+
+def _keep_phone_otp_session(session: BrowserSession) -> str:
+    """发短信后落到验证码页，并在等短信时保活，避免空等 60s 被踢回 /log-in。"""
+    landed = _navigate_auth_page(
+        session,
+        "https://auth.openai.com/phone-verification",
+        referer="https://auth.openai.com/add-phone",
+    )
+    step = _auth_page_step(landed)
+    logger.info("[Codex] 等短信保活落点: %s step=%s", landed[:160], step)
+    return step
+
+
+def _wait_sms_code_keep_session(session: BrowserSession, activation_id: str, http) -> str:
+    total_wait = int(getattr(_cfg, "SMS_CODE_WAIT", 60) or 60)
+    interval = int(getattr(_cfg, "SMS_POLL_INTERVAL", 5) or 5)
+    deadline = time.time() + total_wait
+    last_timeout: Exception | None = None
+    while time.time() < deadline:
+        slice_wait = min(12, max(1, int(deadline - time.time())))
+        try:
+            return sms_provider.wait_for_sms_code(
+                activation_id,
+                http,
+                max_wait=slice_wait,
+                poll_interval=min(interval, slice_wait),
+            )
+        except sms_provider.SmsCodeTimeout as exc:
+            last_timeout = exc
+            step = _keep_phone_otp_session(session)
+            if step == "login":
+                raise RuntimeError("等短信期间会话掉回登录页，停止换号空耗") from exc
+    if last_timeout:
+        raise last_timeout
+    raise sms_provider.SmsCodeTimeout(f"等待短信超时 activation_id={activation_id}")
+
+
+def _do_phone_verification(session: BrowserSession, *, sms_attempt_start: int = 1) -> None:
     """
     用接码平台拿号 → add-phone/send 发短信 → 收码 → phone-otp/validate。
-    一个号收不到码或被 OpenAI 拒就取消换号，最多 SMS_MAX_RETRIES 次（热加载）。
 
-    实际平台适配在 core.sms_provider：
-        - SMS_PROVIDER="grizzly"：GrizzlySMS handler_api.php
-        - SMS_PROVIDER="l"：L_API.md 的 /take-phone 和 /fetch-code JSON 接口
+    换号次数计入 SMS_MAX_RETRIES（热加载），跨「发码后重开授权」累计，不重置。
+    send 未成功、仍停在 add-phone 时可以换号。
+    send 已成功进入验证码页后不能换号，抛 PhoneOtpNeedReauth 整段重开 authorize。
     """
     http = sms_provider._http()
-    max_retries = _cfg.SMS_MAX_RETRIES
+    max_retries = int(getattr(_cfg, "SMS_MAX_RETRIES", 10) or 10)
+    start = max(1, int(sms_attempt_start or 1))
     provider = _sms_provider_name()
     try:
         last_err = None
-        for attempt in range(1, max_retries + 1):
+        for attempt in range(start, max_retries + 1):
             activation_id = None
             try:
+                _ensure_add_phone_step(session)
                 activation_id, phone = sms_provider.acquire_number(http, attempt_index=attempt)
                 logger.info(
                     f"[Codex] 手机验证尝试 {attempt}/{max_retries}，"
                     f"provider={provider}, activation_id={activation_id}, 号码=+{phone}"
                 )
 
-                # 发短信
                 send_resp = _post_json(
                     session,
                     "https://auth.openai.com/api/accounts/add-phone/send",
@@ -993,33 +1472,52 @@ def _do_phone_verification(session: BrowserSession) -> None:
                 send_text = _response_text(send_resp)
                 send_reason = _phone_failure_reason(send_text, send_resp.status_code)
                 if send_resp.status_code not in (200, 204) or send_reason:
-                    # 号码无效 / 无法发送 / WhatsApp 通道 / 限流等 → 释放当前号并换号。
                     logger.warning(
                         f"[Codex] add-phone/send 未成功 reason={send_reason or 'unknown'}, "
                         f"status={send_resp.status_code}: {send_text[:240]}，换号重试"
                     )
                     sms_provider.cancel(activation_id, http)
+                    if send_reason == "invalid_auth_step":
+                        raise PhoneOtpNeedReauth(
+                            f"add-phone/send 步骤不对，需重开授权（SMS {attempt}/{max_retries}）",
+                            sms_attempts_used=attempt,
+                        )
                     _sleep_before_phone_retry(attempt, max_retries)
                     continue
 
-                # 通知平台短信已发出（status=1）；BAD_STATUS 等失败不能中断等码
                 sms_provider.mark_sms_sent(activation_id, http=http)
 
-                # 定时轮询接码平台获取短信。wait_for_sms_code 内部按 SMS_POLL_INTERVAL 轮询，
-                # 最长等待 SMS_CODE_WAIT；超时立即取消当前号并换号。
+                land_step = _keep_phone_otp_session(session)
+                if land_step == "login":
+                    sms_provider.cancel(activation_id, http)
+                    raise PhoneOtpNeedReauth(
+                        f"发短信后会话掉回登录页，需重开授权（SMS {attempt}/{max_retries}）",
+                        sms_attempts_used=attempt,
+                    )
+
                 try:
                     logger.info(
                         f"[Codex] 短信已发送，开始轮询验证码 activation_id={activation_id}, "
                         f"wait={_cfg.SMS_CODE_WAIT}s, interval={_cfg.SMS_POLL_INTERVAL}s"
                     )
-                    sms_code = sms_provider.wait_for_sms_code(activation_id, http)
+                    sms_code = _wait_sms_code_keep_session(session, activation_id, http)
                 except sms_provider.SmsCodeTimeout:
-                    logger.warning(f"[Codex] 号码 +{phone} 在 {_cfg.SMS_CODE_WAIT}s 内未收到短信，取消换号")
+                    logger.warning(
+                        f"[Codex] 号码 +{phone} 在 {_cfg.SMS_CODE_WAIT}s 内未收到短信；"
+                        f"验证码页无法换号，取消后重开授权（SMS {attempt}/{max_retries}）"
+                    )
                     sms_provider.cancel(activation_id, http)
-                    _sleep_before_phone_retry(attempt, max_retries)
-                    continue
+                    raise PhoneOtpNeedReauth(
+                        f"已发码未收到短信，需重开授权（SMS {attempt}/{max_retries}）",
+                        sms_attempts_used=attempt,
+                    )
+                except RuntimeError as exc:
+                    sms_provider.cancel(activation_id, http)
+                    raise PhoneOtpNeedReauth(
+                        f"{exc}（SMS {attempt}/{max_retries}）",
+                        sms_attempts_used=attempt,
+                    ) from exc
 
-                # 验手机码
                 val_resp = _post_json(
                     session,
                     "https://auth.openai.com/api/accounts/phone-otp/validate",
@@ -1028,22 +1526,24 @@ def _do_phone_verification(session: BrowserSession) -> None:
                 )
                 if val_resp.status_code != 200:
                     val_text = _response_text(val_resp)
-                    val_reason = _phone_failure_reason(val_text, val_resp.status_code) or 'code_rejected'
+                    val_reason = _phone_failure_reason(val_text, val_resp.status_code) or "code_rejected"
                     logger.warning(
                         f"[Codex] phone-otp/validate 失败 reason={val_reason}, status={val_resp.status_code}: "
-                        f"{val_text[:240]}，换号重试"
+                        f"{val_text[:240]}；验证码页无法换号，需重开授权"
                     )
                     sms_provider.cancel(activation_id, http)
-                    _sleep_before_phone_retry(attempt, max_retries)
-                    continue
+                    raise PhoneOtpNeedReauth(
+                        f"手机验证码未通过，需重开授权（SMS {attempt}/{max_retries}）",
+                        sms_attempts_used=attempt,
+                    )
 
-                # 成功
                 sms_provider.complete(activation_id, http)
                 logger.info("[Codex] 手机号验证通过")
                 return
 
+            except PhoneOtpNeedReauth:
+                raise
             except sms_provider.SmsNoBalanceError:
-                # 余额不足，重试无意义，直接抛
                 raise
             except sms_provider.SmsProviderError as exc:
                 last_err = exc
@@ -1868,12 +2368,103 @@ def download_sub2api_export_bulk(
 # 入口
 # ============================================================
 
+def _is_cf_block_error(exc_or_text) -> bool:
+    """协议文档页被 Cloudflare 拦（chatgpt.com/login 403 / Just a moment / 熔断）。"""
+    text = str(exc_or_text or "").lower()
+    if "unsupported_country" in text or "unsupported_region" in text:
+        return False
+    return any(h in text for h in (
+        "403", "429", "熔断", "cloudflare", "just a moment", "cf_",
+        "chatgpt-login", "auth-login status=",
+    ))
+
+
+def _local_fingerprint_driver_name() -> str:
+    """补跑协议被 CF 拦后的本地指纹驱动：跟随注册驱动，默认 cloak。"""
+    try:
+        from config import roxybrowser as roxy_cfg
+        reg = str(getattr(roxy_cfg, "REGISTRATION_DRIVER", "") or "").strip().lower()
+    except Exception:
+        reg = ""
+    if reg in ("roxy", "roxybrowser", "fingerprint", "browser"):
+        return "roxy"
+    return "cloak"
+
+
+def _run_codex_via_cloak(
+    email: str,
+    otp_provider=None,
+    proxy: str | None = None,
+    *,
+    force: bool = True,
+    sms_attempts_used: int = 0,
+) -> dict:
+    from config import cloakbrowser as _cloak_cfg
+    from core.cloakbrowser_driver import build_cloak_driver
+    from core.roxy_codex_oauth import run_roxy_codex_oauth
+
+    driver, opened = build_cloak_driver(proxy=proxy)
+    browser_proxy = resolve_browser_proxy_for_token_exchange(proxy=proxy, opened=opened)
+    logger.info(
+        "[Codex][Cloak] 浏览器实际代理将用于换 token：%s",
+        _mask_proxy_for_log(browser_proxy),
+    )
+    try:
+        return run_roxy_codex_oauth(
+            email,
+            otp_provider=otp_provider,
+            proxy=browser_proxy,
+            force=True,
+            existing_driver=driver,
+            existing_opened=opened,
+            reuse_existing_profile=True,
+            clear_existing_state=True,
+            sms_attempts_used=sms_attempts_used,
+        )
+    finally:
+        if not bool(getattr(_cloak_cfg, "CLOAK_KEEP_BROWSER_OPEN", False)):
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+def _run_codex_fingerprint_oauth(
+    email: str,
+    otp_provider=None,
+    proxy: str | None = None,
+    *,
+    force: bool = True,
+    sms_attempts_used: int = 0,
+) -> dict:
+    name = _local_fingerprint_driver_name()
+    logger.warning("[Codex] 协议登录面被拦，改走本地指纹兜底 driver=%s email=%s", name, email)
+    if name == "roxy":
+        from core.roxy_codex_oauth import run_roxy_codex_oauth
+        return run_roxy_codex_oauth(
+            email,
+            otp_provider=otp_provider,
+            proxy=proxy,
+            force=True,
+            sms_attempts_used=sms_attempts_used,
+        )
+    return _run_codex_via_cloak(
+        email,
+        otp_provider=otp_provider,
+        proxy=proxy,
+        force=force,
+        sms_attempts_used=sms_attempts_used,
+    )
+
+
 def run_codex_oauth(
     email: str,
     otp_provider=None,
     proxy: str | None = None,
     force: bool = False,
     _cpa_reauth_round: int = 1,
+    sms_attempts_used: int = 0,
+    fingerprint_fallback: bool = False,
 ) -> dict:
     """
     注册成功后的 Codex OAuth 授权入口（全新 session + 接码方案）。
@@ -1895,6 +2486,15 @@ def run_codex_oauth(
     if not email:
         return _codex_result(status="skipped", message="email 为空")
 
+    if fingerprint_fallback:
+        return _run_codex_fingerprint_oauth(
+            email,
+            otp_provider=otp_provider,
+            proxy=proxy,
+            force=True,
+            sms_attempts_used=sms_attempts_used,
+        )
+
     # Codex OAuth 支持多种驱动：
     # protocol：原纯协议；roxy/cloak/browser_use：用真实浏览器跑页面并捕获 localhost callback。
     try:
@@ -1905,7 +2505,13 @@ def run_codex_oauth(
             oauth_driver = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
         if oauth_driver in ("roxy", "roxybrowser", "fingerprint", "browser"):
             from core.roxy_codex_oauth import run_roxy_codex_oauth
-            return run_roxy_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
+            return run_roxy_codex_oauth(
+                email,
+                otp_provider=otp_provider,
+                proxy=proxy,
+                force=True,
+                sms_attempts_used=sms_attempts_used,
+            )
         if oauth_driver in ("browser_use", "browseruse", "browser-use", "bu"):
             from core.browser_use_codex_oauth import run_browser_use_codex_oauth
             return run_browser_use_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
@@ -1913,34 +2519,13 @@ def run_codex_oauth(
             from core.skyvern_codex_oauth import run_skyvern_codex_oauth
             return run_skyvern_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
         if oauth_driver in ("cloak", "cloakbrowser"):
-            from config import cloakbrowser as _cloak_cfg
-            from core.cloakbrowser_driver import build_cloak_driver
-            from core.roxy_codex_oauth import run_roxy_codex_oauth
-            driver, opened = build_cloak_driver(proxy=proxy)
-            # build_cloak_driver 在 proxy=None 时会自己抽代理；这里强制把实际代理回传，
-            # 避免后续 complete_local_codex_oauth 再抽一条不同 SID。
-            browser_proxy = resolve_browser_proxy_for_token_exchange(proxy=proxy, opened=opened)
-            logger.info(
-                "[Codex][Cloak] 浏览器实际代理将用于换 token：%s",
-                _mask_proxy_for_log(browser_proxy),
+            return _run_codex_via_cloak(
+                email,
+                otp_provider=otp_provider,
+                proxy=proxy,
+                force=True,
+                sms_attempts_used=sms_attempts_used,
             )
-            try:
-                return run_roxy_codex_oauth(
-                    email,
-                    otp_provider=otp_provider,
-                    proxy=browser_proxy,
-                    force=True,
-                    existing_driver=driver,
-                    existing_opened=opened,
-                    reuse_existing_profile=True,
-                    clear_existing_state=True,
-                )
-            finally:
-                if not bool(getattr(_cloak_cfg, "CLOAK_KEEP_BROWSER_OPEN", False)):
-                    try:
-                        driver.quit()
-                    except Exception:
-                        pass
         if oauth_driver not in ("protocol", "api", "http"):
             raise RuntimeError(f"[Codex] 不支持的 CODEX_OAUTH_DRIVER={oauth_driver!r}，可选 protocol / roxy / cloak / browser_use / skyvern")
     except ImportError:
@@ -1980,47 +2565,51 @@ def run_codex_oauth(
         else:
             raise RuntimeError(f"[Codex] 不支持的 CODEX_AUTH_URL_SOURCE={auth_source!r}")
 
-        # 2. 网络预检 + 建立会话。预检不携带邮箱，不触发 OTP；
-        #    真正烧邮箱的 authorize/continue 只在预检成功后执行。
-        network_preflight(session)
-        human_delay("navigate")
-
-        _bootstrap_authorize(session, state, code_challenge, auth_url=auth_url)
-        human_delay("navigate")
-
-        # 3. 提交邮箱（触发邮箱 OTP）
-        otp_after_ts = time.time()
-        _submit_email(session, email)
-        human_delay("form")
-
-        # 4. 收邮箱 OTP + 提交；若一直未收到，协议模式下重新提交邮箱触发重发。
-        email_otp = None
-        max_email_otp_attempts = 3
-        for email_otp_attempt in range(1, max_email_otp_attempts + 1):
-            logger.info(f"[Codex] 等待邮箱 OTP：{email}（第 {email_otp_attempt}/{max_email_otp_attempts} 次）")
+        # 2. 网络预检。403/熔断时换出口重开会话，避免整轮补跑直接死在 chatgpt.com/login。
+        preflight_exc: Exception | None = None
+        for pre_i in range(1, 4):
             try:
-                email_otp = otp_provider(email, after_ts=otp_after_ts)
+                if pre_i > 1:
+                    try:
+                        session.session.close()
+                    except Exception:
+                        pass
+                    if proxy is not None:
+                        raise preflight_exc
+                    logger.warning("[Codex] 预检失败，换出口重开会话 %s/3", pre_i)
+                    session = BrowserSession(proxy=None)
+                network_preflight(session)
+                preflight_exc = None
                 break
             except Exception as exc:
-                if email_otp_attempt >= max_email_otp_attempts:
+                preflight_exc = exc
+                text = str(exc)
+                if proxy is not None or ("403" not in text and "熔断" not in text):
                     raise
-                logger.warning(
-                    "[Codex] 一直未收到邮箱 OTP，重新提交邮箱触发重发后继续等待（下一轮 %s/%s）：%s: %s",
-                    email_otp_attempt + 1,
-                    max_email_otp_attempts,
-                    type(exc).__name__,
-                    str(exc)[:180],
-                )
-                otp_after_ts = time.time()
-                _submit_email(session, email)
-                human_delay("api")
-        logger.info(f"[Codex] 邮箱 OTP 收到：{email_otp}")
-        human_delay("otp_input")
-        _submit_email_otp(session, email_otp)
+                if pre_i >= 3:
+                    raise
+        if preflight_exc:
+            raise preflight_exc
+        human_delay("navigate")
+
+        # 3. Codex CLI authorize（去掉 prompt=login）。常见落点 /log-in，
+        #    必须在这条链上提交邮箱/OTP，不能先走 ChatGPT Web 登录再去绑手机。
+        landed = _bootstrap_authorize(
+            session, state, code_challenge, auth_url=auth_url, email=email, resume_sso=True,
+        )
+        logger.info("[Codex] Codex authorize 落点: %s", str(landed or "")[:200])
+        login_payload = _continue_codex_login_after_authorize(
+            session, email, otp_provider, landed or "",
+        )
         human_delay("api")
 
-        # 5. 手机号验证（接码，自动重试换号）
-        _do_phone_verification(session)
+        # 5. 仅当仍要求绑号时才接码；还在 /log-in 则禁止买号。
+        #    换号次数跨重开授权累计，计入 SMS_MAX_RETRIES。
+        _do_phone_verification_if_needed(
+            session,
+            login_payload,
+            sms_attempt_start=int(sms_attempts_used or 0) + 1,
+        )
         human_delay("post_auth")
 
         # 6. 选 workspace → 拿 callback code
@@ -2106,6 +2695,32 @@ def run_codex_oauth(
             email=email,
             message=f"账号已废（{exc.error_code}）",
         )
+    except PhoneOtpNeedReauth as exc:
+        try:
+            session.session.close()
+        except Exception:
+            pass
+        used = max(int(sms_attempts_used or 0), int(exc.sms_attempts_used or 0))
+        max_sms = int(getattr(_cfg, "SMS_MAX_RETRIES", 10) or 10)
+        logger.warning(
+            "[Codex] 本授权会话不能再换号，准备重开 authorize：%s SMS已用 %s/%s",
+            email, used, max_sms,
+        )
+        if used >= max_sms:
+            return _codex_result(
+                status="failed",
+                email=email,
+                message=f"{exc}",
+            )
+        return run_codex_oauth(
+            email,
+            otp_provider=otp_provider,
+            proxy=proxy,
+            force=force,
+            _cpa_reauth_round=_cpa_reauth_round,
+            sms_attempts_used=used,
+            fingerprint_fallback=fingerprint_fallback,
+        )
     except Exception as exc:
         if _is_cpa_callback_reauth_error(exc) and _cpa_reauth_round < 2:
             logger.warning(
@@ -2118,6 +2733,8 @@ def run_codex_oauth(
                 proxy=proxy,
                 force=force,
                 _cpa_reauth_round=_cpa_reauth_round + 1,
+                sms_attempts_used=sms_attempts_used,
+                fingerprint_fallback=fingerprint_fallback,
             )
         logger.warning(f"[Codex] 失败：{email}，{type(exc).__name__}: {str(exc)[:200]}")
         logger.debug("[Codex] 失败详情:", exc_info=True)

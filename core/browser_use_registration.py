@@ -23,7 +23,7 @@ from config import browser_use as _cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, _post_register_dwell_seconds
 from core.browser_use_client import BrowserUseClient
-from core.email_provider import resolve_email_source, wait_for_otp
+from core.email_provider import resolve_email_source, wait_for_otp, registration_otp_attempts
 from core.humanize import delay as human_delay
 
 logger = logging.getLogger(__name__)
@@ -2345,7 +2345,7 @@ def run_browser_use_registration(
                     logger.warning("[BrowserUse][OTP] 重新触发邮箱 OTP 失败，继续按当前页面处理：%s: %s", type(restart_exc).__name__, str(restart_exc)[:180])
 
             current_otp = otp_code
-            max_otp_attempts = 3
+            max_otp_attempts = registration_otp_attempts(email)
             for otp_attempt in range(1, max_otp_attempts + 1):
                 # 等验证码页出现
                 wait_end = time.time() + (20 if _fast_mode() else 45)

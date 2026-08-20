@@ -22,7 +22,7 @@ class LiveCheckProxySemanticsTests(unittest.TestCase):
                 self.session = MagicMock()
                 created.append(proxy)
 
-        with patch.object(al, "BrowserSession", _Sess), patch.object(al, "get_providers", side_effect=RuntimeError("HTTP Error 403: ")), patch.object(al, "get_csrf_token"), patch.object(al, "signin_openai"), patch.object(al.time, "sleep"):
+        with patch.object(al, "BrowserSession", _Sess), patch.object(al, "_warmup_live_check_session"), patch.object(al, "get_providers", side_effect=RuntimeError("HTTP Error 403: ")), patch.object(al, "get_csrf_token"), patch.object(al, "signin_openai"), patch.object(al.time, "sleep"):
             with self.assertRaises(RuntimeError):
                 al._network_preflight_with_retry("a@b.com", proxy="", max_attempts=2)
 
@@ -49,7 +49,7 @@ class LiveCheckProxySemanticsTests(unittest.TestCase):
         def _fake_pick(exclude=None):
             return picks.pop(0) if picks else "http://sticky-z"
 
-        with patch.object(al, "BrowserSession", _Sess), patch.object(al, "_pick_live_check_proxy", side_effect=lambda exclude: _fake_pick(exclude)), patch.object(al, "get_providers", side_effect=RuntimeError("HTTP Error 403: ")), patch.object(al.time, "sleep"), patch("config.proxy.mark_proxy_cooldown"):
+        with patch.object(al, "BrowserSession", _Sess), patch.object(al, "_warmup_live_check_session"), patch.object(al, "_pick_live_check_proxy", side_effect=lambda exclude: _fake_pick(exclude)), patch.object(al, "get_providers", side_effect=RuntimeError("HTTP Error 403: ")), patch.object(al.time, "sleep"), patch("config.proxy.mark_proxy_cooldown"):
             with self.assertRaises(RuntimeError):
                 al._network_preflight_with_retry(
                     "a@b.com",

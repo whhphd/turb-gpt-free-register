@@ -33,6 +33,36 @@ def _pool_source_arg(default: str = "outlook") -> str:
     return src if src in ("all", "outlook", "generic_api", "cloudflare_domain", "mailcom") else default
 
 
+def _start_mailcom_auto_aliases(primaries: list[str]) -> dict:
+    """导入接口先返回，别名在后台逐个创建，避免 5 个主邮箱把页面卡死。"""
+    emails = [str(x or "").strip() for x in (primaries or []) if str(x or "").strip()]
+    if not emails:
+        return {"created": 0, "imported_existing": 0, "failed": [], "pending": False, "queued": 0}
+
+    def _worker() -> None:
+        try:
+            from core.mailcom_client import auto_expand_imported_primaries
+            logger.info("[MailCom] 后台自动别名开始：%s 个主邮箱", len(emails))
+            out = auto_expand_imported_primaries(emails)
+            logger.info(
+                "[MailCom] 后台自动别名结束：新建=%s 同步=%s 失败=%s",
+                out.get("created") or 0,
+                out.get("imported_existing") or 0,
+                len(out.get("failed") or []),
+            )
+        except Exception:
+            logger.exception("[MailCom] 后台自动别名异常")
+
+    threading.Thread(target=_worker, name="mailcom-auto-alias", daemon=True).start()
+    return {
+        "created": 0,
+        "imported_existing": 0,
+        "failed": [],
+        "pending": True,
+        "queued": len(emails),
+    }
+
+
 def _with_pool_source(rows: list[dict], source: str) -> list[dict]:
     out = []
     for r in rows:
@@ -1620,8 +1650,7 @@ def create_app(auth_code: str | None = None) -> Flask:
                 inserted, skipped = db.import_generic_api_emails(records)
             elif only[0] == "mailcom":
                 inserted, skipped, primaries = db.import_mailcom_emails_ex(records)
-                from core.mailcom_client import auto_expand_imported_primaries
-                alias_info = auto_expand_imported_primaries(primaries)
+                alias_info = _start_mailcom_auto_aliases(primaries)
             else:
                 inserted, skipped = db.import_outlook_accounts(records)
 
@@ -1638,6 +1667,8 @@ def create_app(auth_code: str | None = None) -> Flask:
             payload["alias_created"] = alias_info.get("created") or 0
             payload["alias_synced"] = alias_info.get("imported_existing") or 0
             payload["alias_failed"] = alias_info.get("failed") or []
+            payload["alias_pending"] = bool(alias_info.get("pending"))
+            payload["alias_queued"] = int(alias_info.get("queued") or 0)
         return jsonify(payload)
 
     @app.post("/api/outlook/status")
@@ -2595,6 +2626,58 @@ def create_app(auth_code: str | None = None) -> Flask:
         except Exception:
             lines = 80
         return jsonify({"ok": True, "items": sr.get_restock_log_tail(lines=lines)})
+
+    # ---------- 30d.team 半自动兑换补号 ----------
+    @app.get("/api/pool-admin/team30d")
+    def api_pool_admin_team30d_status():
+        from core import team30d_restock as t30
+        t30.ensure_reclaim_worker_started()
+        return jsonify({"ok": True, **t30.get_status()})
+
+    @app.post("/api/pool-admin/team30d/config")
+    def api_pool_admin_team30d_config():
+        from core import team30d_restock as t30
+        data = request.get_json(silent=True) or {}
+        updates = data.get("config") if isinstance(data.get("config"), dict) else data
+        if not isinstance(updates, dict):
+            return jsonify({"ok": False, "error": "config 必须是对象"}), 400
+        try:
+            cfg = t30.save_config(updates)
+            t30.ensure_reclaim_worker_started()
+            return jsonify({"ok": True, "config": cfg, **t30.get_status()})
+        except Exception as exc:
+            logger.exception("30d 配置保存失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/pool-admin/team30d/redeem")
+    def api_pool_admin_team30d_redeem():
+        from core import team30d_restock as t30
+        data = request.get_json(silent=True) or {}
+        text = data.get("codes") or data.get("text") or ""
+        target_id = data.get("target_id")
+        try:
+            return jsonify(t30.redeem_codes(str(text), target_id=target_id))
+        except Exception as exc:
+            logger.exception("30d 兑换入池失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/pool-admin/team30d/reclaim")
+    def api_pool_admin_team30d_reclaim():
+        from core import team30d_restock as t30
+        try:
+            return jsonify(t30.run_reclaim_once())
+        except Exception as exc:
+            logger.exception("30d 找回失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/pool-admin/team30d/logs")
+    def api_pool_admin_team30d_logs():
+        from core import team30d_restock as t30
+        try:
+            lines = int(request.args.get("lines") or 80)
+        except Exception:
+            lines = 80
+        return jsonify({"ok": True, "items": t30.get_log_tail(lines=lines)})
 
     @app.get("/api/pool-admin/batches/<batch_id>")
     def api_pool_admin_batch_get(batch_id: str):

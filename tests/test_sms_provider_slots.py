@@ -667,6 +667,62 @@ class SmsProviderSlotTests(unittest.TestCase):
         finally:
             td.cleanup()
 
+    def test_min_price_003_keeps_chile_049_ahead_of_us(self):
+        """0.05 下限会滤掉智利 0.049；改成 0.03 后应压过美国 0.132。"""
+        for i in range(6):
+            sms_provider.record_delivery_outcome(
+                country="151", provider_id="3419", channel="smsbower",
+                outcome="success", activation_id=f"cl-ok-{i}",
+            )
+        for i in range(6):
+            sms_provider.record_delivery_outcome(
+                country="187", provider_id="3170", channel="smsbower",
+                outcome="success", activation_id=f"us-ok-{i}",
+            )
+        top_rows = [
+            {"country": "151", "name": "chile", "partners": [{"provider_id": "3419", "price": 0.049, "count": 80}]},
+            {"country": "187", "name": "united-states", "partners": [{"provider_id": "3170", "price": 0.132, "count": 80}]},
+        ]
+        v3_151 = {"151": {"dr": {"3419": {"count": 80, "price": 0.049}}}}
+        v3_187 = {"187": {"dr": {"3170": {"count": 80, "price": 0.132}}}}
+
+        def _rows(min_price: str):
+            http = _Http([json.dumps(v3_151), json.dumps(v3_187)])
+            with patch.object(codex_config, "SMS_PROVIDER", "smsbower"), \
+                 patch.object(codex_config, "SMSBOWER_API_KEY", "k"), \
+                 patch.object(codex_config, "SMSBOWER_API_BASE", "https://smsbower.page/stubs/handler_api.php"), \
+                 patch.object(codex_config, "SMS_SERVICE", "dr"), \
+                 patch.object(codex_config, "SMS_MAX_PRICE", "0.15"), \
+                 patch.object(codex_config, "SMS_MIN_PRICE", min_price), \
+                 patch.object(codex_config, "SMS_PREFERRED_COUNTRIES", ""), \
+                 patch.object(codex_config, "SMS_PROVIDER_MIN_STOCK", 1), \
+                 patch.object(codex_config, "SMS_AUTO_COUNTRY_MIN_STOCK", 0), \
+                 patch.object(codex_config, "SMS_PRICE_FLOOR_RATIO", 0.1), \
+                 patch.object(codex_config, "SMS_USE_TOP_COUNTRIES_WHITELIST", True), \
+                 patch.object(codex_config, "SMS_COUNTRY_WHITELIST", ""), \
+                 patch.object(codex_config, "SMS_ALLOW_OUTSIDE_WHITELIST", False), \
+                 patch.object(sms_provider, "resolve_country_whitelist", return_value=(["151", "187"], top_rows)), \
+                 patch.object(sms_provider, "get_top_countries_by_service", return_value=top_rows):
+                return sms_provider.list_provider_candidates(
+                    http, provider="smsbower", service="dr", countries=None, include_low_quality=False
+                )
+
+        blocked = _rows("0.05")
+        self.assertFalse(any(r.get("country") == "151" and r.get("provider_id") == "3419" for r in blocked))
+        self.assertTrue(any(r.get("country") == "187" and r.get("provider_id") == "3170" for r in blocked))
+
+        allowed = _rows("0.03")
+        self.assertTrue(any(r.get("country") == "151" and r.get("provider_id") == "3419" for r in allowed))
+        ordered = sms_provider.order_candidates_for_acquire(allowed, attempt_index=1, explore_prob=0.0)
+        self.assertEqual(ordered[0]["country"], "151")
+        self.assertEqual(ordered[0]["provider_id"], "3419")
+        self.assertEqual(ordered[0].get("bucket"), "value")
+        # 前 3 次不开放高价兜底：美国 0.132 不应出现在首选队列
+        self.assertFalse(any(r.get("country") == "187" for r in ordered))
+        later = sms_provider.order_candidates_for_acquire(allowed, attempt_index=4, explore_prob=0.0)
+        us = next(r for r in later if r.get("country") == "187")
+        self.assertEqual(us.get("bucket"), "fallback")
+
 
 if __name__ == "__main__":
     unittest.main()

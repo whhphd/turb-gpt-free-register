@@ -64,6 +64,27 @@ class OpenAIAuthFailureDetectTests(unittest.TestCase):
         text = "邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url=https://auth.openai.com/log-in/password"
         self.assertTrue(reg_svc._should_disable_failed_registration_email(text))
 
+    def test_mailcom_otp_timeout_is_not_disable(self):
+        text = "MailComMailError: 等待 mail.com 验证码超时: a@kittymail.com; last=尚未出现 after_ts 之后的 ChatGPT 6 位验证码邮件"
+        self.assertFalse(reg_svc._should_disable_failed_registration_email(text))
+        from core.email_provider import is_otp_not_received_error
+        self.assertTrue(is_otp_not_received_error(text))
+
+    def test_mailcom_registration_has_zero_retries(self):
+        retries, _delay = reg_svc._registration_retry_settings("alias@kittymail.com")
+        self.assertEqual(retries, 0)
+        other, _ = reg_svc._registration_retry_settings("user@outlook.com")
+        self.assertGreaterEqual(other, 0)
+
+    def test_mailcom_otp_attempts_is_one(self):
+        from core.email_provider import registration_otp_attempts, is_otp_not_received_error
+        self.assertEqual(registration_otp_attempts("a@kittymail.com"), 1)
+        self.assertEqual(registration_otp_attempts("a@gmail.com"), 3)
+        self.assertFalse(is_otp_not_received_error("MailComMailError: IMAP 登录失败"))
+        # EMAIL_SOURCE=mailcom 时也不能把未知 gmail 当成 mail.com
+        retries, _ = reg_svc._registration_retry_settings("someone@gmail.com")
+        self.assertGreater(retries, 0)
+
 
 class RoxyAuthPageInspectTests(unittest.TestCase):
     def test_inspect_rate_limit_from_url(self):

@@ -2,8 +2,10 @@
 """已注册账号查活：重新登录，成功拿到最新 ChatGPT accessToken 即视为正常。
 
 登录路径：
-  1) 账号有 password（尤其 password_totp 导入）→ 密码登录，必要时 TOTP/2FA
-  2) 否则 → 邮箱 OTP（outlook / 取码地址等可收信来源）
+  1) 协议：先打开登录页拿 CF cookie，再走 NextAuth providers/CSRF/signin
+  2) 账号有 password（尤其 password_totp 导入）→ 密码登录，必要时 TOTP/2FA
+  3) 否则 → 邮箱 OTP（outlook / 取码地址等可收信来源）
+  4) 协议登录面被 CF 403/429 拦死后，改走 Cloak 指纹浏览器登录兜底
 """
 import logging
 import threading
@@ -50,6 +52,89 @@ def _is_retryable_network_error(exc: BaseException) -> bool:
         return False
     text = str(exc or "").lower()
     return any(h in text for h in _RETRYABLE_NETWORK_HINTS)
+
+
+def _should_fallback_to_cloak(exc: BaseException) -> bool:
+    """协议登录面被 CF/WAF 拦死后，才改走指纹浏览器；业务失败不兜底。"""
+    if isinstance(exc, AccountUnusableError):
+        return False
+    if not _is_retryable_network_error(exc):
+        return False
+    text = str(exc or "").lower()
+    return any(h in text for h in ("403", "429", "熔断", "cloudflare", "just a moment", "cf_"))
+
+
+def _warmup_live_check_session(session: BrowserSession) -> None:
+    """对齐协议注册：先打开登录页拿 CF cookie，再打 NextAuth providers。
+
+    查活以前冷启动直接 GET /api/auth/providers，同一代理池上查套餐
+    （backend-api + Bearer）能过、这里却 403。注册协议会先访问
+    chatgpt.com/login → auth.openai.com/log-in → sentinel。
+    """
+    from core.openai_auth import network_preflight
+
+    logger.info("[查活] 协议预热：chatgpt.com/login → auth → sentinel（先拿 CF cookie）")
+    network_preflight(session)
+    snap = {}
+    try:
+        snap = session.cf_cookie_snapshot() or {}
+    except Exception:
+        snap = {}
+    logger.info("[查活] 协议预热完成 cf_cookies=%s", sorted(snap.keys()) if snap else "-")
+
+
+def _login_via_cloak_browser(
+    email: str,
+    proxy: str | None,
+    *,
+    totp_secret: str | None = None,
+) -> tuple[dict, dict]:
+    """协议 NextAuth 被拦后的兜底：Cloak 打开登录页拿 session/AT。"""
+    from core.cloakbrowser_driver import build_cloak_driver
+    from core.email_provider import wait_for_otp
+    from core.roxy_codex_oauth import _fill_email_and_otp
+    from core.roxy_registration import _fetch_chatgpt_session
+
+    use_proxy = proxy
+    if use_proxy is None:
+        use_proxy = _pick_live_check_proxy(set())
+    if use_proxy == "":
+        use_proxy = None
+
+    driver = None
+    opened = None
+    try:
+        logger.info("[查活] 改走 Cloak 指纹登录：%s proxy=%s", email, (str(use_proxy).split("@")[-1] if use_proxy else "直连"))
+        driver, opened = build_cloak_driver(proxy=use_proxy)
+        login_url = "https://chatgpt.com/auth/login"
+        _fill_email_and_otp(driver, email, wait_for_otp, login_url, totp_secret=totp_secret)
+        session_info = _fetch_chatgpt_session(driver, timeout=90)
+        access_token = str((session_info or {}).get("accessToken") or "")
+        if not access_token:
+            raise RuntimeError("Cloak 查活未拿到 accessToken")
+        used = ""
+        try:
+            used = str(((opened.raw or {}).get("proxy") if opened else None) or use_proxy or "")
+        except Exception:
+            used = str(use_proxy or "")
+        meta = {
+            "driver": "cloak",
+            "device_id": getattr(opened, "profile_id", None) or "cloakbrowser",
+            "proxy_used": used or None,
+        }
+        return session_info, meta
+    finally:
+        if driver is not None:
+            try:
+                from config import cloakbrowser as _cloak_cfg
+                keep = bool(getattr(_cloak_cfg, "CLOAK_KEEP_BROWSER_OPEN", False))
+            except Exception:
+                keep = False
+            if not keep:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
 
 def _pick_live_check_proxy(exclude: set[str]) -> str | None:
@@ -139,6 +224,7 @@ def _network_preflight_with_retry(email: str, proxy: str | None, max_attempts: i
         if callable(fingerprint_text):
             logger.info("[查活] 指纹摘要：%s", fingerprint_text())
         try:
+            _warmup_live_check_session(session)
             get_providers(session)
             csrf = get_csrf_token(session)
             authorize_url = signin_openai(session, csrf, email)
@@ -527,11 +613,59 @@ def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: b
                     email, login_mode, material.get("email_source") or "-",
                     material.get("has_mail"), bool(material.get("password")), bool(material.get("totp_secret")))
         if login_mode == "password_totp":
-            logger.info("[查活] 流程：Providers → CSRF → Signin → Authorize → 密码 → TOTP(如需) → OAuth callback → Session/AT")
+            logger.info("[查活] 流程：登录页预热 → Providers → CSRF → Signin → Authorize → 密码 → TOTP(如需) → OAuth callback → Session/AT")
         else:
-            logger.info("[查活] 流程：Providers → CSRF → Signin → Authorize → 邮箱 OTP → OAuth callback → Session/AT")
+            logger.info("[查活] 流程：登录页预热 → Providers → CSRF → Signin → Authorize → 邮箱 OTP → OAuth callback → Session/AT")
 
-        session, authorize_url = _network_preflight_with_retry(email, proxy)
+        session = None
+        try:
+            session, authorize_url = _network_preflight_with_retry(email, proxy)
+        except AccountUnusableError:
+            raise
+        except Exception as preflight_exc:
+            if not _should_fallback_to_cloak(preflight_exc):
+                raise
+            logger.warning(
+                "[查活] 协议登录面失败，改走指纹浏览器兜底：%s: %s",
+                type(preflight_exc).__name__,
+                str(preflight_exc)[:220],
+            )
+            try:
+                session_info, cloak_meta = _login_via_cloak_browser(
+                    email,
+                    proxy,
+                    totp_secret=material.get("totp_secret"),
+                )
+            except AccountUnusableError:
+                raise
+            except Exception as cloak_exc:
+                logger.warning(
+                    "[查活] Cloak 兜底失败：%s: %s",
+                    type(cloak_exc).__name__,
+                    str(cloak_exc)[:220],
+                )
+                raise RuntimeError(
+                    f"协议登录面失败: {type(preflight_exc).__name__}: {str(preflight_exc)[:180]}；"
+                    f"Cloak兜底失败: {type(cloak_exc).__name__}: {str(cloak_exc)[:180]}"
+                ) from cloak_exc
+            access_token = str(session_info.get("accessToken") or "")
+            user = session_info.get("user") or {}
+            account = session_info.get("account") or {}
+            logger.info("[查活] Cloak 正常：%s user_id=%s plan=%s", email, user.get("id"), account.get("planType"))
+            return {
+                "ok": True,
+                "status": "live",
+                "checked_at": checked_at,
+                "access_token": access_token,
+                "session": session_info,
+                "device_id": cloak_meta.get("device_id"),
+                "proxy_used": cloak_meta.get("proxy_used"),
+                "login_mode": login_mode,
+                "driver": cloak_meta.get("driver") or "cloak",
+                "fingerprint": {},
+                "fingerprint_text": "cloakbrowser",
+            }
+
         final_url = follow_authorize(session, authorize_url)
         dead_code = detect_account_unusable_text(final_url)
         if dead_code:
@@ -566,6 +700,7 @@ def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: b
             "device_id": session.device_id,
             "proxy_used": session.proxy or None,
             "login_mode": login_mode,
+            "driver": "protocol",
             "fingerprint": fp,
             "fingerprint_text": fingerprint_text() if callable(fingerprint_text) else "",
         }

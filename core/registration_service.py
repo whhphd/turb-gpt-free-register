@@ -225,6 +225,23 @@ def _disable_job_email(email: str | None, reason: str) -> bool:
         return False
 
 
+def _is_mailcom_registration_email(email: str | None) -> bool:
+    try:
+        from core.email_provider import is_mailcom_source
+        return bool(is_mailcom_source(email))
+    except Exception:
+        return False
+
+
+def _fail_mailcom_otp_miss(email: str | None, reason: object) -> bool:
+    try:
+        from core.email_provider import mark_mailcom_otp_miss
+        return bool(mark_mailcom_otp_miss(email, reason))
+    except Exception:
+        logger.exception("[Service] mail.com 标失败失败: %s", email)
+        return False
+
+
 def _normalize_workers(max_workers: int | None) -> int:
     if max_workers is None:
         return _DEFAULT_MAX_WORKERS
@@ -315,8 +332,11 @@ class _JobLogContext:
             logging.getLogger().removeHandler(self.handler)
 
 
-def _registration_retry_settings() -> tuple[int, float]:
-    """返回 (最多重试次数, 重试间隔秒)。总尝试次数 = 1 + 重试次数。"""
+def _registration_retry_settings(email: str | None = None) -> tuple[int, float]:
+    """返回 (最多重试次数, 重试间隔秒)。总尝试次数 = 1 + 重试次数。
+
+    mail.com 主邮箱/别名不整单重试：等不到验证码就结束并标失败。
+    """
     retries = _DEFAULT_REGISTRATION_RETRIES
     delay = _DEFAULT_REGISTRATION_RETRY_DELAY
     try:
@@ -335,6 +355,8 @@ def _registration_retry_settings() -> tuple[int, float]:
         pass
     retries = max(0, min(10, int(retries)))
     delay = max(0.0, min(60.0, float(delay)))
+    if _is_mailcom_registration_email(email):
+        retries = 0
     return retries, delay
 
 
@@ -377,12 +399,39 @@ def execute_registration(
         except Exception:
             return False
 
-    max_retries, retry_delay = _registration_retry_settings()
-    max_attempts = 1 + max_retries
     job_email = str(email or "").strip() or None
     job_name = str(name or "").strip() or None
     last_error = "unknown"
     last_result: dict = {"success": False, "error": "unknown"}
+
+    if _stopped():
+        _release_unconsumed_job_email(job_email, "用户手动停止")
+        return {
+            "success": False,
+            "email": job_email,
+            "error": "用户手动停止",
+            "stopped": True,
+            "attempts": 0,
+        }
+    if not job_email:
+        try:
+            job_email, job_name, birthday0 = _prepare_registration_args()
+            birthday = birthday or birthday0
+        except Exception as exc:
+            err_text = f"{type(exc).__name__}: {exc}"
+            _log("error", f"领取邮箱失败: {err_text}")
+            return {
+                "success": False,
+                "email": None,
+                "error": err_text[:500],
+                "attempts": 0,
+            }
+    max_retries, retry_delay = _registration_retry_settings(job_email)
+    max_attempts = 1 + max_retries
+    if max_retries == 0:
+        _log("info", f"本任务固定使用邮箱: {job_email}（mail.com 不自动重试，收不到验证码直接标失败）")
+    else:
+        _log("info", f"本任务固定使用邮箱: {job_email}（失败重试不换号）")
 
     for attempt in range(1, max_attempts + 1):
         if _stopped():
@@ -396,10 +445,6 @@ def execute_registration(
             }
 
         try:
-            if not job_email:
-                job_email, job_name, birthday0 = _prepare_registration_args()
-                birthday = birthday or birthday0
-                _log("info", f"本任务固定使用邮箱: {job_email}（失败重试不换号）")
             use_email = job_email
             use_name = job_name or _random_display_name()
             use_birthday = birthday or generate_random_birthday()
@@ -457,6 +502,10 @@ def execute_registration(
                 _log("error", f"失败（邮箱需停用，不再用原邮箱重试）: {err}")
                 return last_result
 
+            if _fail_mailcom_otp_miss(email_to_handle, err):
+                _log("error", f"失败（mail.com 收不到验证码，已标失败，不再重试）: {err}")
+                return last_result
+
             if attempt < max_attempts:
                 wait_s = _retry_delay_for_error(retry_delay, err)
                 kind = "限流退避" if _is_rate_limit_registration_error(err) else "失败"
@@ -486,6 +535,9 @@ def execute_registration(
             if _should_disable_failed_registration_email(err_text):
                 _disable_job_email(email_to_handle, err_text)
                 _log("error", f"异常且邮箱需停用，不再用原邮箱重试: {err_text}")
+                return last_result
+            if _fail_mailcom_otp_miss(email_to_handle, err_text):
+                _log("error", f"异常（mail.com 收不到验证码，已标失败，不再重试）: {err_text}")
                 return last_result
             if _stopped():
                 _release_unconsumed_job_email(email_to_handle, err_text)
@@ -530,8 +582,6 @@ def _run_one_job(job_id: int, log_file: str) -> None:
 
     db.update_job(job_id, status="running", started_at=beijing_now_iso())
 
-    max_retries, retry_delay = _registration_retry_settings()
-    max_attempts = 1 + max_retries
     last_error = "unknown"
     last_account_id = None
     # 任务内固定邮箱：首次领取后，失败重试始终用同一邮箱，不重新领号。
@@ -542,6 +592,40 @@ def _run_one_job(job_id: int, log_file: str) -> None:
         with _JobLogContext(log_file):
             from main import run_registration
             from core.profile_utils import generate_random_birthday
+
+            if is_stop_requested(job_id):
+                db.update_job(
+                    job_id,
+                    status="stopped",
+                    error="用户手动停止",
+                    completed_at=beijing_now_iso(),
+                )
+                log_logger.warning(f"[Job {job_id}] 已按用户请求停止")
+                return
+
+            try:
+                job_email, job_name, _birthday0 = _prepare_registration_args()
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"[:500]
+                db.update_job(
+                    job_id,
+                    status="failed",
+                    error=last_error,
+                    completed_at=beijing_now_iso(),
+                )
+                log_logger.error(f"[Job {job_id}] 领取邮箱失败: {last_error}")
+                return
+            db.update_job(job_id, email=job_email)
+            max_retries, retry_delay = _registration_retry_settings(job_email)
+            max_attempts = 1 + max_retries
+            if max_retries == 0:
+                log_logger.info(
+                    f"[Job {job_id}] 本任务固定使用邮箱: {job_email}（mail.com 不自动重试，收不到验证码直接标失败）"
+                )
+            else:
+                log_logger.info(
+                    f"[Job {job_id}] 本任务固定使用邮箱: {job_email}（失败重试不换号）"
+                )
 
             for attempt in range(1, max_attempts + 1):
                 if is_stop_requested(job_id):
@@ -556,12 +640,6 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     return
 
                 try:
-                    if not job_email:
-                        job_email, job_name, _birthday0 = _prepare_registration_args()
-                        db.update_job(job_id, email=job_email)
-                        log_logger.info(
-                            f"[Job {job_id}] 本任务固定使用邮箱: {job_email}（失败重试不换号）"
-                        )
                     email = job_email
                     name = job_name or _random_display_name()
                     birthday = generate_random_birthday()
@@ -641,6 +719,20 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                         )
                         return
 
+                    if _fail_mailcom_otp_miss(email_to_handle, err):
+                        db.update_job(
+                            job_id,
+                            status="failed",
+                            email=result_email or job_email,
+                            account_id=account_id,
+                            error=last_error,
+                            completed_at=beijing_now_iso(),
+                        )
+                        log_logger.error(
+                            f"[Job {job_id}] 失败（mail.com 收不到验证码，已标失败，不再重试）: {err}"
+                        )
+                        return
+
                     # 可重试失败：保留邮箱占用，不回收、不换号。限流只加退避，不降并发。
                     if attempt < max_attempts:
                         wait_s = _retry_delay_for_error(retry_delay, err)
@@ -700,6 +792,18 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                         )
                         log_logger.error(
                             f"[Job {job_id}] 异常且邮箱需停用，不再用原邮箱重试: {err_text}"
+                        )
+                        return
+                    if _fail_mailcom_otp_miss(email_to_handle, err_text):
+                        db.update_job(
+                            job_id,
+                            status="failed",
+                            email=job_email,
+                            error=last_error,
+                            completed_at=beijing_now_iso(),
+                        )
+                        log_logger.error(
+                            f"[Job {job_id}] 异常（mail.com 收不到验证码，已标失败，不再重试）: {err_text}"
                         )
                         return
                     if is_stop_requested(job_id):

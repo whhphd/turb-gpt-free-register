@@ -95,6 +95,11 @@ def _start_background_workers() -> None:
         sogouedu_restock.ensure_restock_monitor_started()
     except Exception:
         logging.getLogger(__name__).exception("SogouEdu 自动补池 worker 启动失败")
+    try:
+        from core import team30d_restock
+        team30d_restock.ensure_reclaim_worker_started()
+    except Exception:
+        logging.getLogger(__name__).exception("30d 找回 worker 启动失败")
 
 
 def main() -> None:

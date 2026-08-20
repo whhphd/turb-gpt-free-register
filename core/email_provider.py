@@ -89,6 +89,64 @@ def acquire_email() -> str:
     raise RuntimeError(f"所有邮箱来源均领取失败: {sources}; last={last_exc}")
 
 
+def is_mailcom_source(email: str | None) -> bool:
+    """邮箱是否属于 mail.com 池/域名（主邮箱和别名都算）。
+
+    不走 resolve_email_source 的默认来源兜底：EMAIL_SOURCE=mailcom 时，
+    未入库的 gmail/outlook 也会被误判成 mailcom。
+    """
+    addr = str(email or "").strip()
+    if not addr or "@" not in addr:
+        return False
+    try:
+        from core.mailcom_client import get_account_context
+        if get_account_context(addr):
+            return True
+    except Exception:
+        pass
+    try:
+        from core import db
+        if db.get_mailcom_email_by_email(addr):
+            return True
+    except Exception:
+        pass
+    try:
+        from core.mailcom_client import is_mailcom_address
+        return bool(is_mailcom_address(addr))
+    except Exception:
+        return False
+
+
+def registration_otp_attempts(email: str | None) -> int:
+    """mail.com 等不到验证码不点重发；其它来源保持 3 次。"""
+    return 1 if is_mailcom_source(email) else 3
+
+
+def is_otp_not_received_error(error: object) -> bool:
+    """识别「这次注册没等到邮箱验证码」，不是 IMAP 登录失败或验证码填错。"""
+    text = str(error or "")
+    if not text:
+        return False
+    return any(k in text for k in (
+        "等待 mail.com 验证码超时",
+        "等待验证码超时",
+        "一直未收到验证码",
+        "未收到验证码",
+        "验证码超时",
+    ))
+
+
+def mark_mailcom_otp_miss(email: str | None, reason: object) -> bool:
+    """mail.com 收不到验证码：标 failed，不再回到 available。"""
+    addr = str(email or "").strip()
+    if not addr or not is_mailcom_source(addr) or not is_otp_not_received_error(reason):
+        return False
+    note = f"收不到验证码: {str(reason or '')[:180]}"
+    release_email(addr, status="failed", note=note)
+    logger.warning("[EmailProvider] mail.com 收不到验证码，已标失败: %s", addr)
+    return True
+
+
 def resolve_email_source(email: str) -> str:
     """根据邮箱在各池中的归属判断实际来源。"""
     from core.gptmail_client import get_account_context as get_gptmail_context

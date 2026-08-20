@@ -3100,6 +3100,7 @@
       <button type="button" class="jobs-tb-btn is-active" id="btnPoolAdminSubMonitor" data-pool-sub="monitor">号池巡视</button>
       <button type="button" class="jobs-tb-btn" id="btnPoolAdminSubFinished" data-pool-sub="finished">成品号入池</button>
       <button type="button" class="jobs-tb-btn" id="btnPoolAdminSubRestock" data-pool-sub="restock">自动补池</button>
+      <button type="button" class="jobs-tb-btn" id="btnPoolAdminSubTeam30d" data-pool-sub="team30d">30d 兑换补号</button>
     </div>
 
     <section id="poolAdminMonitorSection" aria-label="号池巡视">
@@ -3240,6 +3241,45 @@
             <span class="sogou-restock-log-live is-paused" id="sogouRestockLogStateV2"><i aria-hidden="true"></i><span>等待自动刷新</span></span>
           </div>
           <pre class="sogou-restock-log" id="sogouRestockLogsV2" role="log" aria-live="polite">暂无自动补池日志</pre>
+        </section>
+      </div>
+    </section>
+
+    <section id="poolAdminTeam30dSection" class="hidden" aria-label="30d 兑换补号">
+      <div class="pool-monitor-panel" style="display:block">
+        <div class="pool-monitor-head">
+          <h2>30d 兑换补号</h2>
+          <span class="pool-monitor-meta" id="team30dStatusV2">半自动：你贴多少兑多少，全部入同一号池分组</span>
+          <button type="button" class="jobs-tb-btn" id="btnTeam30dReclaimNowV2">立即找回 401</button>
+        </div>
+        <div class="pool-monitor-summary" id="team30dSummaryV2">
+          <div class="pm-chip"><span>已记录卡密</span><strong id="team30dCardCountV2">0</strong></div>
+          <div class="pm-chip"><span>401 找回</span><strong id="team30dReclaimStateV2">-</strong></div>
+          <div class="pm-chip"><span>推池分组</span><strong id="team30dGroupV2">-</strong></div>
+        </div>
+        <div class="pool-monitor-auto">
+          <label class="fld" style="flex:1;min-width:220px">货区编号（可空）<input type="text" id="team30dTargetIdV2" placeholder="不填则不传 target_id"></label>
+          <label class="pm-auto-switch" title="检测到 401 后自动找回并更新原号">
+            <input type="checkbox" id="team30dReclaimEnabledV2">
+            <span>401 自动找回</span>
+          </label>
+          <label class="fld">找回间隔（秒）<input type="number" min="15" id="team30dReclaimIntervalV2"></label>
+          <button type="button" class="jobs-tb-btn" id="btnTeam30dSaveV2">保存设置</button>
+        </div>
+        <label class="fld" style="display:block;margin:12px 0">兑换码（一行一个）
+          <textarea id="team30dCodesV2" rows="8" placeholder="RCL-xxxx&#10;RCL-yyyy" style="width:100%;font-family:ui-monospace,Consolas,monospace"></textarea>
+        </label>
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnTeam30dRedeemV2">兑换并入池</button>
+        </div>
+        <div class="pool-monitor-table-wrap">
+          <table class="pool-monitor-table"><thead><tr><th>卡密</th><th>状态</th><th>订单</th><th>邮箱</th><th>入池</th><th>更新时间</th><th>错误</th></tr></thead><tbody id="team30dCardsBodyV2"></tbody></table>
+        </div>
+        <section class="sogou-restock-log-section">
+          <div class="sogou-restock-log-head">
+            <h3>最近日志</h3>
+          </div>
+          <pre class="sogou-restock-log" id="team30dLogsV2" role="log">暂无日志</pre>
         </section>
       </div>
     </section>
@@ -6632,7 +6672,9 @@ async function doImportOutlook() {
     const mode = r.as_registered ? '已注册账号' : '邮箱池素材';
     const kinds = Array.isArray(r.kinds) && r.kinds.length ? `，类型=${r.kinds.join('+')}` : '';
     let msg = `按 ${mode} 导入：解析 ${r.parsed} 行，新增 ${r.inserted}，跳过 ${r.skipped}${kinds}${r.as_registered ? '；可到“账号”页选择后批量补跑 Codex' : ''}`;
-    if (!r.as_registered && (r.alias_created || r.alias_synced || (r.alias_failed || []).length)) {
+    if (!r.as_registered && r.alias_pending) {
+      msg += `；已入队 ${r.alias_queued || r.inserted || 0} 个主邮箱后台创建别名，页面可先关掉，到邮箱池刷新查看`;
+    } else if (!r.as_registered && (r.alias_created || r.alias_synced || (r.alias_failed || []).length)) {
       msg += `；自动别名 新建 ${r.alias_created || 0}，同步 ${r.alias_synced || 0}`;
       if ((r.alias_failed || []).length) msg += `，失败 ${(r.alias_failed || []).length}`;
     }
@@ -7992,27 +8034,107 @@ async function codexUploadPushPoolOnFiles(ev) {
   let FAB_SELECTED_ID = '';
   let FAB_POLL_TIMER = null;
   function showPoolAdminSub(sub) {
-    const s = (sub === 'finished' || sub === 'restock') ? sub : 'monitor';
+    const s = (sub === 'finished' || sub === 'restock' || sub === 'team30d') ? sub : 'monitor';
     localStorage.setItem('gpt_pool_admin_sub', s);
     const mon = $('#poolAdminMonitorSection');
     const fin = $('#poolAdminFinishedSection');
     const rst = $('#poolAdminRestockSection');
+    const t30 = $('#poolAdminTeam30dSection');
     if (mon) mon.classList.toggle('hidden', s !== 'monitor');
     if (fin) fin.classList.toggle('hidden', s !== 'finished');
     if (rst) rst.classList.toggle('hidden', s !== 'restock');
+    if (t30) t30.classList.toggle('hidden', s !== 'team30d');
     const b1 = $('#btnPoolAdminSubMonitor');
     const b2 = $('#btnPoolAdminSubFinished');
     const b3 = $('#btnPoolAdminSubRestock');
+    const b4 = $('#btnPoolAdminSubTeam30d');
     if (b1) b1.classList.toggle('is-active', s === 'monitor');
     if (b2) b2.classList.toggle('is-active', s === 'finished');
     if (b3) b3.classList.toggle('is-active', s === 'restock');
+    if (b4) b4.classList.toggle('is-active', s === 'team30d');
     if (s === 'finished') loadFinishedBatches();
     if (s === 'restock') loadSogouRestock();
+    if (s === 'team30d') loadTeam30d();
     syncSogouRestockLogPolling();
   }
   bind('btnPoolAdminSubMonitor', () => showPoolAdminSub('monitor'));
   bind('btnPoolAdminSubFinished', () => showPoolAdminSub('finished'));
   bind('btnPoolAdminSubRestock', () => showPoolAdminSub('restock'));
+  bind('btnPoolAdminSubTeam30d', () => showPoolAdminSub('team30d'));
+
+  function _t30set(id, v) { const el = $(id); if (el) el.textContent = v == null ? '-' : String(v); }
+  function _t30val(id) { return ($(id) && $(id).value) || ''; }
+  async function loadTeam30d() {
+    try {
+      const st = await api('/api/pool-admin/team30d');
+      const logs = await api('/api/pool-admin/team30d/logs?lines=80');
+      const cfg = st.config || {};
+      const el = (id) => $(id);
+      if (el('#team30dTargetIdV2') && !el('#team30dTargetIdV2').matches(':focus')) el('#team30dTargetIdV2').value = cfg.target_id || '';
+      if (el('#team30dReclaimEnabledV2')) el('#team30dReclaimEnabledV2').checked = !!cfg.reclaim_enabled;
+      if (el('#team30dReclaimIntervalV2') && !el('#team30dReclaimIntervalV2').matches(':focus')) el('#team30dReclaimIntervalV2').value = cfg.reclaim_interval_sec || 60;
+      _t30set('#team30dCardCountV2', st.cards || 0);
+      _t30set('#team30dReclaimStateV2', cfg.reclaim_enabled ? (st.worker_alive ? '运行中' : '待启动') : '关闭');
+      _t30set('#team30dGroupV2', cfg.push_group_id || '-');
+      _t30set('#team30dStatusV2', st.redeeming ? '正在兑换入池…' : '半自动：你贴多少兑多少，全部入同一号池分组');
+      const body = $('#team30dCardsBodyV2');
+      if (body) {
+        const items = st.card_items || [];
+        body.innerHTML = items.length ? items.slice().reverse().map(c => `<tr>
+          <td class="mono">${esc(c.card_code || '')}</td>
+          <td>${esc(c.status || '')}</td>
+          <td class="mono">${esc(c.order_no || '-')}</td>
+          <td>${esc((c.emails || []).join(', ') || '-')}</td>
+          <td>${esc(String(c.push_success ?? '-'))}</td>
+          <td>${esc(c.updated_at || '-')}</td>
+          <td>${esc(c.error || '')}</td>
+        </tr>`).join('') : '<tr><td colspan="7" style="color:#c0c4cc">还没有兑换记录</td></tr>';
+      }
+      const logEl = $('#team30dLogsV2');
+      if (logEl) logEl.textContent = (logs.items || []).join('\n') || '暂无日志';
+    } catch (err) {
+      showToast('加载 30d 兑换页失败: ' + err.message);
+    }
+  }
+  async function saveTeam30d() {
+    try {
+      await api('/api/pool-admin/team30d/config', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          target_id: _t30val('#team30dTargetIdV2'),
+          reclaim_enabled: !!($('#team30dReclaimEnabledV2') && $('#team30dReclaimEnabledV2').checked),
+          reclaim_interval_sec: Number(_t30val('#team30dReclaimIntervalV2') || 60),
+        }),
+      });
+      showToast('30d 设置已保存');
+      await loadTeam30d();
+    } catch (err) { showToast('保存失败: ' + err.message); }
+  }
+  async function redeemTeam30d() {
+    const btn = $('#btnTeam30dRedeemV2');
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api('/api/pool-admin/team30d/redeem', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ codes: _t30val('#team30dCodesV2'), target_id: _t30val('#team30dTargetIdV2') }),
+      });
+      showToast(r.ok ? `兑换完成 成功 ${r.success}/${r.total}` : (r.error || `部分失败 成功 ${r.success} 失败 ${r.failed}`));
+      await loadTeam30d();
+    } catch (err) { showToast('兑换失败: ' + err.message); }
+    finally { if (btn) btn.disabled = false; }
+  }
+  async function reclaimTeam30dNow() {
+    try {
+      const r = await api('/api/pool-admin/team30d/reclaim', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+      showToast(r.error || r.message || `找回完成 ${r.reclaimed || 0} 张`);
+      await loadTeam30d();
+    } catch (err) { showToast('找回失败: ' + err.message); }
+  }
+  bind('btnTeam30dSaveV2', saveTeam30d);
+  bind('btnTeam30dRedeemV2', redeemTeam30d);
+  bind('btnTeam30dReclaimNowV2', reclaimTeam30dNow);
 
   function _sogouInput(id, value) {
     const el = $(id);

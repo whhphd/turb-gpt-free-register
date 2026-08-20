@@ -37,7 +37,7 @@ PLAN_CHECK_PROXY = ""
 
 # 查套餐 / 生成 Codex Agent Token 使用独立的短超时和有限重试，避免后台任务长时间卡住。
 PLAN_CHECK_TIMEOUT = 15.0
-PLAN_CHECK_MAX_ATTEMPTS = 2
+PLAN_CHECK_MAX_ATTEMPTS = 3
 PLAN_CHECK_RETRY_DELAY = 1.5
 
 # 新注册账号的权益可能存在短暂同步延迟。首次查询失败，或返回 free 且暂未发现

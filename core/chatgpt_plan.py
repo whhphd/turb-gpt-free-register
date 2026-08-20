@@ -293,7 +293,8 @@ def _plan_check_settings(
 def _retryable_plan_error(http_status: int | None) -> bool:
     if http_status is None:
         return True
-    return http_status in {408, 409, 425, 429} or http_status >= 500
+    # 403 多为出口被 CF 拦，换 sticky 可过；401 是 AT 失效，换代理没用。
+    return http_status in {403, 408, 409, 425, 429} or http_status >= 500
 
 
 def _retry_wait_seconds(resp: Any, base_delay: float, attempt: int) -> float:
@@ -355,12 +356,50 @@ def check_account_plan(
         }
 
     last_result: dict | None = None
+    allow_rotate = proxy is None
+    failed_proxies: set[str] = set()
     for attempt in range(1, attempts + 1):
         env = None
         resp = None
+        if attempt > 1 and allow_rotate:
+            used = str(route.get("proxy") or "").strip()
+            if used:
+                failed_proxies.add(used)
+                try:
+                    from config.proxy import mark_proxy_cooldown
+                    mark_proxy_cooldown(used, reason="plan_check_403")
+                except Exception:
+                    pass
+            try:
+                from config.proxy import pick_proxy
+                nxt = str(pick_proxy(exclude=failed_proxies) or "").strip()
+            except Exception:
+                nxt = ""
+            if nxt:
+                route = {
+                    "proxy": nxt,
+                    "proxy_mode": str(route.get("proxy_mode") or "auto"),
+                    "network_route": "proxy",
+                    "proxy_used": _mask_proxy(nxt),
+                    "proxy_fallback_reason": "换出口重试",
+                }
+                route_meta = {k: v for k, v in route.items() if k != "proxy"}
+                logger.warning(
+                    "[Plan] 套餐查询换出口重试 %s/%s proxy=%s",
+                    attempt, attempts, _mask_proxy(nxt),
+                )
         try:
             # 套餐查询只需要稳定的请求头，不需要额外访问 IP 地理信息接口。
             env = BrowserSession(proxy=route["proxy"], detect_exit_geo=False)
+            try:
+                env.session.get(
+                    "https://chatgpt.com/login",
+                    headers=env.get_chatgpt_navigate_headers(referer="https://chatgpt.com/"),
+                    allow_redirects=True,
+                    timeout=timeout_seconds,
+                )
+            except Exception as exc:
+                logger.debug("[Plan] 预热 chatgpt.com 失败，继续查套餐: %s", exc)
             resp = env.session.get(
                 url,
                 headers=_common_headers(env, token),

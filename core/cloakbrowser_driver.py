@@ -517,19 +517,53 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     if locale_opts.get("accept_language"):
         context_kwargs["extra_http_headers"] = {"Accept-Language": locale_opts["accept_language"]}
 
+    har_path = None
+    har_kwargs: dict = {}
+    try:
+        from core.browser_protocol_capture import capture_enabled, har_output_path
+        if capture_enabled():
+            har_path = har_output_path()
+            har_kwargs = {
+                "record_har_path": str(har_path),
+                "record_har_content": "embed",
+                "record_har_mode": "full",
+            }
+            logger.info("[Cloak] HAR 临时抓包：%s", har_path)
+    except Exception as exc:
+        logger.info("[Cloak] HAR 抓包未启用：%s", str(exc)[:160])
+
     if user_data_dir:
-        context = launch_persistent_context(user_data_dir, **opts)
+        persist_opts = dict(opts)
+        persist_opts.update(har_kwargs)
+        try:
+            context = launch_persistent_context(user_data_dir, **persist_opts)
+        except TypeError:
+            context = launch_persistent_context(user_data_dir, **opts)
+            har_path = None
         page = context.new_page()
         browser = getattr(context, "browser", None) or context
         # persistent context 的 locale/timezone 已通过 launch_persistent_context 参数传入。
     else:
         browser = launch(**opts)
-        context = browser.new_context(**context_kwargs)
+        try:
+            context = browser.new_context(**context_kwargs, **har_kwargs)
+        except TypeError:
+            context = browser.new_context(**context_kwargs)
+            har_path = None
         page = context.new_page()
 
     driver = CloakSeleniumDriver(browser=browser, context=context, page=page)
     # Roxy/Cloak 共用部分页面操作函数；给共享函数一个显式日志前缀，
     # 避免 Cloak 注册流程里出现 `[Roxy注册]`。
     driver._registration_log_prefix = "[Cloak注册]"
+    driver._har_path = str(har_path) if har_path else ""
     driver.set_page_load_timeout(int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
-    return driver, CloakOpenResult(raw={"driver": "cloakbrowser", "proxy": proxy_url, "locale": locale_opts, "options": {k: v for k, v in opts.items() if k != "license_key"}})
+    raw = {
+        "driver": "cloakbrowser",
+        "proxy": proxy_url,
+        "locale": locale_opts,
+        "options": {k: v for k, v in opts.items() if k != "license_key"},
+    }
+    if har_path:
+        raw["har_path"] = str(har_path)
+    return driver, CloakOpenResult(raw=raw)

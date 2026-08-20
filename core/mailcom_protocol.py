@@ -123,7 +123,7 @@ class MailComClient:
                 return
             except MailComError as exc:
                 last_error = exc
-                if exc.kind in {"bad_credentials", "blocked"}:
+                if exc.kind in {"bad_credentials", "blocked", "login_redirect"}:
                     break
                 if attempt + 1 < retries:
                     time.sleep(2 * (attempt + 1))
@@ -172,7 +172,11 @@ class MailComClient:
             raise MailComError("mail.com 拒绝了当前网络的登录请求", kind="blocked", status=403)
         if response.status_code in (302, 303) and "ott=" not in location:
             kind = "bad_credentials" if "logout?ls=wd" in location else "login_redirect"
-            raise MailComError("登录未返回一次性令牌", kind=kind, status=401)
+            raise MailComError(
+                f"登录未返回一次性令牌 loc={location[:220] or '-'}",
+                kind=kind,
+                status=401,
+            )
         if response.status_code != 303 or "ott=" not in location:
             raise MailComError(f"登录响应异常 (HTTP {response.status_code})", kind="login_failed")
 
@@ -225,8 +229,10 @@ class MailComClient:
                     return token
             except MailComError:
                 pass
+        reused_sid = bool(self.sid)
         if not self.sid:
             self.login()
+            reused_sid = False
 
         try:
             response = self.session.post(
@@ -238,12 +244,22 @@ class MailComClient:
             )
         except requests.RequestException as exc:
             raise MailComError("无法连接 mail.com OAuth 服务", kind="network") from exc
-        if response.status_code in (401, 403):
-            raise MailComError("mail.com 会话已失效或被拒绝", kind="session_expired", status=401)
+        if response.status_code in (401, 403) or (response.status_code == 400 and reused_sid):
+            # 过期 sid 常见回 400 invalid_grant，不是 401；必须当会话失效重登。
+            body = (getattr(response, "text", "") or "")[:160]
+            raise MailComError(
+                f"mail.com 会话已失效或被拒绝 (HTTP {response.status_code}) {body}",
+                kind="session_expired",
+                status=401,
+            )
         if response.status_code == 429:
             raise MailComError("mail.com token 请求频率受限", kind="rate_limited", status=429)
         if response.status_code != 200:
-            raise MailComError(f"token 请求失败 (HTTP {response.status_code})", kind="oauth_failed")
+            body = (getattr(response, "text", "") or "")[:160]
+            raise MailComError(
+                f"token 请求失败 (HTTP {response.status_code}) {body}",
+                kind="oauth_failed",
+            )
         try:
             token = str(response.json()["access_token"])
         except (ValueError, KeyError) as exc:

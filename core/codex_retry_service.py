@@ -181,6 +181,27 @@ def _codex_retry_settings() -> tuple[int, float]:
     return retries, delay
 
 
+def _should_fingerprint_after_protocol_retries(result: dict | None) -> bool:
+    """补跑协议次数用尽后，仅 CF 403 且当前驱动仍是协议时才切指纹。"""
+    if not isinstance(result, dict) or result.get("ok"):
+        return False
+    try:
+        from core.codex_oauth import _is_cf_block_error
+    except Exception:
+        return False
+    if not _is_cf_block_error(result.get("message") or ""):
+        return False
+    try:
+        from config import codex as _codex_cfg
+        from config import roxybrowser as _roxy_cfg
+        oauth_driver = str(getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "protocol") or "protocol").strip().lower()
+        if oauth_driver == "same_as_registration":
+            oauth_driver = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
+    except Exception:
+        oauth_driver = "protocol"
+    return oauth_driver in ("protocol", "api", "http")
+
+
 def _is_terminal_codex_failure(result: dict | None) -> bool:
     """不可自动重试的终态：成功 / 停用 / 用户停止 / 废号。"""
     if not isinstance(result, dict):
@@ -390,6 +411,39 @@ def run_worker(
                         check_stop_requested(email)
                         time.sleep(min(0.5, max(0.05, end - time.time())))
                 continue
+
+            if _should_fingerprint_after_protocol_retries(result):
+                logger.warning(
+                    "[Codex 补跑] %s 协议已尝试 %s 次仍被 CF 拦，改走本地指纹兜底",
+                    email, max_attempts,
+                )
+                db.update_account_codex_status(email, "retrying", "协议多次 403，改走指纹浏览器")
+                try:
+                    result = run_codex_oauth(email, force=True, fingerprint_fallback=True)
+                    check_stop_requested(email)
+                except CodexRetryStopped as exc:
+                    result = {"status": "stopped", "ok": False, "message": str(exc) or "用户手动停止 Codex 补跑"}
+                    db.update_account_codex_status(email, "stopped", result["message"])
+                    result["attempts"] = attempt
+                    return result
+                except Exception as exc:
+                    if is_stop_requested(email):
+                        result = {"status": "stopped", "ok": False, "message": "用户手动停止 Codex 补跑"}
+                        db.update_account_codex_status(email, "stopped", result["message"])
+                        result["attempts"] = attempt
+                        return result
+                    result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {exc}"}
+                    logger.exception("[Codex 补跑] %s 指纹兜底异常", email)
+                logger.info(
+                    "[Codex 补跑] 指纹兜底结果：status=%s ok=%s msg=%s",
+                    result.get("status"), result.get("ok"), str(result.get("message") or "")[:180],
+                )
+                if result.get("ok"):
+                    db.update_account_codex_status(email, "success", None)
+                    logger.info("[Codex 补跑] %s 指纹兜底成功（协议已尝试 %s 次）", email, max_attempts)
+                    result["attempts"] = attempt
+                    result["fingerprint_fallback"] = True
+                    return result
 
             db.update_account_codex_status(email, result_status or "failed", result.get("message"))
             logger.warning(

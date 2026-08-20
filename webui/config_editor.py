@@ -321,11 +321,15 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "MAILCOM_USE_PROXY_POOL", "file": "email.py", "type": "bool", "group": "邮箱 / OTP",
-        "label": "mail.com接码走代理池", "help": "开启后，mail.com/kittymail 登录和收信从「代理池」抽一条并绑定到该邮箱；导入行已带代理时仍用导入代理",
+        "label": "mail.com接码走代理池", "help": "开启后，mail.com 取信/建别名从代理池抽代理；同一主邮箱和它的别名共用一条，不写回邮箱池",
     },
     {
         "key": "MAILCOM_AUTO_ALIAS_COUNT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
         "label": "mail.com导入后自动别名数", "help": "导入主邮箱后自动创建几个别名，用于同一收件箱多次注册。0=不自动创建；最大 9（含主邮箱一般不超过 10 个地址）",
+    },
+    {
+        "key": "MAILCOM_ALIAS_DOMAINS", "file": "email.py", "type": "list_str_multiline", "group": "邮箱 / OTP",
+        "label": "mail.com别名后缀域名", "help": "创建别名时使用的后缀，每行一个，如 usa.com、engineer.com。留空则从内置 mail.com 域名里随机挑，并尽量避开主邮箱域名",
     },
     {
         "key": "GPTMAIL_API_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",

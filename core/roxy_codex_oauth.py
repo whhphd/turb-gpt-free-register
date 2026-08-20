@@ -1416,11 +1416,36 @@ def _auth_origin(driver) -> str:
     return "https://auth.openai.com"
 
 
+def _try_return_to_add_phone_from_otp(driver) -> bool:
+    """从验证码页退回 add-phone 表单。现页没有 Change 号，整页 GET /add-phone 会冲成 /log-in。"""
+    _click_if_present(
+        driver,
+        [
+            "//button[contains(., 'Change')]",
+            "//a[contains(., 'Change')]",
+            "//button[contains(., 'Back')]",
+            "//a[contains(., 'Back')]",
+            "//button[contains(., '更改')]",
+            "//a[contains(., '更改')]",
+            "//button[contains(., '返回')]",
+            "//a[contains(., '返回')]",
+        ],
+        timeout=2,
+    )
+    if _has_strict_add_phone_form(driver):
+        return True
+    try:
+        driver.back()
+        human_delay("navigate")
+    except Exception as exc:
+        logger.info("[Codex][Browser] 验证码页 history back 失败：%s", str(exc)[:160])
+    return _has_strict_add_phone_form(driver)
+
+
 def _ensure_add_phone_input(driver, *, reason: str = ""):
     """确保当前页面回到 add-phone，并返回手机号输入框。
 
-    换号时如果还停留在 phone-verification/OTP 页，必须先回到手机号页，
-    再把新号码重新写入页面并重新提交。
+    send 未成功时应仍停在输入表单。已进验证码页时只能后退，不能整页打开 /add-phone。
     """
     if _has_strict_add_phone_form(driver):
         return _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=2)
@@ -1433,9 +1458,18 @@ def _ensure_add_phone_input(driver, *, reason: str = ""):
             return _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=2)
         current = str(getattr(driver, "current_url", "") or "")
 
+    if _is_phone_code_page(driver) or "phone-verification" in current.lower():
+        logger.info("[Codex][Browser] 验证码页换号：后退回表单，不整页打开 add-phone reason=%s url=%s", reason or "retry", current[:160])
+        if _try_return_to_add_phone_from_otp(driver):
+            return _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=8)
+        raise RuntimeError(
+            f"otp_no_add_phone_form: 验证码页无法退回输入表单，停止整页打开 /add-phone "
+            f"state={_phone_page_state(driver)}"
+        )
+
     target = _auth_origin(driver).rstrip("/") + "/add-phone"
     logger.info(
-        "[Codex][Browser] 当前不在手机号输入页，准备重新打开 add-phone 后换号：reason=%s url=%s target=%s",
+        "[Codex][Browser] 当前不在手机号输入页，准备打开 add-phone：reason=%s url=%s target=%s",
         reason or "retry", current, target,
     )
     try:
@@ -1443,8 +1477,7 @@ def _ensure_add_phone_input(driver, *, reason: str = ""):
         human_delay("navigate")
         return _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=10)
     except Exception as first_exc:
-        # 某些流程不允许直接打开 /add-phone，尝试浏览器返回到上一页。
-        logger.info("[Codex][Browser] 直接打开 add-phone 未拿到输入框，尝试 history back：%s", str(first_exc)[:160])
+        logger.info("[Codex][Browser] 打开 add-phone 未拿到输入框，尝试 history back：%s", str(first_exc)[:160])
         try:
             driver.back()
             human_delay("navigate")
@@ -2450,24 +2483,30 @@ def _wait_page_settle_after_submit() -> None:
 
 
 def _refresh_add_phone_for_retry(driver, *, reason: str = "") -> None:
-    """发送失败/换号前刷新手机号页，避免旧错误状态和旧号码残留。"""
+    """发送失败/换号前整理手机号页。已在验证码页时只后退，不整页打开 /add-phone。"""
     try:
-        logger.info("[Codex][Browser] 发送失败/准备换号，刷新手机号页面：%s", reason or "retry")
-        driver.refresh()
-        human_delay("navigate")
-        try:
+        logger.info("[Codex][Browser] 发送失败/准备换号：%s url=%s", reason or "retry", str(getattr(driver, "current_url", "") or "")[:160])
+        if _has_strict_add_phone_form(driver):
+            driver.refresh()
+            human_delay("navigate")
             _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=8)
             return
-        except Exception:
-            pass
-        # 如果刷新后仍不在输入页，强制回 add-phone。
+        if _is_phone_code_page(driver) or "phone-verification" in str(getattr(driver, "current_url", "") or "").lower():
+            if _try_return_to_add_phone_from_otp(driver):
+                return
+            logger.warning("[Codex][Browser] 验证码页未能退回输入表单，不整页打开 /add-phone")
+            return
+        driver.refresh()
+        human_delay("navigate")
+        if _has_strict_add_phone_form(driver):
+            return
         target = _auth_origin(driver).rstrip("/") + "/add-phone"
-        logger.info("[Codex][Browser] 刷新后未找到手机号输入框，重新打开：%s", target)
+        logger.info("[Codex][Browser] 刷新后未找到手机号输入框，打开：%s", target)
         driver.get(target)
         human_delay("navigate")
         _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=8)
     except Exception as exc:
-        logger.info("[Codex][Browser] 刷新手机号页失败，下一轮会再次尝试回到 add-phone：%s", str(exc)[:180])
+        logger.info("[Codex][Browser] 整理手机号页失败，下一轮再试：%s", str(exc)[:180])
 
 
 def _click_add_phone_continue_button(driver, *, timeout: int = 10) -> dict:
@@ -2573,8 +2612,11 @@ def _wait_after_phone_send(driver, timeout: int = 12) -> str:
         if _is_phone_code_state(last):
             return 'code_page'
         body = str(last.get('bodyText') or '')
+        reason = _classify_phone_page_failure(last)
+        if reason:
+            raise RuntimeError(f"{reason}: {body[:240]}")
         ch = _sms_channel_selection_state(driver)
-        # WhatsApp 被 React 回勾：先抢救一次 SMS 再提交，而不是立刻判死
+        # WhatsApp 被 React 回勾：仅在页面还没报错时抢救一次 SMS，避免 fraud_guard 后再发 WhatsApp。
         if (
             not sms_reasserted
             and ch.get("hasWhatsapp")
@@ -2590,12 +2632,9 @@ def _wait_after_phone_send(driver, timeout: int = 12) -> str:
                 force_submitted = True
                 time.sleep(2)
                 continue
-            except Exception as exc:
-                logger.warning("[Codex][Browser] SMS 重选失败：%s", str(exc)[:160])
+            except Exception as visc:
+                logger.warning("[Codex][Browser] SMS 重选失败：%s", str(visc)[:160])
                 sms_reasserted = True
-        reason = _classify_phone_page_failure(last)
-        if reason:
-            raise RuntimeError(f"{reason}: {body[:240]}")
         # 仍在 add-phone 且字段有 aria-invalid，认为号码被拒。
         if _is_add_phone_page(driver):
             invalid = any(str(i.get('ariaInvalid') or '').lower() == 'true' for i in (last.get('inputs') or []))
@@ -2745,11 +2784,55 @@ def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "
     time.sleep(seconds)
 
 
-def _do_phone_verification_if_present(driver) -> None:
+def _page_looks_like_http_500(driver) -> bool:
+    """浏览器后退/重提手机号后，OpenAI 常返回空 body 的 500 页。"""
+    title = ""
+    body = ""
+    try:
+        title = str(getattr(driver, "title", "") or "")
+    except Exception:
+        title = ""
+    try:
+        body = str(driver.execute_script(
+            "return (document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 800);"
+        ) or "")
+    except Exception:
+        body = ""
+    blob = f"{title}\n{body}".lower()
+    if "internal server error" in blob or "http error 500" in blob:
+        return True
+    if title.strip().startswith("500") or title.strip() == "500":
+        return True
+    return False
+
+
+def _phone_session_needs_reauth(exc, driver, *, send_committed: bool) -> bool:
+    """发码成功后、或换号触发 500 / invalid_auth_step 时，本会话不能再换号。"""
+    if send_committed:
+        return True
+    text = str(exc or "").lower()
+    if "otp_no_add_phone_form" in text or "invalid_auth_step" in text:
+        return True
+    if "internal server error" in text or "status=500" in text or "http 500" in text:
+        return True
+    try:
+        if _page_looks_like_http_500(driver):
+            return True
+        if _is_phone_code_page(driver) and any(k in text for k in ("500", "timeout", "empty_phone_otp")):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _do_phone_verification_if_present(driver, *, sms_attempt_start: int = 1) -> None:
     """如果页面要求手机号验证，则用当前 sms_provider 自动完成。"""
+    from core.codex_oauth import PhoneOtpNeedReauth
+
     provider = str(getattr(sms_provider._cfg, "SMS_PROVIDER", "") or "").strip().lower() if hasattr(sms_provider, "_cfg") else ""
     http = sms_provider._http()
     max_retries = int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10) if hasattr(sms_provider, "_cfg") else 10
+    start = max(1, int(sms_attempt_start or 1))
     try:
         # 如果页面没有手机号输入框，直接返回。
         try:
@@ -2766,13 +2849,14 @@ def _do_phone_verification_if_present(driver) -> None:
             return
 
         last_err = None
-        for attempt in range(1, max_retries + 1):
+        for attempt in range(start, max_retries + 1):
             activation_id = None
+            send_committed = False
             try:
+                logger.info("[Codex][Browser] 准备手机号输入页，再取号 attempt=%s/%s", attempt, max_retries)
+                _ensure_add_phone_input(driver, reason=f"attempt-{attempt}")
                 activation_id, phone = sms_provider.acquire_number(http, attempt_index=attempt)
                 logger.info("[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=+%s", attempt, max_retries, provider, phone)
-                logger.info("[Codex][Browser] 准备手机号输入页，重新设置新手机号")
-                _ensure_add_phone_input(driver, reason=f"attempt-{attempt}")
                 phone_fill = _set_phone_value(driver, f"+{phone}", timeout=10)
                 logger.info(
                     "[Codex][Browser] 已重新设置手机号：e164=%s visible=%s hidden=%s dialCode=%s country=%s",
@@ -2796,6 +2880,7 @@ def _do_phone_verification_if_present(driver) -> None:
 
                 # 等待页面进入 phone-verification；若号码无效/无法发送/WhatsApp 通道，立即换号。
                 _wait_after_phone_send(driver, timeout=15)
+                send_committed = True
                 logger.info("[Codex][Browser] 已进入手机验证码页")
 
                 # setStatus=1 失败（如 BAD_STATUS）绝不能换号：号码可能已在路上收码
@@ -2863,9 +2948,16 @@ def _do_phone_verification_if_present(driver) -> None:
                     )
                 sms_provider.complete(activation_id, http)
                 return
+            except PhoneOtpNeedReauth:
+                raise
             except Exception as exc:
                 last_err = exc
                 err_text = str(exc) or ""
+                try:
+                    if _is_phone_code_page(driver):
+                        send_committed = True
+                except Exception:
+                    pass
                 logger.warning("[Codex][Browser] 手机验证尝试失败，换号：%s", err_text[:240])
                 if activation_id:
                     # OpenAI 发码拒绝/号码无效：冷却该供应商槽，而不是整国。
@@ -2901,10 +2993,10 @@ def _do_phone_verification_if_present(driver) -> None:
                     raise RuntimeError(
                         f"接码平台余额不足或无可用号码，已停止换号止损：{err_text[:180]}"
                     ) from exc
-                if "invalid_auth_step" in str(exc):
-                    raise RuntimeError(
-                        "手机号流程进入 invalid_auth_step，说明授权状态还未从 email-verification 正常跳转或已失效；"
-                        "已停止继续换号，避免继续消耗号码"
+                if _phone_session_needs_reauth(exc, driver, send_committed=send_committed):
+                    raise PhoneOtpNeedReauth(
+                        f"指纹换号后会话已死或已发码无法再换号，需重开授权（SMS {attempt}/{max_retries}）：{err_text[:160]}",
+                        sms_attempts_used=attempt,
                     ) from exc
                 # 如果已经离开手机号/验证码相关页面，认为通过或不再需要；
                 # 如果仍在 phone-verification，则下一轮必须回 add-phone 重新填新号码再提交。
@@ -3028,6 +3120,7 @@ def _run_roxy_codex_oauth_once(
     reuse_existing_profile: bool = False,
     clear_existing_state: bool = True,
     totp_secret: str | None = None,
+    sms_attempts_used: int = 0,
 ) -> dict:
     """指纹浏览器 Codex OAuth 入口。
 
@@ -3048,28 +3141,8 @@ def _run_roxy_codex_oauth_once(
     browser_kind_token = _CODEX_BROWSER_KIND.set(_detect_browser_kind(opened))
     driver = existing_driver if reuse_existing_profile else None
     owns_driver = not reuse_existing_profile
+    capture = None
     try:
-        auth_source = proto._codex_auth_url_source()
-        code_verifier = None
-        sub2_auth = None
-        if auth_source == "cpa":
-            cpa_auth = proto._request_cpa_authorize_url()
-            state = cpa_auth["state"]
-            auth_url = cpa_auth["auth_url"]
-            logger.info("[Codex][Browser] 当前使用 CPA 授权地址: %s", auth_url)
-        elif auth_source == "sub2":
-            sub2_auth = proto._request_sub2_authorize_url()
-            state = sub2_auth["state"]
-            auth_url = sub2_auth["auth_url"]
-            logger.info("[Codex][Browser] 当前使用 sub2api 授权地址: %s", auth_url)
-        elif auth_source == "local":
-            code_verifier, code_challenge = proto._generate_pkce()
-            state = proto._generate_state()
-            auth_url = proto._build_authorize_url(state, code_challenge, prompt="login")
-            logger.info("[Codex][Browser] 当前使用本地 PKCE 授权地址: %s", auth_url)
-        else:
-            raise RuntimeError(f"[Codex][Browser] 不支持的 CODEX_AUTH_URL_SOURCE={auth_source!r}")
-
         if not driver:
             driver = _build_driver(opened)
             _center_browser_window(driver)
@@ -3077,86 +3150,138 @@ def _run_roxy_codex_oauth_once(
         logger.info("[Codex][Browser] 开始授权：%s，profile=%s，reuse_existing_profile=%s", email, opened.profile_id, reuse_existing_profile)
         if reuse_existing_profile and clear_existing_state:
             clear_roxy_browser_auth_state(driver)
+        try:
+            from core.browser_protocol_capture import attach_driver_capture
+            capture = attach_driver_capture(driver, email)
+        except Exception as cap_exc:
+            logger.warning("[Codex][Browser] 协议抓包挂载失败：%s", str(cap_exc)[:180])
 
-        secret = load_totp_secret(email, totp_secret)
-        if secret:
-            logger.info("[Codex][Browser] 账号已配置 TOTP secret，登录流将自动填写 2FA")
-        _fill_email_and_otp(driver, email, otp_provider, auth_url, totp_secret=secret)
-        # 兜底：邮箱 OTP 后到手机号前再扫一次 TOTP
-        _fill_totp_if_present(driver, email, totp_secret=secret, timeout=8)
-        human_delay("api")
-        logger.info("[Codex][Browser] 检查是否需要手机号验证")
-        _do_phone_verification_if_present(driver)
-        logger.info("[Codex][Browser] 手机验证处理完成/无需处理，等待授权确认和 callback")
-        callback_url = _finish_consent_workspace(driver)
-        code = proto._extract_code(callback_url, state)
-        logger.info("[Codex][Browser] 已捕获 callback code：%s...", code[:24])
+        sms_used = int(sms_attempts_used or 0)
+        max_sms = int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10)
+        reauth_round = 0
+        while True:
+            reauth_round += 1
+            auth_source = proto._codex_auth_url_source()
+            code_verifier = None
+            sub2_auth = None
+            if auth_source == "cpa":
+                cpa_auth = proto._request_cpa_authorize_url()
+                state = cpa_auth["state"]
+                auth_url = cpa_auth["auth_url"]
+                logger.info("[Codex][Browser] 当前使用 CPA 授权地址: %s", auth_url)
+            elif auth_source == "sub2":
+                sub2_auth = proto._request_sub2_authorize_url()
+                state = sub2_auth["state"]
+                auth_url = sub2_auth["auth_url"]
+                logger.info("[Codex][Browser] 当前使用 sub2api 授权地址: %s", auth_url)
+            elif auth_source == "local":
+                code_verifier, code_challenge = proto._generate_pkce()
+                state = proto._generate_state()
+                auth_url = proto._build_authorize_url(state, code_challenge, prompt="login")
+                logger.info("[Codex][Browser] 当前使用本地 PKCE 授权地址: %s", auth_url)
+            else:
+                raise RuntimeError(f"[Codex][Browser] 不支持的 CODEX_AUTH_URL_SOURCE={auth_source!r}")
 
-        if auth_source == "cpa":
-            submit_payload = proto._submit_cpa_callback(callback_url)
-            path = proto._save_cpa_local_record(
-                email=email,
-                callback_url=callback_url,
-                auth_url=auth_url,
-                state=state,
-                submit_payload=submit_payload,
+            if reauth_round > 1:
+                try:
+                    clear_roxy_browser_auth_state(driver)
+                except Exception:
+                    pass
+                logger.warning(
+                    "[Codex][Browser] 发码后无法换号，重开授权 round=%s SMS已用 %s/%s email=%s",
+                    reauth_round, sms_used, max_sms, email,
+                )
+
+            secret = load_totp_secret(email, totp_secret)
+            if secret:
+                logger.info("[Codex][Browser] 账号已配置 TOTP secret，登录流将自动填写 2FA")
+            try:
+                _fill_email_and_otp(driver, email, otp_provider, auth_url, totp_secret=secret)
+                # 兜底：邮箱 OTP 后到手机号前再扫一次 TOTP
+                _fill_totp_if_present(driver, email, totp_secret=secret, timeout=8)
+                human_delay("api")
+                logger.info("[Codex][Browser] 检查是否需要手机号验证")
+                _do_phone_verification_if_present(driver, sms_attempt_start=sms_used + 1)
+                logger.info("[Codex][Browser] 手机验证处理完成/无需处理，等待授权确认和 callback")
+            except proto.PhoneOtpNeedReauth as exc:
+                sms_used = max(sms_used, int(exc.sms_attempts_used or 0))
+                if sms_used >= max_sms:
+                    return proto._codex_result(
+                        status="failed",
+                        email=email,
+                        message=str(exc),
+                    )
+                continue
+
+            callback_url = _finish_consent_workspace(driver)
+            code = proto._extract_code(callback_url, state)
+            logger.info("[Codex][Browser] 已捕获 callback code：%s...", code[:24])
+
+            if auth_source == "cpa":
+                submit_payload = proto._submit_cpa_callback(callback_url)
+                path = proto._save_cpa_local_record(
+                    email=email,
+                    callback_url=callback_url,
+                    auth_url=auth_url,
+                    state=state,
+                    submit_payload=submit_payload,
+                )
+                msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
+                return proto._codex_result(
+                    status="success",
+                    ok=True,
+                    email=email,
+                    file_path=str(path) if path else None,
+                    callback_url=callback_url,
+                    message=f"{_codex_driver_name()}: {msg}",
+                )
+
+            if auth_source == "sub2":
+                submit_payload = proto._submit_sub2_callback(
+                    callback_url,
+                    session_id=(sub2_auth or {}).get("session_id", ""),
+                    redirect_uri=(proto.parse_qs(proto.urlparse(auth_url or "").query).get("redirect_uri") or [""])[0],
+                    name=email,
+                )
+                path = proto._save_sub2_local_record(
+                    email=email,
+                    callback_url=callback_url,
+                    auth_url=auth_url,
+                    state=state,
+                    submit_payload=submit_payload,
+                )
+                msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
+                return proto._codex_result(
+                    status="success",
+                    ok=True,
+                    email=email,
+                    file_path=str(path) if path else None,
+                    callback_url=callback_url,
+                    message=f"{_codex_driver_name()}: {msg}",
+                )
+
+            # 强制复用浏览器实际代理：Cloak/Roxy 可能在 opened.raw 里已固定 SID，
+            # 若仍传 proxy=None，BrowserSession 会再从池里抽一条，导致“浏览器通、换 token 挂”。
+            token_proxy = proto.resolve_browser_proxy_for_token_exchange(proxy=proxy, opened=opened)
+            logger.info(
+                "[Codex][Browser] 捕获 code 后换 token，复用浏览器代理：%s",
+                proto._mask_proxy_for_log(token_proxy),
             )
-            msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
+            done = proto.complete_local_codex_oauth(
+                email=email,
+                code=code,
+                code_verifier=code_verifier or "",
+                callback_url=callback_url,
+                proxy=token_proxy,
+            )
             return proto._codex_result(
                 status="success",
                 ok=True,
-                email=email,
-                file_path=str(path) if path else None,
+                email=done.get("email") or email,
+                file_path=str(done.get("path") or ""),
                 callback_url=callback_url,
-                message=f"{_codex_driver_name()}: {msg}",
+                message=f"{_codex_driver_name()} local plan={done.get('plan') or 'unknown'}",
             )
-
-        if auth_source == "sub2":
-            submit_payload = proto._submit_sub2_callback(
-                callback_url,
-                session_id=(sub2_auth or {}).get("session_id", ""),
-                redirect_uri=(proto.parse_qs(proto.urlparse(auth_url or "").query).get("redirect_uri") or [""])[0],
-                name=email,
-            )
-            path = proto._save_sub2_local_record(
-                email=email,
-                callback_url=callback_url,
-                auth_url=auth_url,
-                state=state,
-                submit_payload=submit_payload,
-            )
-            msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
-            return proto._codex_result(
-                status="success",
-                ok=True,
-                email=email,
-                file_path=str(path) if path else None,
-                callback_url=callback_url,
-                message=f"{_codex_driver_name()}: {msg}",
-            )
-
-        # 强制复用浏览器实际代理：Cloak/Roxy 可能在 opened.raw 里已固定 SID，
-        # 若仍传 proxy=None，BrowserSession 会再从池里抽一条，导致“浏览器通、换 token 挂”。
-        token_proxy = proto.resolve_browser_proxy_for_token_exchange(proxy=proxy, opened=opened)
-        logger.info(
-            "[Codex][Browser] 捕获 code 后换 token，复用浏览器代理：%s",
-            proto._mask_proxy_for_log(token_proxy),
-        )
-        done = proto.complete_local_codex_oauth(
-            email=email,
-            code=code,
-            code_verifier=code_verifier or "",
-            callback_url=callback_url,
-            proxy=token_proxy,
-        )
-        return proto._codex_result(
-            status="success",
-            ok=True,
-            email=done.get("email") or email,
-            file_path=str(done.get("path") or ""),
-            callback_url=callback_url,
-            message=f"{_codex_driver_name()} local plan={done.get('plan') or 'unknown'}",
-        )
     except AccountUnusableError as exc:
         logger.warning("[Codex][Browser] 账号已废：%s，%s", email, exc.error_code)
         return proto._codex_result(
@@ -3169,6 +3294,11 @@ def _run_roxy_codex_oauth_once(
         logger.debug("[Codex][Browser] 失败详情", exc_info=True)
         return proto._codex_result(status="failed", email=email, message=f"{type(exc).__name__}: {str(exc)[:220]}")
     finally:
+        if capture is not None:
+            try:
+                capture.flush()
+            except Exception:
+                pass
         # 注册后复用窗口时，driver/profile 生命周期由注册流程统一清理，
         # 这里不能 quit/delete，否则会提前销毁注册环境。
         if owns_driver and driver and not bool(_roxy_cfg.ROXY_KEEP_BROWSER_OPEN):
@@ -3194,6 +3324,7 @@ def run_roxy_codex_oauth(
     reuse_existing_profile: bool = False,
     clear_existing_state: bool = True,
     totp_secret: str | None = None,
+    sms_attempts_used: int = 0,
 ) -> dict:
     """指纹浏览器 Codex OAuth 入口；CPA callback 409 timeout 时重新开启一轮授权。"""
     from core import codex_oauth as proto
@@ -3216,6 +3347,7 @@ def run_roxy_codex_oauth(
             reuse_existing_profile=reuse_existing_profile,
             clear_existing_state=clear_existing_state,
             totp_secret=totp_secret,
+            sms_attempts_used=sms_attempts_used,
         )
         last_result = result
         if result.get("ok"):

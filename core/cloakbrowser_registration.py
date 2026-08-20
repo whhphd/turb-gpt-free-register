@@ -10,7 +10,7 @@ from config import cloakbrowser as _cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.cloakbrowser_driver import build_cloak_driver
-from core.email_provider import wait_for_otp, resolve_email_source
+from core.email_provider import wait_for_otp, resolve_email_source, registration_otp_attempts
 from core.humanize import delay as human_delay
 
 # 复用 Roxy 注册流程里已维护好的页面操作函数。
@@ -64,7 +64,7 @@ def run_cloak_registration(
         _check_manual_stop()
 
         current_otp = otp_code
-        max_otp_attempts = 3
+        max_otp_attempts = registration_otp_attempts(email)
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Cloak注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
@@ -306,7 +306,7 @@ def run_cloak_registration(
         logger.debug("[Cloak注册] 失败详情", exc_info=True)
         err_text = f"{type(exc).__name__}: {str(exc)[:300]}"
         try:
-            from core.email_provider import release_email
+            from core.email_provider import release_email, mark_mailcom_otp_miss
             from core.openai_auth import (
                 AccountUnusableError,
                 RateLimitError,
@@ -318,6 +318,8 @@ def run_cloak_registration(
                 release_email(email, status="disabled", note=f"自动停用: {str(exc)[:180]}")
             elif create_acknowledged:
                 release_email(email, status="failed", note=f"Cloak注册失败: {str(exc)[:180]}")
+            elif mark_mailcom_otp_miss(email, err_text):
+                logger.warning("[Cloak注册] mail.com 收不到验证码，已标失败：%s", email)
             elif isinstance(exc, RateLimitError):
                 # 限流可重试：保持 used，交给 registration_service 退避后换出口重试
                 logger.info("[Cloak注册] 限流失败，保持邮箱 used 供任务重试：%s", email)

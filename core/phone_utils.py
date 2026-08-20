@@ -311,6 +311,7 @@ def classify_phone_failure_reason(
             return "whatsapp_channel"
         return ""
     if any(k in probe for k in (
+        "fraud_guard", "suspicious behavior", "phone numbers similar",
         "cannot send", "could not send", "unable to send", "failed to send", "send failed",
         "发送失败", "无法发送", "不能发送", "送信できません", "送信に失敗",
     )):

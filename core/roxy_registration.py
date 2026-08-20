@@ -12,7 +12,7 @@ from pathlib import Path
 from config import roxybrowser as _cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
-from core.email_provider import wait_for_otp, resolve_email_source
+from core.email_provider import wait_for_otp, resolve_email_source, registration_otp_attempts
 from core.humanize import delay as human_delay
 from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
 
@@ -3290,7 +3290,7 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
         _check_manual_stop()
 
         current_otp = otp_code
-        max_otp_attempts = 3
+        max_otp_attempts = registration_otp_attempts(email)
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Roxy注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
@@ -3507,7 +3507,7 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
         err_text = f"{type(exc).__name__}: {str(exc)[:300]}"
         # 废号立即 disabled；可重试失败保持 used 供任务层重试；已创建则 failed。
         try:
-            from core.email_provider import release_email
+            from core.email_provider import release_email, mark_mailcom_otp_miss
             from core.openai_auth import (
                 AccountUnusableError,
                 RateLimitError,
@@ -3518,6 +3518,8 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
                 release_email(email, status="disabled", note=f"自动停用: {str(exc)[:180]}")
             elif create_acknowledged:
                 release_email(email, status="failed", note=f"Roxy注册失败: {str(exc)[:180]}")
+            elif mark_mailcom_otp_miss(email, err_text):
+                logger.warning("[Roxy注册] mail.com 收不到验证码，已标失败：%s", email)
             elif isinstance(exc, RateLimitError):
                 logger.info("[Roxy注册] 限流失败，保持邮箱 used 供任务重试：%s", email)
             else:
