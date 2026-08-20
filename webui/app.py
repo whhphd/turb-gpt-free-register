@@ -11,6 +11,7 @@ Flask 本地控制台。
 默认绑定 127.0.0.1，仅本地访问。
 """
 import logging
+import gzip
 import threading
 import time
 import uuid
@@ -208,6 +209,35 @@ def _job_status_counts(rows: list[dict]) -> dict:
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
     _prepared_downloads: dict[str, dict] = {}
+
+    @app.after_request
+    def _compress_json_response(response: Response):
+        """默认对 JSON API 响应启用 gzip，减少本地前端拉取大列表的传输体积。"""
+        accept_encoding = (request.headers.get("Accept-Encoding") or "").lower()
+        # 默认开启 gzip：浏览器会自动带 gzip；本地脚本未带 Accept-Encoding 时也压缩。
+        # 只有客户端明确声明 identity 且没有 gzip 时，才按明文返回。
+        gzip_allowed = ("gzip" in accept_encoding) or (not accept_encoding)
+        if (
+            response.direct_passthrough
+            or response.headers.get("Content-Encoding")
+            or not gzip_allowed
+        ):
+            return response
+        mimetype = (response.mimetype or "").lower()
+        if mimetype != "application/json":
+            return response
+        data = response.get_data()
+        if not data or len(data) < 1024:
+            return response
+        compressed = gzip.compress(data, compresslevel=6)
+        if len(compressed) >= len(data):
+            return response
+        response.set_data(compressed)
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Content-Length"] = str(len(compressed))
+        vary = response.headers.get("Vary")
+        response.headers["Vary"] = "Accept-Encoding" if not vary else f"{vary}, Accept-Encoding"
+        return response
 
     def _put_prepared_download(content: bytes, filename: str, mimetype: str = "application/zip") -> str:
         now = time.time()
@@ -3117,7 +3147,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         acc = db.get_account_by_email(email)
         if acc is None:
             return jsonify({"ok": False, "error": f"账号不存在: {email}"}), 404
-        if (acc.get("codex_status") or "") == "deactivated":
+        if (acc.get("live_check_status") or "") == "deactivated":
             return jsonify({"ok": False, "error": "账号已废号，不能补跑 Codex"}), 409
         if not _reserve_codex_retry(email):
             return jsonify({"ok": False, "error": "该账号正在补跑中，请稍候"}), 409
@@ -3169,7 +3199,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             if not email:
                 skipped.append({"id": acc_id, "reason": "邮箱为空"})
                 continue
-            if (acc.get("codex_status") or "") == "deactivated":
+            if (acc.get("live_check_status") or "") == "deactivated":
                 skipped.append({"id": acc_id, "email": email, "reason": "账号已废号"})
                 continue
             if not _reserve_codex_retry(email):

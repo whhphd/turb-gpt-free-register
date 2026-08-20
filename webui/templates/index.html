@@ -4461,7 +4461,7 @@ function openLog(jobId) {
   $('#logContent').textContent = '加载中…';
   pollLog();
   clearInterval(logTimer);
-  logTimer = setInterval(pollLog, 2000);
+  logTimer = setInterval(pollLog, 5000);
 }
 async function pollLog() {
   if (activeLogJob == null) return;
@@ -4493,6 +4493,10 @@ const ACCOUNTS_FILTERS = {
 };
 function getAccountsQuery() {
   const el = document.getElementById('qAccountsV2');
+  return (el ? el.value : '').trim();
+}
+function getAccountsCodexFilter() {
+  const el = document.getElementById('codexStatusFilterV2');
   return (el ? el.value : '').trim();
 }
 function getCodexBulkWorkers() {
@@ -4627,6 +4631,7 @@ async function loadAccounts() {
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
+    const codex = getAccountsCodexFilter();
     const q = getAccountsQuery();
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
@@ -4653,6 +4658,7 @@ async function pollAccountPlanStatuses() {
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
+    const codex = getAccountsCodexFilter();
     const q = getAccountsQuery();
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
@@ -4702,7 +4708,7 @@ function _codexCell(r) {
   if (s === 'stopped') return `<span class="pill status-used"${titleAttr}>已停止</span>`;
   if (s === 'failed') return `<span class="pill status-failed"${titleAttr}>失败</span>`;
   if (s === 'skipped') return `<span class="pill status-used">已跳过</span>`;
-  if (s === 'deactivated') return `<span class="pill status-failed" title="账号已被 OpenAI 删除/停用/封禁，无法授权">已废号</span>`;
+  if (s === 'deactivated') return `<span class="pill status-failed" title="授权记录显示账号异常，建议通过查活确认账号状态">失败</span>`;
   return `<span class="muted">-</span>`;
 }
 function _codexCellV2(r) {
@@ -4714,7 +4720,7 @@ function _codexCellV2(r) {
   if (s === 'stopped') return `<span class="acc-v2-codex is-mute"${titleAttr}>已停止</span>`;
   if (s === 'failed') return `<span class="acc-v2-codex is-fail"${titleAttr}>失败</span>`;
   if (s === 'skipped') return `<span class="acc-v2-codex is-skip"${titleAttr}>已跳过</span>`;
-  if (s === 'deactivated') return `<span class="acc-v2-codex is-fail" title="账号已被 OpenAI 删除/停用/封禁，无法授权">已废号</span>`;
+  if (s === 'deactivated') return `<span class="acc-v2-codex is-fail" title="授权记录显示账号异常，建议通过查活确认账号状态">失败</span>`;
   return `<span class="acc-v2-muted">-</span>`;
 }
 function _codexAgentCell(r) {
@@ -5069,7 +5075,7 @@ function openRetryLog(email) {
   $('#retryLogContent').textContent = '加载中…';
   pollRetryLog();
   clearInterval(retryLogTimer);
-  retryLogTimer = setInterval(pollRetryLog, 2000);
+  retryLogTimer = setInterval(pollRetryLog, 5000);
 }
 async function pollRetryLog() {
   if (!retryLogEmail) return;
@@ -5098,7 +5104,7 @@ function openLiveLog(email) {
   $('#liveLogContent').textContent = '加载中…';
   pollLiveLog();
   clearInterval(liveLogTimer);
-  liveLogTimer = setInterval(pollLiveLog, 2000);
+  liveLogTimer = setInterval(pollLiveLog, 5000);
 }
 async function pollLiveLog() {
   if (!liveLogEmail) return;
@@ -5306,7 +5312,7 @@ async function onAccountsBodyClick(e) {
     const poll = setInterval(async () => {
       const acc = ACCOUNTS.find(a => a.email === email);
       if (!acc || acc.codex_status !== 'retrying') clearInterval(poll);
-    }, 5000);
+    }, 15000);
     setTimeout(() => clearInterval(poll), 5 * 60 * 1000);
   } catch(err) {
     showToast('触发补跑失败: ' + err.message);
@@ -5388,6 +5394,12 @@ async function refreshAccountsList(btn) {
     PAGERS.accounts.page = 1;
     loadAccounts();
   }, 250));
+  const codexV2 = $('#codexStatusFilterV2');
+  if (codexV2) codexV2.addEventListener('change', () => {
+    ACCOUNT_SELECTED.clear();
+    PAGERS.accounts.page = 1;
+    loadAccounts();
+  });
 
   const archivedV2 = $('#showArchivedAccountsV2');
   if (archivedV2) archivedV2.addEventListener('click', () => {
@@ -6176,7 +6188,7 @@ async function retrySelectedCodex() {
   if (workersElV2) workersElV2.value = workers;
   const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
   const retryingCount = selectedAccounts.filter(a => (a.codex_status || '') === 'retrying').length;
-  const deactivatedCount = selectedAccounts.filter(a => (a.codex_status || '') === 'deactivated').length;
+  const deactivatedCount = selectedAccounts.filter(a => (a.live_check_status || '') === 'deactivated').length;
   let msg = `批量补跑选中的 ${ids.length} 个账号 Codex 授权？
 
 并发线程数：${workers}
@@ -6200,7 +6212,7 @@ async function retrySelectedCodex() {
     loadAccounts();
     const first = (r.started || [])[0];
     if (first && first.email) openRetryLog(first.email);
-    const poll = setInterval(loadAccounts, 5000);
+    const poll = setInterval(loadAccounts, 15000);
     setTimeout(() => clearInterval(poll), 10 * 60 * 1000);
   } catch(err) {
     showToast('批量补跑失败: ' + err.message);
@@ -9799,9 +9811,9 @@ document.addEventListener('click', (e) => {
 // ---------- 初始化 ----------
 loadSummary();
 activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false);
-jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 3000);
-setInterval(loadSummary, 5000);
-setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 2000);
+jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 10000);
+setInterval(loadSummary, 30000);
+setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 10000);
 </script>
 </body>
 </html>
