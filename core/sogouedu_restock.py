@@ -1048,6 +1048,19 @@ def _schedule_followup_order(
     }
 
 
+def _is_definitive_create_failure(exc: Exception) -> bool:
+    """Return whether a failed create request is safe to route elsewhere."""
+    status_code = getattr(exc, "status_code", None)
+    try:
+        status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code = None
+    if status_code is not None:
+        return 400 <= status_code < 500 and status_code not in {408, 409, 425, 429}
+    message = str(exc).strip().lower()
+    return "insufficient balance" in message or "余额不足" in message
+
+
 def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     order = state.get("current_order")
     if not isinstance(order, dict):
@@ -1057,6 +1070,17 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
     provider = str(order.get("provider") or "sogou").strip().lower()
     order_id = str(order.get("order_id") or "").strip()
     if not order_id:
+        if provider not in _provider_names(order_cfg):
+            followup = _schedule_followup_order(
+                order,
+                order_cfg,
+                state,
+                remaining=max(1, int(order.get("quantity") or 0)),
+                reason=f"{provider}:disabled_before_create",
+                force_next_provider=True,
+            )
+            if followup:
+                return followup
         key = str(order.get("idempotency_key") or "").strip()
         if not key:
             key = f"{_provider_order_key(provider)}-{uuid.uuid4().hex}"
@@ -1064,7 +1088,25 @@ def _process_current_order(client: Any, cfg: dict[str, Any], state: dict[str, An
             state["current_order"] = order
             _save_state(state)
         product = _provider_product(provider, order_cfg, order)
-        response = client.create_order(product, int(order["quantity"]), idempotency_key=key)
+        try:
+            response = client.create_order(product, int(order["quantity"]), idempotency_key=key)
+        except (SogouEduError, BugTeamError) as exc:
+            if _is_definitive_create_failure(exc):
+                followup = _schedule_followup_order(
+                    order,
+                    order_cfg,
+                    state,
+                    remaining=max(1, int(order.get("quantity") or 0)),
+                    reason=f"{provider}:create_failed:{getattr(exc, 'status_code', None) or 'business'}",
+                    force_next_provider=True,
+                )
+                if followup:
+                    followup["status_code"] = getattr(exc, "status_code", None)
+                    return followup
+            order["last_error"] = f"{type(exc).__name__}: {exc}"
+            order["updated_at"] = _now()
+            _save_state(state)
+            raise
         order_id = _order_id(response)
         if not order_id:
             order["last_error"] = "订单响应缺少 order_id"

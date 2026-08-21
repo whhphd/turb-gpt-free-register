@@ -826,6 +826,79 @@ class SogouRestockTests(unittest.TestCase):
         pushed.assert_called_once()
         self.assertIsNone(restock._load_state()["current_order"])
 
+    def test_disabled_provider_before_create_falls_back_without_api_call(self):
+        cfg = restock.normalize_restock_config({
+            "provider_priority": ["sogou", "bugteam"],
+            "enabled_providers": ["bugteam"],
+        })
+        state = restock._load_state()
+        state["current_order"] = {
+            "provider": "sogou",
+            "provider_index": 0,
+            "provider_retry_count": 0,
+            "quantity": 3,
+            "status": "creating",
+            "idempotency_key": "sogou-stale",
+        }
+        fake = FakeClient()
+
+        result = restock._process_current_order(fake, cfg, state)
+
+        self.assertEqual(result["action"], "provider_fallback_scheduled")
+        self.assertEqual(result["provider"], "bugteam")
+        self.assertEqual(result["reason"], "sogou:disabled_before_create")
+        self.assertEqual(fake.created, [])
+        self.assertEqual(state["current_order"]["provider"], "bugteam")
+        self.assertEqual(state["current_order"]["quantity"], 3)
+
+    def test_definitive_create_failure_falls_back_but_network_error_retries(self):
+        cfg = restock.normalize_restock_config({
+            "provider_priority": ["sogou", "bugteam"],
+            "enabled_providers": ["sogou", "bugteam"],
+        })
+        state = restock._load_state()
+        state["current_order"] = {
+            "provider": "sogou",
+            "provider_index": 0,
+            "provider_retry_count": 0,
+            "quantity": 3,
+            "status": "creating",
+            "idempotency_key": "sogou-balance",
+        }
+        fake = FakeClient()
+        with patch.object(
+            fake,
+            "create_order",
+            side_effect=restock.SogouEduError("insufficient balance", status_code=402),
+        ):
+            result = restock._process_current_order(fake, cfg, state)
+
+        self.assertEqual(result["action"], "provider_fallback_scheduled")
+        self.assertEqual(result["provider"], "bugteam")
+        self.assertEqual(result["status_code"], 402)
+
+        network_state = restock._load_state()
+        network_state["current_order"] = {
+            "provider": "sogou",
+            "provider_index": 0,
+            "provider_retry_count": 0,
+            "quantity": 3,
+            "status": "creating",
+            "idempotency_key": "sogou-network",
+        }
+        with patch.object(
+            fake,
+            "create_order",
+            side_effect=restock.SogouEduError("connection reset"),
+        ):
+            with self.assertRaises(restock.SogouEduError):
+                restock._process_current_order(fake, cfg, network_state)
+
+        current = network_state["current_order"]
+        self.assertEqual(current["provider"], "sogou")
+        self.assertEqual(current["idempotency_key"], "sogou-network")
+        self.assertIn("connection reset", current["last_error"])
+
     def test_sogou_cancel_order_uses_manual_order_endpoint(self):
         client = SogouEduClient()
         with patch.object(client, "_request_json", return_value={"status": "cancelled"}) as request:
